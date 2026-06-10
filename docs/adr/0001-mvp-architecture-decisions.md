@@ -4,7 +4,7 @@
 
 ## Context
 
-The PRD ([`OpenFab_MVP_Design_and_PRD.md`](../../OpenFab_MVP_Design_and_PRD.md)) asks
+The PRD ([`OpenFab_MVP_Design_and_PRD.md`](../OpenFab_MVP_Design_and_PRD.md)) asks
 for a Rust fab that turns a spec into a signed, attributed, gated software product, on a
 swappable base and forge. This build was done in one autonomous overnight session with a
 hard requirement: a **runnable end-to-end demo** the next morning, on a local machine

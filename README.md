@@ -11,7 +11,7 @@ Sigstore · DID); the novel, durable thing is the **integrated fab** and the
 
 This repo is the **Phase-0 hand-built MVP (v0.1)**, in Rust. New here? Start with the
 [**OpenFab Overview**](docs/OpenFab_Overview.md) (the problem, the gap, and how OpenFab
-fills it). Then see [`OpenFab_MVP_Design_and_PRD.md`](OpenFab_MVP_Design_and_PRD.md)
+fills it). Then see [`OpenFab_MVP_Design_and_PRD.md`](docs/OpenFab_MVP_Design_and_PRD.md)
 (source of truth) and [`AGENTS.md`](AGENTS.md) (how to work here).
 
 > **Status (v0.2, this build):** Core spec-cycle engine, `openfab/generation` in-toto
@@ -182,7 +182,7 @@ verifiable work*, not asserted in a separate database.
 
 Two orthogonal pluggable axes around a stable Core (PRD §3):
 
-![OpenFab workflow and pluggable architecture](openfab_workflow_pluggable_architecture.svg)
+![OpenFab workflow and pluggable architecture](docs/img/openfab_workflow_pluggable_architecture.svg)
 
 - **Core (the moat, base/forge-independent):** `src/core/` — `spec` · `identity`
   (did:key) · `provenance` (in-toto/SLSA + `openfab/generation`) · `sbom` · `trust`
@@ -240,6 +240,6 @@ CLIs. Each lighter choice names its production-grade swap so nothing is overstat
 | acceptance re-run = reproducibility | Nix flakes for bit-identical builds (v0.2) |
 
 See [`docs/adr/0001-mvp-architecture-decisions.md`](docs/adr/0001-mvp-architecture-decisions.md)
-for why, and [`HANDOFF.md`](HANDOFF.md) for done / next / open questions.
+for why, and [`HANDOFF.md`](docs/HANDOFF.md) for done / next / open questions.
 
 License: Apache-2.0 · Governance: AOSF (aosf.ai) · Implements: SLSA · in-toto · Sigstore · DID.

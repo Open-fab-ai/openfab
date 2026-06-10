@@ -17,7 +17,7 @@ demo/run_web_demo.sh       # builds + serves the UI → open http://127.0.0.1:87
 In the browser: intent → pick base (×5) + forge (×4) → **Fabricate** → watch the live
 workflow → gate **BLOCKS** → **Run the app** → sign off as alice & bob → merges → inspect
 software + provenance → **Reproduce & verify** → **Refine** to iterate. Walkthrough:
-[`docs/WEB.md`](docs/WEB.md). The scriptable CLI demo still works: `demo/run_demo.sh`
+[`docs/WEB.md`](WEB.md). The scriptable CLI demo still works: `demo/run_demo.sh`
 (claude) or `demo/run_demo.sh <framework-base>`.
 
 ## Done (v0.2 additions on top of v0.1)
@@ -60,7 +60,7 @@ instance** (a real local git repo, labelled as such). Connect a native runtime /
 forge via its env vars and the same run flips to `native` / `live` with no code change.
 Nothing claims to be what it isn't.
 
-## Key decisions (full rationale in [ADR 0001](docs/adr/0001-mvp-architecture-decisions.md))
+## Key decisions (full rationale in [ADR 0001](adr/0001-mvp-architecture-decisions.md))
 
 Both versions implement the moat with the **smallest dependency set that satisfies the
 spec** and shell out to `git`/the base/`curl`, naming each lighter choice's production

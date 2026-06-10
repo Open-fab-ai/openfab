@@ -10,7 +10,7 @@ intent: >
 language: python
 target_dir: app
 context:
-  - "OpenFab_MVP_Design_and_PRD.md"
+  - "docs/OpenFab_MVP_Design_and_PRD.md"
 assumptions:
   - "Celsius/Fahrenheit/Kelvin only; standard formulas; print a numeric result."
 acceptance:

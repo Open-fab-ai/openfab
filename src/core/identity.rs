@@ -5,7 +5,7 @@
 //! for ed25519 is just `did:key:z` + base58btc(0xed01 ‖ pubkey); signing is raw
 //! ed25519. The *public key is embedded in the DID*, so verification needs no
 //! keystore — exactly the portable, air-gapped property the PRD wants. Production
-//! swap: Sigstore OIDC for human identities (recorded in `OpenFab_MVP_Design_and_PRD.md` §5).
+//! swap: Sigstore OIDC for human identities (recorded in `docs/OpenFab_MVP_Design_and_PRD.md` §5).
 //!
 //! Private seeds are persisted under `.openfab/` and are gitignored — never committed.
 

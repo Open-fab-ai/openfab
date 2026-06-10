@@ -1,6 +1,6 @@
 # AGENTS.md — working in the OpenFab repo
 
-OpenFab is an open-source software **fab**: natural language in, trustworthy software out. It composes mature OSS + open standards (SLSA / in-toto / Sigstore / C2PA / DID) into a **reproducible, auditable, cross-forge** fab running on a **swappable agent base**. **Read `OpenFab_MVP_Design_and_PRD.md` first — it is the source of truth.** This file is how to *work* in the repo.
+OpenFab is an open-source software **fab**: natural language in, trustworthy software out. It composes mature OSS + open standards (SLSA / in-toto / Sigstore / C2PA / DID) into a **reproducible, auditable, cross-forge** fab running on a **swappable agent base**. **Read `docs/OpenFab_MVP_Design_and_PRD.md` first — it is the source of truth.** This file is how to *work* in the repo.
 
 ## Golden rules
 - **Base-agnostic.** Core never calls a specific base (AgentScope / HiClaw / agent-chat / OpenHands) directly — only through `ports::BasePort`. Same for git hosts via `ports::ForgePort`. No Matrix/AgentScope types leak into `core/`.

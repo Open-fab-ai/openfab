@@ -13,7 +13,7 @@ intent: >
 language: rust
 target_dir: .
 context:
-  - "OpenFab_MVP_Design_and_PRD.md"
+  - "docs/OpenFab_MVP_Design_and_PRD.md"
   - "AGENTS.md"
 acceptance:
   - id: build

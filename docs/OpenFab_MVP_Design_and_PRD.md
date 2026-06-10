@@ -3,7 +3,7 @@
 **Status:** v0.2 implemented (this repo) · **License:** Apache-2.0 · **Governance:** AOSF (aosf.ai) — neutral foundation
 **Site:** open-fab.ai · **Implements:** SLSA · in-toto · Sigstore · C2PA · DID
 
-This document captures OpenFab's architecture decisions and its recursive (self-building) development method, and doubles as the product spec (PRD) for the MVP. It is the **design intent / north star**; for exactly what ships today and where each production-grade component is still a documented swap, see **§0 Implementation status** immediately below (and [`README.md`](README.md), [ADR 0001](docs/adr/0001-mvp-architecture-decisions.md), [ADR 0002](docs/adr/0002-web-ui-and-base-forge-matrix.md)). Keep it short; detail lives in code and specs.
+This document captures OpenFab's architecture decisions and its recursive (self-building) development method, and doubles as the product spec (PRD) for the MVP. It is the **design intent / north star**; for exactly what ships today and where each production-grade component is still a documented swap, see **§0 Implementation status** immediately below (and [`README.md`](../README.md), [ADR 0001](adr/0001-mvp-architecture-decisions.md), [ADR 0002](adr/0002-web-ui-and-base-forge-matrix.md)). Keep it short; detail lives in code and specs.
 
 ---
 
@@ -51,7 +51,7 @@ OpenFab *composes* existing primitives (orchestrators, signing, provenance, iden
 
 ## 3. Architecture
 
-![OpenFab workflow and pluggable architecture](openfab_workflow_pluggable_architecture.svg)
+![OpenFab workflow and pluggable architecture](img/openfab_workflow_pluggable_architecture.svg)
 
 Two orthogonal pluggable axes (Base down, Forge across) around a stable Core. NL intent and all human feedback enter through the **base's comms channel** — when the base is HiClaw, that is the **Matrix UI (Element)**, and the Matrix room timeline doubles as the human-readable decision log + audit trail.
 

@@ -156,7 +156,7 @@ reproduce/verify. Each lighter v0.1/v0.2 choice (did:key, gated-host sandbox, SP
 names its production-grade swap (Sigstore, Podman/gVisor, Syft) — nothing is overstated.
 
 - **Try it:** `git clone` → `demo/run_web_demo.sh` → open the web UI.
-- **Read it:** [`README.md`](../README.md) · [`OpenFab_MVP_Design_and_PRD.md`](../OpenFab_MVP_Design_and_PRD.md)
+- **Read it:** [`README.md`](../README.md) · [`OpenFab_MVP_Design_and_PRD.md`](OpenFab_MVP_Design_and_PRD.md)
 - **Build on it:** add a Base adapter, a Forge adapter, a policy, or a conformance profile.
 - **Web:** [open-fab.ai](https://open-fab.ai) · **Code:** [github.com/open-fab-ai/openfab](https://github.com/open-fab-ai/openfab)
 

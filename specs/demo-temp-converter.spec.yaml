@@ -1,0 +1,26 @@
+# OpenFab demo spec — the "natural language in, trustworthy software out" showcase.
+# `intent` is the NL ask; `acceptance` is the machine-checkable contract (PRD §4).
+id: demo-temp-converter
+version: 1
+intent: >
+  Build a small command-line temperature converter. It takes a number and a
+  conversion code (one of c2f, f2c, c2k, k2c) and prints the converted value.
+  It must also support a --selftest flag that checks all conversions and exits
+  with a non-zero status if any result is wrong.
+language: python
+target_dir: app
+context:
+  - "OpenFab_MVP_Design_and_PRD.md"
+assumptions:
+  - "Celsius/Fahrenheit/Kelvin only; standard formulas; print a numeric result."
+acceptance:
+  - id: a1-selftest
+    check: "python3 app/convert.py --selftest"
+    must_pass: true
+  - id: a2-c2f
+    check: "python3 app/convert.py 100 c2f | grep -q 212"
+    must_pass: true
+  - id: a3-f2c
+    check: "python3 app/convert.py 32 f2c | grep -q '^0'"
+    must_pass: true
+human_signoff_required: true

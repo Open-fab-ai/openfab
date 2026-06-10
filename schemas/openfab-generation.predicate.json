@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://openfab.ai/attestation/generation/v0.1",
+  "title": "openfab/generation in-toto predicate",
+  "description": "OpenFab's custom in-toto predicate (PRD §5, 'genuinely new code' #2). It records the agent DID, model, prompt hash, params, and changed file/line ranges with an ai/human author tag — enabling AI-vs-Human attribution and spec-as-contract. Mirrors core::provenance::OpenfabGeneration.",
+  "type": "object",
+  "required": ["spec_ref", "builder", "agent", "prompt_sha256", "generated", "acceptance_passed", "timestamp"],
+  "properties": {
+    "spec_ref": { "type": "string", "description": "id#vN — the spec this was built from" },
+    "builder": {
+      "type": "object",
+      "required": ["id", "base"],
+      "properties": {
+        "id": { "type": "string", "examples": ["openfab/0.1"] },
+        "base": { "type": "string", "examples": ["claude-cli", "mock"] }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["did", "base", "model"],
+      "properties": {
+        "did": { "type": "string", "pattern": "^did:key:" },
+        "base": { "type": "string" },
+        "model": { "type": "string" }
+      }
+    },
+    "prompt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "params": { "type": "object" },
+    "generated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "lines", "sha256", "author"],
+        "properties": {
+          "path": { "type": "string" },
+          "lines": { "type": "string", "examples": ["1-42"] },
+          "sha256": { "type": "string" },
+          "author": { "type": "string", "enum": ["ai", "human"] }
+        }
+      }
+    },
+    "materials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["uri"],
+        "properties": {
+          "uri": { "type": "string" },
+          "sha256": { "type": "string" }
+        }
+      }
+    },
+    "acceptance_passed": { "type": "boolean" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "signoffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["did", "name", "timestamp"],
+        "properties": {
+          "did": { "type": "string", "pattern": "^did:key:" },
+          "name": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

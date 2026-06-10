@@ -1,0 +1,25 @@
+# Self-hosting spec (PRD §6) — OpenFab developing OpenFab.
+# Pointed at a clone of OpenFab's own repo, OpenFab implements a change to itself and
+# verifies it with the project's own checks (cargo) in the sandbox, then gates the merge
+# on N-of-M human sign-off — exactly the trust model that guards untrusted contributions.
+id: openfab-selfdev
+version: 1
+intent: >
+  Through OpenFab, add a capability to OpenFab itself: a new integration test
+  (tests/selfdev_provenance_roundtrip.rs) that exercises OpenFab Core via the public
+  library API — it asserts that a generation attestation signs and verifies, that a human
+  sign-off is recorded, and that tampering with signed content breaks verification. This
+  is OpenFab building OpenFab, gated by OpenFab's own trust model.
+language: rust
+target_dir: tests
+context:
+  - "OpenFab_MVP_Design_and_PRD.md"
+  - "AGENTS.md"
+acceptance:
+  - id: a1-build
+    check: "cargo build --quiet"
+    must_pass: true
+  - id: a2-selfdev-test
+    check: "cargo test --quiet --test selfdev_provenance_roundtrip"
+    must_pass: true
+human_signoff_required: true

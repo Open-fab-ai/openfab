@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# macOS junk
+.DS_Store
+**/.DS_Store
+
+# Local editor/agent state (machine-specific paths — never publish)
+.claude/
+
+# OpenFab runtime state: private signing seeds never get committed (AGENTS.md safety rule).
+**/.openfab/identity/
+**/.openfab/maintainers/
+.openfab/identity/
+.openfab/maintainers/
+
+# Demo scratch repos (the local "forges" the demo spins up)
+/demo/.work/
+/demo/out/

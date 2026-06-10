@@ -1,0 +1,45 @@
+[package]
+name = "openfab"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "Apache-2.0"
+description = "OpenFab — an open-source software fab: natural language in, trustworthy software out."
+repository = "https://github.com/open-fab-ai/openfab"
+
+# A library target so integration tests — and, in Phase 1, OpenFab's own self-development
+# (PRD §6) — can exercise the real Core API (`use openfab::core::...`).
+[lib]
+name = "openfab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openfab"
+path = "src/main.rs"
+
+# Dependency policy (AGENTS.md): pure-Rust, light, fast-compiling crates only, each justified.
+# We deliberately AVOID the heavy production crates for v0.1 and shell out instead, or
+# implement the small primitive directly. The production swaps are documented inline.
+[dependencies]
+anyhow = "1"            # error context (R5: errors carry context)
+thiserror = "1"        # typed errors at module boundaries
+serde = { version = "1", features = ["derive"] }   # spec + attestation (de)serialization
+serde_json = "1"       # in-toto/SLSA attestations are signed JSON
+serde_yaml = "0.9"     # spec format is YAML (PRD §4)
+clap = { version = "4", features = ["derive"] }    # CLI
+ed25519-dalek = "2"    # did:key identity + attestation signing (prod swap: sigstore/cosign)
+sha2 = "0.10"          # content + prompt hashing
+hex = "0.4"            # hash encoding
+base64 = "0.22"        # signature encoding
+bs58 = "0.5"           # did:key multibase (base58btc) encoding
+getrandom = "0.2"      # keypair seed (system CSPRNG)
+tiny_http = "0.12"     # web UI + JSON API (blocking, no async runtime — fits the single-binary posture)
+
+[dev-dependencies]
+tempfile = "3"         # isolated workdirs in tests
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 2

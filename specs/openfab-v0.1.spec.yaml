@@ -1,0 +1,28 @@
+# The spec for OpenFab itself (bootstrap / self-hosting — PRD §6, §7).
+# This is the spec a Phase-1 OpenFab would run *on its own repo* to add the next
+# capability through OpenFab (gated by the same trust model). Kept here as the
+# reference target for recursive development.
+id: openfab-v0.1
+version: 1
+intent: >
+  OpenFab Core (Rust) + CLI: on a forge, `openfab run <spec>` dispatches a coding
+  agent to implement a spec'd task, verifies acceptance in a sandbox, emits a signed
+  in-toto/SLSA attestation + SBOM (with agent DID + AI/Human attribution), commits
+  portable provenance, opens a PR, and requires N-of-M human sign-off — identical
+  behavior across forges and across swappable bases.
+language: rust
+target_dir: .
+context:
+  - "OpenFab_MVP_Design_and_PRD.md"
+  - "AGENTS.md"
+acceptance:
+  - id: build
+    check: "cargo build --quiet"
+    must_pass: true
+  - id: clippy
+    check: "cargo clippy --all-targets --all-features -- -D warnings"
+    must_pass: true
+  - id: tests
+    check: "cargo test --quiet"
+    must_pass: true
+human_signoff_required: true

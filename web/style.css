@@ -108,6 +108,17 @@ textarea:focus, input:focus, select:focus { outline: none; border-color: var(--a
 .pill.blocked { color: var(--warn); border-color: #5e521f; background: #20200b; }
 .pill.accepted, .pill.merged { color: var(--ok); border-color: #1f5e4b; background: #0e201a; }
 .pill.failed { color: var(--bad); border-color: #5e2222; background: #200d0d; }
+/* draft = un-attested fast loop — must read as clearly NOT a certified release */
+.pill.draft { color: #ffb454; border-color: #6b4a1f; background: #241a0b; }
+.pill.draft::before { content: "⚡ "; }
+/* apps list */
+.approw { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+.approw:first-child { border-top: none; }
+.appmeta { min-width: 0; }
+.appname { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appsub { font-size: 11px; margin-top: 2px; }
+.appbtns { display: flex; gap: 5px; flex: none; }
+.appbtns .btn { width: auto; padding: 4px 9px; }
 .stepper { display: flex; gap: 6px; flex: 1; flex-wrap: wrap; }
 .step { font-size: 11px; color: var(--faint); padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line); }
 .step.done { color: var(--ok); border-color: #1f5e4b; }

@@ -17,7 +17,7 @@ use crate::core::trust::{self, Policy, TrustInput};
 use crate::core::{conformance, sha256_hex};
 use crate::ports::forge::Trailers;
 use crate::runstate::{self, RunRecord};
-use crate::spec_cycle::{self, CycleConfig};
+use crate::spec_cycle::{self, CycleConfig, RunMode};
 
 /// Inputs to start a run (from the CLI or the web form).
 pub struct RunRequest {
@@ -31,6 +31,8 @@ pub struct RunRequest {
     pub gate_mode: String,
     /// "provider · model" when the spec was LLM-authored (shown in the timeline).
     pub authored_by: Option<String>,
+    /// Draft (fast, un-attested) vs Release (full ceremony). Defaults to Release.
+    pub mode: RunMode,
 }
 
 /// Author a spec from a natural-language intent using the LLM (the Base). The user only
@@ -78,6 +80,7 @@ pub fn build(
     forge_kind: &str,
     forge_name: Option<String>,
     gate_mode: &str,
+    mode: RunMode,
     policy: &Policy,
 ) -> Result<RunRecord> {
     let (spec, model, provider) = author_spec(intent)?;
@@ -92,6 +95,7 @@ pub fn build(
             run_id: Some(run_id),
             gate_mode: gate_mode.to_string(),
             authored_by: Some(format!("{provider} · {model}")),
+            mode,
         },
         policy,
     )
@@ -101,12 +105,14 @@ pub fn build(
 /// acceptance criteria)** so the new requirement is actually captured + tested, and
 /// rebuild as v→v+1. This is why a refine genuinely changes the software (issue: a refine
 /// that kept the old acceptance just rebuilt to the same contract).
+#[allow(clippy::too_many_arguments)]
 pub fn refine(
     repo: &Path,
     prior_run: &str,
     note: &str,
     run_id: String,
     base: &str,
+    mode: RunMode,
     policy: &Policy,
 ) -> Result<RunRecord> {
     let prior = runstate::load_run(repo, prior_run)?;
@@ -133,6 +139,7 @@ pub fn refine(
             authored_by: Some(format!(
                 "{provider} · {model} (re-authored from your feedback)"
             )),
+            mode,
         },
         policy,
     )
@@ -211,6 +218,66 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
         run_id: req.run_id,
         gate_mode: req.gate_mode.clone(),
         authored_by: req.authored_by.clone(),
+        mode: req.mode,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromoteOutcome {
+    pub draft_run: String,
+    pub release_run: String,
+    pub status: String,
+    pub accepted: bool,
+}
+
+/// Reserve the release run id for promoting `draft_run` (so the web API can return it and
+/// poll while the full ceremony runs in the background).
+pub fn reserve_promote_run_id(repo: &Path, draft_run: &str) -> Result<String> {
+    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, draft_run)?)?;
+    Ok(reserve_run_id(&spec))
+}
+
+/// Promote a passing **draft** to a signed, gated **release** — the explicit trust
+/// checkpoint. The full ceremony runs ONCE here (re-generate under Release mode, sign
+/// in-toto/SLSA + SBOM, open the gated PR), so the attestation covers exactly what ships.
+/// Refuses a non-draft run or a draft whose acceptance failed — no vacuous promotion (R14).
+pub fn promote(
+    repo: &Path,
+    draft_run: &str,
+    release_run_id: String,
+    policy: &Policy,
+) -> Result<PromoteOutcome> {
+    let draft = runstate::load_run(repo, draft_run)?;
+    if draft.status != spec_cycle::DRAFT_STATUS {
+        bail!(
+            "run '{draft_run}' is not a draft (status: {}) — only drafts can be promoted",
+            draft.status
+        );
+    }
+    if !draft.acceptance_passed {
+        bail!("draft '{draft_run}' did not pass acceptance — fix it and re-draft before promoting");
+    }
+    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, draft_run)?)?;
+    let rec = start_run(
+        repo,
+        RunRequest {
+            spec,
+            base: draft.base_name.clone(),
+            forge_kind: effective_forge_kind(&draft),
+            forge_name: Some(draft.forge_name.clone()),
+            parent_run: Some(draft.run_id.clone()),
+            run_id: Some(release_run_id),
+            gate_mode: draft.gate_mode.clone(),
+            authored_by: Some(format!("promoted from draft {}", draft.run_id)),
+            mode: RunMode::Release,
+        },
+        policy,
+    )?;
+    Ok(PromoteOutcome {
+        draft_run: draft.run_id,
+        release_run: rec.run_id,
+        status: rec.status,
+        accepted: rec.accepted,
     })
 }
 
@@ -700,4 +767,161 @@ pub fn audit(repo: &Path, run: &str) -> Result<AuditTrail> {
             attributable provenance the EU Cyber Resilience Act (CRA) and SLSA expect."
             .into(),
     })
+}
+
+// --- app management (an "app" = a top-level spec + its refine versions) ---
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppInfo {
+    /// The app id = the spec id (shared across a build and all its refines).
+    pub id: String,
+    pub intent: String,
+    pub latest_run: String,
+    pub status: String,
+    pub versions: usize,
+    pub base: String,
+    pub forge: String,
+    pub created: String,
+}
+
+/// List apps in a workspace, grouping a build and its refine versions (which share the
+/// spec id) into one app. Newest first.
+pub fn apps(repo: &Path) -> Result<Vec<AppInfo>> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<RunRecord>> = BTreeMap::new();
+    for r in runstate::list_runs(repo)? {
+        let id = r
+            .spec_ref
+            .split('#')
+            .next()
+            .unwrap_or(&r.spec_ref)
+            .to_string();
+        groups.entry(id).or_default().push(r);
+    }
+    let mut out = vec![];
+    for (id, mut rs) in groups {
+        rs.sort_by(|a, b| a.created.cmp(&b.created));
+        let latest = rs.last().cloned().expect("group is non-empty");
+        let intent = runstate::load_run_spec_yaml(repo, &latest.run_id)
+            .ok()
+            .and_then(|y| Spec::from_yaml(&y).ok())
+            .map(|s| s.intent)
+            .unwrap_or_else(|| id.replace('-', " "));
+        out.push(AppInfo {
+            id,
+            intent,
+            latest_run: latest.run_id.clone(),
+            status: latest.status.clone(),
+            versions: rs.len(),
+            base: latest.base_name.clone(),
+            forge: latest.forge_name.clone(),
+            created: latest.created.clone(),
+        });
+    }
+    out.sort_by(|a, b| b.created.cmp(&a.created));
+    Ok(out)
+}
+
+/// Delete an app: every run version, its branch, and its committed provenance.
+pub fn delete_app(repo: &Path, id: &str) -> Result<usize> {
+    let mut n = 0;
+    for r in runstate::list_runs(repo)? {
+        if r.spec_ref.split('#').next() != Some(id) {
+            continue;
+        }
+        let _ = Command::new("git")
+            .args(["branch", "-D", &r.branch])
+            .current_dir(repo)
+            .output();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(repo, &r.run_id));
+        if !r.attestation_repo_path.is_empty() {
+            let _ = std::fs::remove_file(repo.join(&r.attestation_repo_path));
+        }
+        if !r.sbom_repo_path.is_empty() {
+            let _ = std::fs::remove_file(repo.join(&r.sbom_repo_path));
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Export a run's committed source into a stable per-app directory (for "open folder").
+pub fn export_app_dir(repo: &Path, run: &str) -> Result<std::path::PathBuf> {
+    let rec = runstate::load_run(repo, run)?;
+    let app_id = rec.spec_ref.split('#').next().unwrap_or(run);
+    let dest = repo.join(".openfab").join("apps").join(app_id);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest)?;
+    let ok = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "git -C '{}' archive '{}' | tar -x -C '{}'",
+            repo.display(),
+            rec.branch,
+            dest.display()
+        ))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        bail!("could not export the app's source");
+    }
+    Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runstate::RunRecord;
+
+    fn tmp_repo(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "openfab-promote-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn save_fake(repo: &Path, run_id: &str, status: &str, acceptance_passed: bool) {
+        let rec = RunRecord {
+            run_id: run_id.to_string(),
+            spec_ref: "demo#v1".to_string(),
+            base_name: "claude-cli".to_string(),
+            forge_kind: "local".to_string(),
+            forge_name: "github-local".to_string(),
+            base_runtime: "native".to_string(),
+            status: status.to_string(),
+            gate_mode: "solo".to_string(),
+            branch: format!("openfab/draft/{run_id}"),
+            pr_url: String::new(),
+            attestation_repo_path: String::new(),
+            sbom_repo_path: String::new(),
+            acceptance: vec![],
+            acceptance_passed,
+            accepted: false,
+            merged: false,
+            parent_run: None,
+            created: "t".to_string(),
+        };
+        runstate::save_run(repo, &rec, "id: demo\nversion: 1\nintent: t\n", "tl").unwrap();
+    }
+
+    #[test]
+    fn promote_refuses_non_draft_run() {
+        let repo = tmp_repo("nondraft");
+        save_fake(&repo, "r1", "blocked", true);
+        // A blocked/release run is not a draft → must not be promotable.
+        assert!(promote(&repo, "r1", "demo-v1-9".to_string(), &Policy::default()).is_err());
+    }
+
+    #[test]
+    fn promote_refuses_failed_draft() {
+        let repo = tmp_repo("faileddraft");
+        save_fake(&repo, "r2", spec_cycle::DRAFT_STATUS, false);
+        // A draft whose acceptance failed must not be promotable (no vacuous promotion, R14).
+        assert!(promote(&repo, "r2", "demo-v1-9".to_string(), &Policy::default()).is_err());
+    }
 }

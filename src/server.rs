@@ -28,6 +28,7 @@ use crate::core::spec::Spec;
 use crate::core::trust::Policy;
 use crate::ops;
 use crate::runstate;
+use crate::spec_cycle::RunMode;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -191,6 +192,18 @@ fn route(
             Ok(json_resp(200, &json!({ "stopped": true })))
         }
         (Method::Post, ["api", "runs", id, "feedback"]) => feedback(id, req, state),
+        (Method::Post, ["api", "runs", id, "promote"]) => promote_run(id, state),
+
+        // --- apps (each intent = a new app; refines are versions of it) ---
+        (Method::Get, ["api", "apps"]) => Ok(json_resp(200, &json!(ops::apps(&state.repo)?))),
+        (Method::Delete, ["api", "apps", id]) => {
+            let _g = state.lock.lock().unwrap();
+            Ok(json_resp(
+                200,
+                &json!({ "deleted": ops::delete_app(&state.repo, id)? }),
+            ))
+        }
+        (Method::Post, ["api", "apps", id, "open"]) => open_app(id, state),
 
         // --- reputation ---
         (Method::Get, ["api", "reputation"]) => reputation_view(state),
@@ -211,6 +224,11 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
     let forge = body["forge"].as_str().unwrap_or("github").to_string();
     let forge_name = body["forge_name"].as_str().map(String::from);
     let gate = body["gate"].as_str().unwrap_or("solo").to_string();
+    let mode = if body["mode"].as_str() == Some("draft") {
+        RunMode::Draft
+    } else {
+        RunMode::Release
+    };
 
     // Natural-language path: author + build in the background.
     if let Some(intent) = body["intent"]
@@ -232,6 +250,7 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
                 &f,
                 fname,
                 &g,
+                mode,
                 &st.policy,
             ) {
                 fail_run(&st, &rid, "authoring", &e);
@@ -255,6 +274,7 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
             run_id: Some(run_id.clone()),
             gate_mode: gate,
             authored_by: None,
+            mode,
         },
     );
     Ok(json_resp(200, &json!({ "run_id": run_id })))
@@ -269,6 +289,11 @@ fn feedback(
     let body = body_json(req)?;
     let note = body["note"].as_str().unwrap_or("").to_string();
     let base = body["base"].as_str().unwrap_or("claude").to_string();
+    let mode = if body["mode"].as_str() == Some("draft") {
+        RunMode::Draft
+    } else {
+        RunMode::Release
+    };
     let run_id = ops::reserve_refine_run_id(&state.repo, id)?;
 
     seed_status(state, &run_id, "re-authoring spec…", "authoring");
@@ -276,11 +301,47 @@ fn feedback(
     let (rid, prior, n, b) = (run_id.clone(), id.to_string(), note, base);
     thread::spawn(move || {
         let _guard = st.lock.lock().unwrap();
-        if let Err(e) = ops::refine(&st.repo, &prior, &n, rid.clone(), &b, &st.policy) {
+        if let Err(e) = ops::refine(&st.repo, &prior, &n, rid.clone(), &b, mode, &st.policy) {
             fail_run(&st, &rid, "re-authoring", &e);
         }
     });
     Ok(json_resp(200, &json!({ "run_id": run_id })))
+}
+
+/// Promote a draft to a signed release — the full ceremony, run in the background so the
+/// UI streams it (the new release run id is returned for polling).
+fn promote_run(id: &str, state: &Arc<State>) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
+    let run_id = ops::reserve_promote_run_id(&state.repo, id)?;
+    seed_status(
+        state,
+        &run_id,
+        "promoting draft → signed release…",
+        "queued",
+    );
+    let st = state.clone();
+    let (rid, draft) = (run_id.clone(), id.to_string());
+    thread::spawn(move || {
+        let _g = st.lock.lock().unwrap();
+        if let Err(e) = ops::promote(&st.repo, &draft, rid.clone(), &st.policy) {
+            fail_run(&st, &rid, "promote", &e);
+        }
+    });
+    Ok(json_resp(200, &json!({ "run_id": run_id })))
+}
+
+/// Open an app's source folder in the OS file manager (macOS Finder via `open`).
+fn open_app(id: &str, state: &Arc<State>) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
+    let _g = state.lock.lock().unwrap();
+    let app = ops::apps(&state.repo)?
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| anyhow::anyhow!("no such app"))?;
+    let dir = ops::export_app_dir(&state.repo, &app.latest_run)?;
+    let _ = Command::new("open").arg(&dir).status();
+    Ok(json_resp(
+        200,
+        &json!({ "path": dir.display().to_string() }),
+    ))
 }
 
 fn spawn_run(state: Arc<State>, req: ops::RunRequest) {
@@ -401,14 +462,11 @@ fn plan_launch(repo: &Path, port: u16) -> Option<(Vec<String>, PathBuf, String)>
         ("app/index.js", "node"),
         ("index.js", "node"),
     ];
-    for (f, runner) in candidates {
-        let p = repo.join(f);
-        if p.exists() && looks_like_server(&p) {
-            return Some((vec![runner.into(), f.into()], repo.to_path_buf(), f.into()));
-        }
-    }
-    // Static site: serve the directory that holds index.html (client-side SPAs).
-    for dir in ["app", "."] {
+    // Static site FIRST: most generated web apps are client-side SPAs (index.html + js +
+    // css). Serving the dir that holds index.html is robust and avoids running a stray /
+    // broken generated server file when a perfectly good static entry exists (the cause of
+    // a "Run the app" 404 when the model emitted both an index.html and a server.js).
+    for dir in ["app", "app/public", "public", "."] {
         if repo.join(dir).join("index.html").exists() {
             let label = if dir == "." {
                 "index.html".into()
@@ -427,6 +485,13 @@ fn plan_launch(repo: &Path, port: u16) -> Option<(Vec<String>, PathBuf, String)>
                 repo.join(dir),
                 label,
             ));
+        }
+    }
+    // No static entry — fall back to an actual server file (reads PORT), e.g. an API app.
+    for (f, runner) in candidates {
+        let p = repo.join(f);
+        if p.exists() && looks_like_server(&p) {
+            return Some((vec![runner.into(), f.into()], repo.to_path_buf(), f.into()));
         }
     }
     None

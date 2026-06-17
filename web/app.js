@@ -23,12 +23,16 @@ async function init() {
   $("#tryrun").onclick = () => tryRun();
   $("#trycmd").addEventListener("keydown", (e) => { if (e.key === "Enter") tryRun(); });
   $("#gate").onchange = updateGateHint; updateGateHint();
+  $("#mode").onchange = updateModeHint; updateModeHint();
+  $("#promote").onclick = promoteDraft;
+  $("#draftrun").onclick = runDraftApp;
+  $("#drefine").onclick = refineDraft;
   $("#reqchanges").onclick = () => { $("#fbnote").scrollIntoView({ block: "center" }); $("#fbnote").focus(); };
   $("#rejectbtn").onclick = rejectRun;
   document.querySelectorAll(".step").forEach((s) => (s.onclick = () => showPhase(s.dataset.step)));
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
 
-  await Promise.all([loadBases(), loadForges(), loadMaintainers(), loadReputation()]);
+  await Promise.all([loadBases(), loadForges(), loadMaintainers(), loadReputation(), loadApps()]);
   await ensureDefaultMaintainers();
 }
 
@@ -96,7 +100,7 @@ async function startRun() {
   resetFlow();
   $("#run").disabled = true; $("#run").innerHTML = '<span class="spin"></span> the LLM is authoring the spec & building…';
   try {
-    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value });
+    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value, mode: $("#mode").value });
     STATE.runId = run_id; STATE.lastSeq = 0;
     setStatus("queued");
     startPolling();
@@ -105,6 +109,7 @@ async function startRun() {
 function resetRunBtn() { $("#run").disabled = false; $("#run").innerHTML = "⚙ Fabricate trusted software"; }
 function resetFlow() {
   $("#timeline").innerHTML = ""; $("#approvecard").classList.add("hidden"); $("#productcard").classList.add("hidden");
+  $("#draftcard").classList.add("hidden"); $("#draftframe").innerHTML = "";
   $("#phasedetail").classList.add("hidden"); $("#phasedetail").innerHTML = "";
   $("#appframe").innerHTML = ""; $("#runappmsg").innerHTML = "";
   document.querySelectorAll(".step").forEach((s) => s.classList.remove("done", "active"));
@@ -124,7 +129,7 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
-    if (["blocked", "accepted", "merged", "failed"].includes(run.status)) {
+    if (["blocked", "accepted", "merged", "failed", "draft"].includes(run.status)) {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       onRunDone(run);
     }
@@ -196,10 +201,77 @@ function setStatus(st) {
 }
 
 async function onRunDone(run) {
+  loadApps();   // refresh the app list whenever a build finishes
   if (run.status === "failed") { toast("run failed — see the timeline", true); return; }
+  if (run.status === "draft") { showDraft(run); return; }   // un-attested fast loop — no provenance/gate
   await loadArtifacts();          // load first so approval can show the approval count
   await showApproval(run);
   await loadReputation();
+}
+
+// ---------- draft (fast, un-attested) ----------
+const MODE_HINTS = {
+  release: "Full trust ceremony: author spec → build → run acceptance → sign an in-toto/SLSA attestation → open a gated PR → block on N-of-M sign-off. The trusted checkpoint.",
+  draft: "Fast inner loop: generate + run acceptance only. NO signature, gate, PR or provenance — iterate freely, nothing heavy fires. Promote to a signed release when ready.",
+};
+function updateModeHint() { $("#modehint").textContent = MODE_HINTS[$("#mode").value] || ""; }
+
+function showDraft(run) {
+  $("#productcard").classList.add("hidden");
+  $("#approvecard").classList.add("hidden");
+  const card = $("#draftcard"); card.classList.remove("hidden");
+  const ok = run.acceptance_passed;
+  $("#draftmsg").innerHTML =
+    `⚡ <b>Draft built</b> on <code>${escapeHtml(run.branch)}</code> — acceptance ` +
+    `<b class="${ok ? "ok" : "no"}">${ok ? "PASSED" : "FAILED"}</b>. ` +
+    `<b>Un-attested</b>: no signature, no gate, no provenance yet.`;
+  $("#promote").disabled = !ok;
+  $("#promote").title = ok ? "" : "fix acceptance before promoting (no vacuous promotion)";
+  card.scrollIntoView({ block: "nearest" });
+}
+
+async function runDraftApp() {
+  const btn = $("#draftrun"), frame = $("#draftframe");
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
+  try {
+    const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
+    if (r.kind === "web") {
+      frame.innerHTML =
+        `<div class="hint">🌐 running at <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="dstopapp">stop</a></div>` +
+        `<iframe src="${r.url}?t=${Date.now()}" style="width:100%;height:420px;border:1px solid var(--line);border-radius:10px;background:#fff"></iframe>`;
+      $("#dstopapp").onclick = async (e) => { e.preventDefault(); await api("POST", `/api/runs/${STATE.runId}/stop`); frame.innerHTML = "stopped."; };
+    } else if (r.kind === "web-failed") {
+      frame.innerHTML = `<div class="hint">⚠ ${escapeHtml(r.error)}</div>`;
+    } else {
+      frame.innerHTML = `<div class="hint">This is a CLI (no web server) — it ran in the sandbox. Promote it for the full “Try the software” surface.</div>`;
+    }
+  } catch (e) { frame.innerHTML = `<div class="hint">error: ${escapeHtml(e.message)}</div>`; }
+  finally { btn.disabled = false; btn.innerHTML = "▶ Run the app"; }
+}
+
+async function promoteDraft() {
+  const draftId = STATE.runId;
+  $("#promote").disabled = true; $("#promote").innerHTML = '<span class="spin"></span> promoting…';
+  try {
+    const { run_id } = await api("POST", `/api/runs/${draftId}/promote`);
+    toast("promoting → full ceremony (sign + gate + provenance)…");
+    resetFlow();
+    STATE.runId = run_id; STATE.lastSeq = 0; setStatus("queued"); startPolling();
+  } catch (e) {
+    toast(e.message, true);
+    $("#promote").disabled = false; $("#promote").innerHTML = "✅ Promote to signed release →";
+  }
+}
+
+async function refineDraft() {
+  const note = $("#dfbnote").value.trim(); if (!note) return toast("describe the change you want", true);
+  const priorRun = STATE.runId;
+  resetFlow();
+  try {
+    const { run_id } = await api("POST", `/api/runs/${priorRun}/feedback`, { note, base: $("#base").value, mode: "draft" });
+    STATE.runId = run_id; STATE.lastSeq = 0; $("#dfbnote").value = "";
+    toast("re-drafting → the LLM re-authors the spec & rebuilds (v→v+1)"); setStatus("queued"); startPolling();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---------- approval ----------
@@ -452,6 +524,46 @@ async function loadReputation() {
       r.agents.map((a) => `<tr><td class="mono">${shortDid(a.did)}</td><td>${a.authored}</td><td>${a.accepted}</td><td>${a.signoffs_given}</td></tr>`).join("");
     box.innerHTML = ""; box.appendChild(t);
   } catch (e) {}
+}
+
+// ---------- apps (each intent = an app; refines are its versions) ----------
+async function loadApps() {
+  try {
+    const apps = await api("GET", "/api/apps");
+    const box = $("#apps"); box.innerHTML = "";
+    if (!apps.length) { box.innerHTML = '<div class="empty">No apps yet — fabricate one above.</div>'; return; }
+    apps.forEach((a) => {
+      const row = el("div", "approw");
+      const meta = el("div", "appmeta",
+        `<div class="appname">${escapeHtml(a.intent.slice(0, 70))}</div>` +
+        `<div class="appsub muted">${escapeHtml(a.base)} · <span class="pill ${a.status}" style="padding:1px 7px; font-size:10px">${a.status}</span>${a.versions > 1 ? " · v" + a.versions : ""}</div>`);
+      const btns = el("div", "appbtns");
+      const launch = el("button", "btn ok sm", "▶"); launch.title = "launch the app"; launch.onclick = () => launchAppById(a.latest_run, launch);
+      const open = el("button", "btn ghost sm", "📁"); open.title = "open the app's folder"; open.onclick = () => openAppFolder(a.id);
+      const del = el("button", "btn ghost sm", "🗑"); del.title = "delete this app"; del.onclick = () => deleteApp(a.id, a.intent);
+      btns.append(launch, open, del);
+      row.append(meta, btns); box.appendChild(row);
+    });
+  } catch (e) { /* server may be mid-write */ }
+}
+async function launchAppById(rid, btn) {
+  const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+  try {
+    const r = await api("POST", `/api/runs/${rid}/launch`);
+    if (r.kind === "web") { window.open(r.url, "_blank"); toast("launched → " + r.url); }
+    else if (r.kind === "web-failed") { toast(r.error, true); }
+    else { toast("This app is a CLI (no web server)."); }
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.innerHTML = old; }
+}
+async function openAppFolder(id) {
+  try { const r = await api("POST", `/api/apps/${id}/open`); toast("opened " + r.path); }
+  catch (e) { toast(e.message, true); }
+}
+async function deleteApp(id, name) {
+  if (!confirm(`Delete app "${(name || id).slice(0, 50)}"?\nThis removes all its versions, branches, and provenance.`)) return;
+  try { const r = await api("DELETE", `/api/apps/${id}`); toast(`deleted (${r.deleted} run(s))`); await loadApps(); }
+  catch (e) { toast(e.message, true); }
 }
 
 // ---------- util ----------

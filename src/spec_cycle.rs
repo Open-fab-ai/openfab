@@ -24,6 +24,29 @@ use crate::ports::base::BasePort;
 use crate::ports::forge::{ForgePort, Trailers};
 use crate::runstate::{self, AcceptanceOutcome, RunRecord};
 
+/// Status string for a draft (un-attested) run — single source of truth (R3).
+pub const DRAFT_STATUS: &str = "draft";
+
+/// How much of the trust ceremony a run performs (PRD roadmap: fast loop vs checkpoint).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    /// Fast inner loop: generate code + run acceptance, commit source to a draft branch,
+    /// then STOP. No signature, SBOM, PR, or trust gate — the run is explicitly
+    /// **un-attested**. This is what a developer iterates with; nothing heavy fires per edit.
+    Draft,
+    /// Full ceremony: sign in-toto/SLSA + SBOM + PR + N-of-M trust gate. The default, so
+    /// every legacy path and persisted record keeps its existing trustworthy behaviour.
+    #[default]
+    Release,
+}
+
+impl RunMode {
+    pub fn is_draft(&self) -> bool {
+        matches!(self, RunMode::Draft)
+    }
+}
+
 pub struct CycleConfig<'a> {
     pub spec: &'a Spec,
     pub base: &'a dyn BasePort,
@@ -38,6 +61,8 @@ pub struct CycleConfig<'a> {
     pub gate_mode: String,
     /// "provider · model" when the spec's acceptance was LLM-authored (timeline note).
     pub authored_by: Option<String>,
+    /// Draft (fast, un-attested) vs Release (full ceremony). Defaults to Release.
+    pub mode: RunMode,
 }
 
 /// Live decision log: printed, posted to the base's comms channel, streamed to disk as
@@ -187,8 +212,13 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         ),
     );
 
-    // 2. Branch on the forge.
-    let branch = format!("openfab/{}-v{}", spec.id, spec.version);
+    // 2. Branch on the forge. Drafts go on their own `openfab/draft/<run>` branch so a
+    //    fast iteration never disturbs the release branch or its provenance.
+    let branch = if cfg.mode.is_draft() {
+        format!("openfab/draft/{run_id}")
+    } else {
+        format!("openfab/{}-v{}", spec.id, spec.version)
+    };
     forge
         .branch(&branch)
         .with_context(|| format!("creating branch {branch}"))?;
@@ -278,6 +308,85 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             .map(|o| o.passed)
             .unwrap_or(false)
     });
+
+    // 4b. DRAFT MODE — the fast inner loop stops here. We commit the *source* to the draft
+    //     branch so it can be inspected and later promoted, but we run NO signature, SBOM,
+    //     PR, or trust gate. The run is explicitly UN-ATTESTED (status = "draft"); an
+    //     explicit `openfab promote` checkpoint runs the full ceremony once, on the
+    //     accepted state. This is what keeps iteration from kicking off heavy work per edit.
+    if cfg.mode.is_draft() {
+        let commit_paths: Vec<PathBuf> = changed_files.iter().map(|f| repo.join(&f.path)).collect();
+        let trailers = Trailers::new()
+            .with("Spec", &spec.spec_ref())
+            .with("OpenFab-Base", base.name())
+            .with("OpenFab-Mode", DRAFT_STATUS)
+            .with(
+                "OpenFab-Acceptance",
+                if acceptance_passed {
+                    "passed"
+                } else {
+                    "failed"
+                },
+            );
+        let commit_msg = format!(
+            "draft({}): {} [UN-ATTESTED]",
+            spec.id,
+            truncate(&spec.intent, 50)
+        );
+        let sha = if commit_paths.is_empty() {
+            String::new()
+        } else {
+            forge.commit(&commit_paths, &commit_msg, &trailers)?
+        };
+        tl.step(
+            base,
+            "⚡",
+            &format!(
+                "DRAFT — acceptance {}; source committed{} · NOT signed, NOT gated (un-attested). Run `openfab promote` for a signed release.",
+                if acceptance_passed { "PASSED" } else { "FAILED" },
+                if sha.is_empty() {
+                    String::new()
+                } else {
+                    format!(" as {}", &sha[..sha.len().min(10)])
+                }
+            ),
+        );
+        let rec = RunRecord {
+            run_id: run_id.clone(),
+            spec_ref: spec.spec_ref(),
+            base_name: base.name().to_string(),
+            forge_kind: forge.kind().to_string(),
+            forge_name: forge.name().to_string(),
+            base_runtime: base.runtime_mode().to_string(),
+            status: DRAFT_STATUS.to_string(),
+            gate_mode: cfg.gate_mode.clone(),
+            branch,
+            pr_url: String::new(),
+            attestation_repo_path: String::new(),
+            sbom_repo_path: String::new(),
+            acceptance: outcomes,
+            acceptance_passed,
+            accepted: false,
+            merged: false,
+            parent_run: cfg.parent_run.clone(),
+            created: timeutil::iso_now(),
+        };
+        let spec_yaml = serde_yaml::to_string(spec).context("serialize spec")?;
+        runstate::save_run(&repo, &rec, &spec_yaml, &tl.render(&spec.spec_ref()))?;
+        set_status(
+            &repo,
+            &run_id,
+            &spec.spec_ref(),
+            DRAFT_STATUS,
+            "draft · un-attested",
+            None,
+        );
+        println!("\nDraft run id: {run_id}  (un-attested)");
+        println!(
+            "Next: openfab promote --repo <repo> --run {run_id}   # full ceremony → signed release"
+        );
+        return Ok(rec);
+    }
 
     // 5. Build + sign provenance (in-toto/SLSA + openfab/generation predicate).
     let generated: Vec<GeneratedRange> = changed_files
@@ -525,5 +634,33 @@ fn first_nonempty(a: &str, b: &str) -> String {
         a.to_string()
     } else {
         b.trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runmode_defaults_to_release() {
+        // Legacy paths and any RunMode::default() must keep full-ceremony behaviour.
+        assert_eq!(RunMode::default(), RunMode::Release);
+        assert!(!RunMode::default().is_draft());
+        assert!(RunMode::Draft.is_draft());
+    }
+
+    #[test]
+    fn runmode_serde_roundtrip() {
+        assert_eq!(serde_json::to_string(&RunMode::Draft).unwrap(), "\"draft\"");
+        assert_eq!(
+            serde_json::to_string(&RunMode::Release).unwrap(),
+            "\"release\""
+        );
+        assert!(serde_json::from_str::<RunMode>("\"draft\"")
+            .unwrap()
+            .is_draft());
+        assert!(!serde_json::from_str::<RunMode>("\"release\"")
+            .unwrap()
+            .is_draft());
     }
 }

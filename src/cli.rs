@@ -20,6 +20,7 @@ use crate::core::spec::Spec;
 use crate::core::trust::Policy;
 use crate::ops;
 use crate::runstate;
+use crate::spec_cycle::RunMode;
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +51,9 @@ enum Cmd {
         /// Human-approval gate: solo (self-approve) | team (2-of-2) | crowd | none.
         #[arg(long, default_value = "team")]
         gate: String,
+        /// Fast iterate: generate + run acceptance only, NO sign/gate/PR (un-attested draft).
+        #[arg(long)]
+        draft: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -67,6 +71,9 @@ enum Cmd {
         forge_name: Option<String>,
         #[arg(long, default_value = "solo")]
         gate: String,
+        /// Fast iterate: generate + run acceptance only, NO sign/gate/PR (un-attested draft).
+        #[arg(long)]
+        draft: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -101,6 +108,15 @@ enum Cmd {
         run: String,
         #[arg(long = "as")]
         as_name: String,
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
+    /// Promote a passing draft to a signed, gated release (the explicit trust checkpoint).
+    Promote {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        run: String,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -143,6 +159,7 @@ pub fn run() -> Result<()> {
             forge,
             forge_name,
             gate,
+            draft,
             policy,
         } => cmd_run(
             &spec,
@@ -151,6 +168,7 @@ pub fn run() -> Result<()> {
             &forge,
             forge_name,
             &gate,
+            mode_of(draft),
             policy.as_deref(),
             None,
         ),
@@ -161,6 +179,7 @@ pub fn run() -> Result<()> {
             forge,
             forge_name,
             gate,
+            draft,
             policy,
         } => cmd_build(
             &intent,
@@ -169,8 +188,10 @@ pub fn run() -> Result<()> {
             &forge,
             forge_name,
             &gate,
+            mode_of(draft),
             policy.as_deref(),
         ),
+        Cmd::Promote { repo, run, policy } => cmd_promote(&repo, &run, policy.as_deref()),
         Cmd::Feedback {
             repo,
             run,
@@ -211,6 +232,14 @@ fn load_policy(path: Option<&Path>) -> Result<Policy> {
     }
 }
 
+fn mode_of(draft: bool) -> RunMode {
+    if draft {
+        RunMode::Draft
+    } else {
+        RunMode::Release
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     spec_path: &Path,
@@ -219,6 +248,7 @@ fn cmd_run(
     forge_kind: &str,
     forge_name: Option<String>,
     gate: &str,
+    mode: RunMode,
     policy_path: Option<&Path>,
     parent_run: Option<String>,
 ) -> Result<()> {
@@ -227,11 +257,12 @@ fn cmd_run(
     let spec = Spec::from_path(spec_path)?;
 
     println!(
-        "== OpenFab run: spec={} base={} forge={} gate={} ==",
+        "== OpenFab run: spec={} base={} forge={} gate={}{} ==",
         spec.spec_ref(),
         base_name,
         forge_kind,
-        gate
+        gate,
+        if mode.is_draft() { " mode=draft" } else { "" }
     );
     let rec = ops::start_run(
         &repo,
@@ -244,6 +275,7 @@ fn cmd_run(
             run_id: None,
             gate_mode: gate.to_string(),
             authored_by: None,
+            mode,
         },
         &policy,
     )?;
@@ -261,15 +293,45 @@ fn cmd_build(
     forge_kind: &str,
     forge_name: Option<String>,
     gate: &str,
+    mode: RunMode,
     policy_path: Option<&Path>,
 ) -> Result<()> {
     let repo = abs(repo)?;
     let policy = load_policy(policy_path)?;
-    println!("== OpenFab build: the LLM authors the spec from your intent, then builds ==");
+    println!(
+        "== OpenFab build: the LLM authors the spec from your intent, then builds{} ==",
+        if mode.is_draft() {
+            " (draft · un-attested)"
+        } else {
+            ""
+        }
+    );
     let run_id = ops::reserve_intent_run_id(intent);
     ops::build(
-        &repo, intent, run_id, base_name, forge_kind, forge_name, gate, &policy,
+        &repo, intent, run_id, base_name, forge_kind, forge_name, gate, mode, &policy,
     )?;
+    Ok(())
+}
+
+fn cmd_promote(repo: &Path, run: &str, policy_path: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let policy = load_policy(policy_path)?;
+    println!("== OpenFab promote: running the full trust ceremony on draft {run} ==");
+    let release_run_id = ops::reserve_promote_run_id(&repo, run)?;
+    let out = ops::promote(&repo, run, release_run_id, &policy)?;
+    println!(
+        "✅ promoted draft {} → release {} (status: {}, accepted: {})",
+        out.draft_run,
+        out.release_run,
+        out.status,
+        yn(out.accepted)
+    );
+    if !out.accepted {
+        println!(
+            "Next: openfab signoff --repo <repo> --run {} --as <maintainer>",
+            out.release_run
+        );
+    }
     Ok(())
 }
 
@@ -285,7 +347,15 @@ fn cmd_feedback(
     let policy = load_policy(policy_path)?;
     println!("== OpenFab refine: re-authoring the spec from your feedback → v+1 ==");
     let run_id = ops::reserve_refine_run_id(&repo, run)?;
-    ops::refine(&repo, run, note, run_id, base_name, &policy)?;
+    ops::refine(
+        &repo,
+        run,
+        note,
+        run_id,
+        base_name,
+        RunMode::Release,
+        &policy,
+    )?;
     Ok(())
 }
 

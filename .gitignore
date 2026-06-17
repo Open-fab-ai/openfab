@@ -18,3 +18,7 @@ Cargo.lock.bak
 # Demo scratch repos (the local "forges" the demo spins up)
 /demo/.work/
 /demo/out/
+
+# Office temp/lock files
+~$*
+**/~$*

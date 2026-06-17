@@ -1,0 +1,5 @@
+# Secrets and local state — never commit.
+forges.env
+github.env
+*.env
+volumes/

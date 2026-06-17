@@ -1,10 +1,13 @@
 //! Shared LLM backend used by the agent bases to turn a task into a file manifest.
 //!
-//! Two providers, selected by `OPENFAB_LLM` (default `claude`):
+//! Providers, selected by `OPENFAB_LLM` (default `claude`):
 //!   • `claude`    — the local `claude` CLI (native to the claude base).
 //!   • `dashscope` — Qwen via the DashScope OpenAI-compatible API (needs
 //!                   `DASHSCOPE_API_KEY`), reached by shelling to `curl` (dependency
 //!                   budget: no HTTP-client crate).
+//!   • `ollama`    — a LOCAL model served by Ollama's OpenAI-compatible API (no API key,
+//!                   no network). `OPENFAB_OLLAMA_URL` (default http://localhost:11434),
+//!                   `OPENFAB_OLLAMA_MODEL` (default llama3.1). Same `curl` path as above.
 //!
 //! The agent never touches the filesystem directly — it returns a JSON `{files:{…}}`
 //! manifest that the adapter writes. That keeps the prompt hashable into provenance and
@@ -140,6 +143,10 @@ pub fn complete(prompt: &str) -> Result<(String, String, String)> {
             let (t, m) = dashscope_text(prompt)?;
             Ok((t, m, "dashscope".to_string()))
         }
+        "ollama" => {
+            let (t, m) = ollama_text(prompt)?;
+            Ok((t, m, "ollama".to_string()))
+        }
         _ => {
             let (t, m) = claude_text(prompt)?;
             Ok((t, m, "claude-cli".to_string()))
@@ -152,6 +159,7 @@ pub fn complete(prompt: &str) -> Result<(String, String, String)> {
 pub fn generate_bridge(prompt: &str) -> Result<GenOutput> {
     match std::env::var("OPENFAB_LLM").unwrap_or_default().as_str() {
         "dashscope" | "qwen" => generate_dashscope(prompt),
+        "ollama" => generate_ollama(prompt),
         _ => generate_claude(prompt),
     }
 }
@@ -200,6 +208,63 @@ pub fn generate_dashscope(prompt: &str) -> Result<GenOutput> {
         manifest: parse_manifest(&text)?,
         model,
         provider: "dashscope".to_string(),
+    })
+}
+
+/// Call a LOCAL model via Ollama's OpenAI-compatible API (no API key, no network egress).
+/// Endpoint `OPENFAB_OLLAMA_URL` (default http://localhost:11434), model
+/// `OPENFAB_OLLAMA_MODEL` (default llama3.1). The same OpenAI envelope as DashScope, so a
+/// hosted Ollama Cloud endpoint works too — point `OPENFAB_OLLAMA_URL` at it and pass a key
+/// via `OPENFAB_OLLAMA_KEY`.
+fn ollama_text(prompt: &str) -> Result<(String, String)> {
+    let base = std::env::var("OPENFAB_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+    let model = std::env::var("OPENFAB_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": false,
+        "response_format": {"type": "json_object"}
+    })
+    .to_string();
+    let mut args = vec![
+        "-sS".to_string(),
+        "-X".to_string(),
+        "POST".to_string(),
+        url.clone(),
+        "-H".to_string(),
+        "Content-Type: application/json".to_string(),
+    ];
+    // Optional bearer key (only needed for a hosted/cloud Ollama endpoint).
+    if let Ok(key) = std::env::var("OPENFAB_OLLAMA_KEY") {
+        if !key.is_empty() {
+            args.push("-H".to_string());
+            args.push(format!("Authorization: Bearer {key}"));
+        }
+    }
+    args.push("-d".to_string());
+    args.push(body);
+    let stdout = run_capture("curl", &args, timeout_secs())
+        .with_context(|| format!("calling Ollama at {url} — is `ollama serve` running?"))?;
+    let env: OpenAiEnvelope = serde_json::from_str(&stdout)
+        .with_context(|| format!("Ollama reply was not JSON:\n{stdout}"))?;
+    let content = env
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .context("Ollama returned no choices (model not pulled? try `ollama pull <model>`)")?;
+    Ok((content, model))
+}
+
+/// Generate a file manifest with a local Ollama model.
+pub fn generate_ollama(prompt: &str) -> Result<GenOutput> {
+    let (text, model) = ollama_text(prompt)?;
+    Ok(GenOutput {
+        manifest: parse_manifest(&text)?,
+        model,
+        provider: "ollama".to_string(),
     })
 }
 

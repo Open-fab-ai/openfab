@@ -7,8 +7,10 @@
 //!
 //! Adapters may depend on `core` and `ports`; `core` must never depend on adapters.
 
+pub mod agent_spec;
 pub mod base_claude;
 pub mod base_framework;
+pub mod bridge_client;
 pub mod forge_github;
 pub mod forge_local_git;
 pub mod forge_rest;

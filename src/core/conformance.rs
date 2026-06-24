@@ -122,6 +122,35 @@ pub fn check(att: &Attestation, require_signoff: bool) -> ConformanceReport {
         "machine acceptance recorded as passed".to_string(),
     );
 
+    // C12 — agent-spec contract gate. Applicability is decided by whether the spec was
+    // authored via agent-spec (the signed `spec_contract_sha256` is present), NOT by whether
+    // verdicts happen to be present — otherwise stripping the verdicts would silently skip
+    // the gate. When it applies, there must be ≥1 scenario and every one must be `pass`
+    // (skip ≠ pass). N/A only for the native-spec path (no contract hash).
+    if pred.spec_contract_sha256.is_some() {
+        let non_pass: Vec<&str> = pred
+            .agent_spec_verdicts
+            .iter()
+            .filter(|v| v.verdict != "pass")
+            .map(|v| v.scenario.as_str())
+            .collect();
+        let ok = !pred.agent_spec_verdicts.is_empty() && non_pass.is_empty();
+        r.push(
+            "C12.agent-spec-scenarios",
+            ok,
+            if pred.agent_spec_verdicts.is_empty() {
+                "spec has a signed contract hash but no scenario verdicts were recorded".into()
+            } else if non_pass.is_empty() {
+                format!(
+                    "{} agent-spec scenario(s) all pass",
+                    pred.agent_spec_verdicts.len()
+                )
+            } else {
+                format!("non-passing scenario(s): {}", non_pass.join(", "))
+            },
+        );
+    }
+
     r
 }
 
@@ -129,9 +158,13 @@ pub fn check(att: &Attestation, require_signoff: bool) -> ConformanceReport {
 mod tests {
     use super::*;
     use crate::core::identity::Identity;
-    use crate::core::provenance::{GeneratedRange, GenerationInput};
+    use crate::core::provenance::{GeneratedRange, GenerationInput, ScenarioVerdict};
 
     fn att(fab: &Identity) -> Attestation {
+        att_with_verdicts(fab, vec![])
+    }
+
+    fn att_with_verdicts(fab: &Identity, verdicts: Vec<ScenarioVerdict>) -> Attestation {
         Attestation::build_and_sign(
             GenerationInput {
                 spec_ref: "demo#v1".into(),
@@ -150,10 +183,25 @@ mod tests {
                 }],
                 materials: vec![],
                 acceptance_passed: true,
+                spec_contract_sha256: if verdicts.is_empty() {
+                    None
+                } else {
+                    Some("c".repeat(64))
+                },
+                agent_spec_verdicts: verdicts,
+                run_log_ref: None,
+                requirements_sha256: None,
             },
             fab,
         )
         .unwrap()
+    }
+
+    fn verdict(scenario: &str, verdict: &str) -> ScenarioVerdict {
+        ScenarioVerdict {
+            scenario: scenario.into(),
+            verdict: verdict.into(),
+        }
     }
 
     #[test]
@@ -172,6 +220,83 @@ mod tests {
             .checks
             .iter()
             .any(|c| c.id == "C10.human-signoff" && !c.passed));
+    }
+
+    #[test]
+    fn agent_spec_all_pass_is_conformant() {
+        let fab = Identity::generate("fab").unwrap();
+        let a = att_with_verdicts(
+            &fab,
+            vec![verdict("happy", "pass"), verdict("edge", "pass")],
+        );
+        let r = check(&a, false);
+        assert!(r.conformant, "{:?}", r.checks);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.id == "C12.agent-spec-scenarios" && c.passed));
+    }
+
+    #[test]
+    fn agent_spec_skip_breaks_conformance() {
+        let fab = Identity::generate("fab").unwrap();
+        let a = att_with_verdicts(
+            &fab,
+            vec![verdict("happy", "pass"), verdict("edge", "skip")],
+        );
+        let r = check(&a, false);
+        assert!(!r.conformant);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.id == "C12.agent-spec-scenarios" && !c.passed));
+    }
+
+    #[test]
+    fn no_verdicts_skips_c12() {
+        let fab = Identity::generate("fab").unwrap();
+        let r = check(&att(&fab), false);
+        // native-spec path: C12 is not applicable and must not appear
+        assert!(!r.checks.iter().any(|c| c.id == "C12.agent-spec-scenarios"));
+    }
+
+    #[test]
+    fn agent_spec_contract_without_verdicts_fails_c12() {
+        // Bypass attempt: a spec authored via agent-spec (contract hash present) but with the
+        // verdicts stripped must FAIL C12, not skip it.
+        let fab = Identity::generate("fab").unwrap();
+        let att = Attestation::build_and_sign(
+            GenerationInput {
+                spec_ref: "demo#v1".into(),
+                app_name: "demo".into(),
+                source_bundle_sha256: "abcabc".into(),
+                agent_did: fab.did(),
+                base_name: "mock".into(),
+                model: "mock-1".into(),
+                prompt: "p".into(),
+                params: serde_json::json!({}),
+                generated: vec![GeneratedRange {
+                    path: "app/main.py".into(),
+                    lines: "1-10".into(),
+                    sha256: "deadbeef".into(),
+                    author: "ai".into(),
+                }],
+                materials: vec![],
+                acceptance_passed: true,
+                spec_contract_sha256: Some("c".repeat(64)), // contract present…
+                agent_spec_verdicts: vec![],                // …but verdicts stripped
+                run_log_ref: None,
+                requirements_sha256: None,
+            },
+            &fab,
+        )
+        .unwrap();
+        let r = check(&att, false);
+        assert!(!r.conformant);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.id == "C12.agent-spec-scenarios" && !c.passed));
     }
 
     #[test]

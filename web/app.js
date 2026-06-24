@@ -3,8 +3,18 @@
 
 const $ = (s) => document.querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
+// Escape untrusted values before interpolating into innerHTML (element + attribute contexts).
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"'`]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
+let PROJECT = "default";   // selected project (workspace); scopes all run/maintainer calls.
+// append ?project= to project-scoped URLs (catalog/config/projects are global, skip them)
+function withProject(url) {
+  if (!PROJECT || PROJECT === "default") return url;
+  if (!url.startsWith("/api/")) return url;
+  if (/^\/api\/(projects|config|bases|forges)/.test(url)) return url;
+  return url + (url.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(PROJECT);
+}
 const api = async (m, url, body) => {
-  const r = await fetch(url, { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(withProject(url), { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `${r.status}`);
   return j;
@@ -28,8 +38,133 @@ async function init() {
   document.querySelectorAll(".step").forEach((s) => (s.onclick = () => showPhase(s.dataset.step)));
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
 
+  $("#project").onchange = onProjectChange;
+  $("#createproj").onclick = createProject;
+  $("#uploadbtn").onclick = () => $("#docfile").click();
+  $("#docfile").onchange = uploadDoc;
+  await loadProjects();
   await Promise.all([loadBases(), loadForges(), loadMaintainers(), loadReputation()]);
   await ensureDefaultMaintainers();
+  await loadRecentRuns();
+  await loadIncoming();
+}
+
+// Upload a requirements/decision doc or a .spec.md. A spec contract is built directly; a
+// requirements doc seeds the intent and is committed (and hashed) into the run's provenance.
+async function uploadDoc(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const content = await file.text();
+  try {
+    const r = await api("POST", "/api/upload", { name: file.name, content });
+    if (r.kind === "spec") {
+      STATE.uploadedSpecId = r.id;
+      $("#uploadmsg").innerHTML = `✓ spec contract <b>${esc(r.id)}.spec.md</b> — click Fabricate to build it`;
+      if (!$("#intent").value.trim()) $("#intent").value = `Build the uploaded spec '${r.id}'.`;
+    } else {
+      STATE.uploadedSpecId = null;
+      $("#uploadmsg").innerHTML = `✓ requirements <b>${esc(r.id)}.requirements.md</b> attached — add intent &amp; Fabricate`;
+      if (!$("#intent").value.trim()) $("#intent").value = file.name.replace(/\.[^.]+$/, "");
+    }
+  } catch (e) { $("#uploadmsg").textContent = "error: " + e.message; }
+  ev.target.value = "";
+}
+
+async function loadProjects() {
+  try {
+    const projs = await api("GET", "/api/projects");
+    const sel = $("#project"); sel.innerHTML = "";
+    projs.forEach((p) => { const o = el("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
+    sel.value = PROJECT;
+    // list with repo paths
+    const box = $("#projectlist");
+    if (box) box.innerHTML = projs.map((p) =>
+      `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)">
+        <b>${esc(p.name)}</b><span class="mono muted" style="font-size:11px">${esc(p.repo || "")}</span></div>`).join("");
+  } catch { /* registry optional */ }
+}
+// Register a project. An existing repo path enables self-hosting (dogfood OpenFab with
+// OpenFab); leaving it blank creates an empty workspace under the projects dir.
+async function createProject() {
+  const name = ($("#projname").value || "").trim();
+  const repo = ($("#projpath").value || "").trim();
+  const worktree = $("#projworktree").checked;
+  if (!name) { $("#projmsg").textContent = "name required"; return; }
+  try {
+    const payload = repo ? { name, repo, worktree } : { name };
+    if (repo && worktree) $("#projmsg").textContent = "creating git worktree…";
+    const r = await api("POST", "/api/projects", payload);
+    $("#projmsg").innerHTML = `✓ created <b>${esc(r.name)}</b> → <span class="mono">${esc(r.repo)}</span>`;
+    $("#projname").value = ""; $("#projpath").value = "";
+    await loadProjects();
+    $("#project").value = name; await onProjectChange();
+  } catch (e) { $("#projmsg").textContent = "error: " + e.message; }
+}
+async function onProjectChange() {
+  PROJECT = $("#project").value;
+  STATE.runId = null; clearInterval(STATE.poll); STATE.poll = null;
+  resetFlow(); setStatus("idle");
+  await Promise.all([loadMaintainers(), loadReputation(), loadRecentRuns(), loadIncoming()]);
+  toast(`switched to project "${PROJECT}"`);
+}
+
+// Docs ingested from a bound Robrix room (the coordinator submitted them) show up here so
+// the user can build them without uploading anything.
+async function loadIncoming() {
+  let docs = [];
+  try { docs = await api("GET", "/api/incoming"); } catch { /* none */ }
+  // hide specs that already have a run
+  let runs = [];
+  try { runs = await api("GET", "/api/runs"); } catch {}
+  const built = new Set(runs.map((r) => (r.spec_ref || "").split("#")[0]));
+  const pending = docs.filter((d) => !built.has(d.id));
+  const card = $("#incomingcard"), box = $("#incoming");
+  if (!pending.length) { card.style.display = "none"; return; }
+  card.style.display = "";
+  box.innerHTML = "";
+  pending.forEach((d) => {
+    const row = el("div", "maintainers");
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)";
+    row.innerHTML = `<span class="mono" style="font-size:12px">${esc(d.id)}${d.has_requirements ? " 📄" : ""}</span>`;
+    const b = el("button", "btn ghost sm", "Build");
+    b.onclick = () => { STATE.uploadedSpecId = d.id; $("#intent").value = `Build '${d.id}' (from Robrix).`; startRun(); };
+    row.appendChild(b); box.appendChild(row);
+  });
+}
+
+// Runs are persisted server-side (`.openfab/runs/`). The live-workflow panel is per-session
+// client state, so on a page reload we restore it: re-open the most recent run that still
+// needs attention (running/blocked), and list recent runs so any can be reopened.
+async function loadRecentRuns() {
+  let runs = [];
+  try { runs = await api("GET", "/api/runs"); } catch { /* none yet */ }
+  runs.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+  const box = $("#recentruns");
+  if (!runs.length) { box.innerHTML = '<div class="empty">No runs yet. Fabricate one above.</div>'; return; }
+  box.innerHTML = "";
+  runs.slice(0, 8).forEach((r) => {
+    const row = el("div", "maintainers");
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--line)";
+    row.innerHTML = `<span class="mono" style="font-size:12px">${esc(r.spec_ref || r.run_id)}</span>` +
+      `<span class="pill ${esc(r.status)}">${esc(r.status)}</span>`;
+    row.onclick = () => attachRun(r.run_id);
+    box.appendChild(row);
+  });
+  // auto-restore the newest run that still needs attention
+  if (!STATE.runId) {
+    const active = runs.find((r) => ["running", "queued", "blocked"].includes(r.status));
+    if (active) attachRun(active.run_id);
+  }
+}
+
+// Re-attach the live-workflow panel to an existing run; polling replays its persisted
+// timeline (events.jsonl) from seq 0, so the whole workflow view is restored.
+function attachRun(runId) {
+  resetFlow();
+  STATE.runId = runId; STATE.lastSeq = 0;
+  setStatus("running");
+  startPolling();
+  $("#flowcard").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function loadBases() {
@@ -96,10 +231,11 @@ async function startRun() {
   resetFlow();
   $("#run").disabled = true; $("#run").innerHTML = '<span class="spin"></span> the LLM is authoring the spec & building…';
   try {
-    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value });
+    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value, spec_id: STATE.uploadedSpecId || undefined });
     STATE.runId = run_id; STATE.lastSeq = 0;
     setStatus("queued");
     startPolling();
+    loadRecentRuns();
   } catch (e) { toast(e.message, true); resetRunBtn(); }
 }
 function resetRunBtn() { $("#run").disabled = false; $("#run").innerHTML = "⚙ Fabricate trusted software"; }
@@ -127,6 +263,7 @@ async function tick() {
     if (["blocked", "accepted", "merged", "failed"].includes(run.status)) {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       onRunDone(run);
+      loadRecentRuns();
     }
   } catch (e) { /* transient while files are written */ }
 }

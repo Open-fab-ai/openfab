@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --all-features
+
+  agent-spec-guard:
+    name: agent-spec guard (dogfood, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true # observability while specs/ migrates to agent-spec .spec.md
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install agent-spec
+        run: cargo install agent-spec || true
+      - name: lint any agent-spec contracts
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          specs=( specs/**/*.spec.md )
+          if [ ${#specs[@]} -eq 0 ]; then
+            echo "no agent-spec .spec.md contracts yet — skipping"
+            exit 0
+          fi
+          for s in "${specs[@]}"; do
+            echo "== agent-spec lint $s =="
+            agent-spec lint "$s" --format json || true
+          done
+          # Repo-wide guard against the working tree (informational until specs are bound).
+          agent-spec guard --spec-dir specs --code . --change-scope worktree || true

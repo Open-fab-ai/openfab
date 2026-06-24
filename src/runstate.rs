@@ -200,16 +200,216 @@ pub fn list_runs(repo: &Path) -> Result<Vec<RunRecord>> {
     Ok(out)
 }
 
+// --- multi-project registry (Phase 2 D: each project is its own repo/workspace) ---
+
+/// A managed project: a name and the repo/workspace that holds its runs + maintainers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    pub repo: String,
+}
+
+/// Project names must be filesystem-safe identifiers (no separators / traversal).
+pub fn valid_project_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "default"
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn projects_file(projects_dir: &Path) -> PathBuf {
+    projects_dir.join("projects.json")
+}
+
+/// Load the project registry (empty if none yet).
+pub fn load_projects(projects_dir: &Path) -> Result<Vec<Project>> {
+    let path = projects_file(projects_dir);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    serde_json::from_str(&std::fs::read_to_string(&path)?).context("parse projects registry")
+}
+
+/// Register a project (idempotent on name). `repo` is created if absent.
+pub fn add_project(projects_dir: &Path, name: &str, repo: &Path) -> Result<Project> {
+    if !valid_project_name(name) {
+        anyhow::bail!("invalid project name '{name}' (use letters, digits, - or _)");
+    }
+    let mut list = load_projects(projects_dir)?;
+    if let Some(p) = list.iter().find(|p| p.name == name) {
+        return Ok(p.clone());
+    }
+    std::fs::create_dir_all(repo)
+        .with_context(|| format!("creating project repo {}", repo.display()))?;
+    let proj = Project {
+        name: name.to_string(),
+        repo: repo.to_string_lossy().to_string(),
+    };
+    list.push(proj.clone());
+    std::fs::create_dir_all(projects_dir)?;
+    std::fs::write(
+        projects_file(projects_dir),
+        serde_json::to_string_pretty(&list).context("serialize projects")?,
+    )?;
+    Ok(proj)
+}
+
+/// A Robrix room bound to a project — so a coordinator's finalized doc is ingested into the
+/// right project (Phase 2.1 #3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomBinding {
+    pub room: String,
+    pub project: String,
+}
+
+fn room_bindings_file(projects_dir: &Path) -> PathBuf {
+    projects_dir.join("room-bindings.json")
+}
+
+/// Load the room→project bindings (empty if none yet).
+pub fn load_room_bindings(projects_dir: &Path) -> Result<Vec<RoomBinding>> {
+    let path = room_bindings_file(projects_dir);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    serde_json::from_str(&std::fs::read_to_string(&path)?).context("parse room bindings")
+}
+
+/// Bind a Matrix room to a project (idempotent on room; rebinding updates the project).
+pub fn bind_room(projects_dir: &Path, room: &str, project: &str) -> Result<()> {
+    let mut list = load_room_bindings(projects_dir)?;
+    match list.iter_mut().find(|b| b.room == room) {
+        Some(b) => b.project = project.to_string(),
+        None => list.push(RoomBinding {
+            room: room.to_string(),
+            project: project.to_string(),
+        }),
+    }
+    std::fs::create_dir_all(projects_dir)?;
+    std::fs::write(
+        room_bindings_file(projects_dir),
+        serde_json::to_string_pretty(&list).context("serialize room bindings")?,
+    )?;
+    Ok(())
+}
+
+/// Where an isolated worktree for a project lives, and the branch it checks out.
+pub fn worktree_path(projects_dir: &Path, name: &str) -> PathBuf {
+    projects_dir.join(name)
+}
+pub fn worktree_branch(name: &str) -> String {
+    format!("openfab/{name}")
+}
+
+/// Build the `git` args to create an isolated worktree (pure, unit-tested).
+pub fn worktree_add_args<'a>(src: &'a str, dest: &'a str, branch: &'a str) -> Vec<&'a str> {
+    vec!["-C", src, "worktree", "add", dest, "-b", branch]
+}
+
+/// Create an isolated git worktree off `source_repo` for `name`, under the projects dir, and
+/// return its path. Self-hosting writes into this worktree (a clean, separate checkout) so
+/// the user's live working tree is never touched. The branch `openfab/<name>` shares the
+/// source repo's object DB, so commits remain mergeable back.
+pub fn create_worktree(projects_dir: &Path, name: &str, source_repo: &Path) -> Result<PathBuf> {
+    if !valid_project_name(name) {
+        anyhow::bail!("invalid project name '{name}'");
+    }
+    let dest = worktree_path(projects_dir, name);
+    if dest.exists() {
+        return Ok(dest); // idempotent: reuse an existing worktree
+    }
+    std::fs::create_dir_all(projects_dir)?;
+    let branch = worktree_branch(name);
+    let src = source_repo.to_string_lossy().to_string();
+    let dest_s = dest.to_string_lossy().to_string();
+    let args = worktree_add_args(&src, &dest_s, &branch);
+    let out = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .context("running git worktree add")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(dest)
+}
+
+/// Resolve the project a room is bound to (pure; `None` if unbound).
+pub fn resolve_room_project(bindings: &[RoomBinding], room: &str) -> Option<String> {
+    bindings
+        .iter()
+        .find(|b| b.room == room)
+        .map(|b| b.project.clone())
+}
+
+/// Resolve which repo a request targets. `None`/"default" → the default repo; a registered
+/// project name → its repo; an unknown name → error. Pure (no I/O) so it is unit-tested.
+pub fn resolve_project_repo(
+    registry: &[Project],
+    name: Option<&str>,
+    default_repo: &Path,
+) -> Result<PathBuf> {
+    match name {
+        None | Some("") | Some("default") => Ok(default_repo.to_path_buf()),
+        Some(n) => registry
+            .iter()
+            .find(|p| p.name == n)
+            .map(|p| PathBuf::from(&p.repo))
+            .ok_or_else(|| anyhow::anyhow!("unknown project '{n}'")),
+    }
+}
+
 // --- maintainer allowlist (the pre-approved human signer set) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintainerEntry {
     pub name: String,
     pub did: String,
+    /// Phase 2: the Matrix user id this maintainer signs as (e.g. "@alice:palpo"). When set,
+    /// approving in a Robrix room maps to this maintainer's N-of-M sign-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mxid: Option<String>,
 }
 
 fn maintainers_file(repo: &Path) -> PathBuf {
     allow_dir(repo).join("maintainers.json")
+}
+
+/// Resolve which maintainer a Matrix user is allowed to sign as. SECURITY: an mxid that is
+/// not mapped to exactly one allowlisted maintainer is rejected — a bare `approve` from an
+/// unmapped room member can never produce a signature. Pure (no I/O) so it is unit-tested.
+pub fn resolve_signer<'a>(
+    mxid: &str,
+    entries: &'a [MaintainerEntry],
+) -> Result<&'a MaintainerEntry> {
+    let matches: Vec<&MaintainerEntry> = entries
+        .iter()
+        .filter(|m| m.mxid.as_deref() == Some(mxid))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => anyhow::bail!("matrix user '{mxid}' is not mapped to any maintainer — cannot sign"),
+        _ => anyhow::bail!("matrix user '{mxid}' maps to multiple maintainers — ambiguous"),
+    }
+}
+
+/// Map a Matrix user id onto an already-registered maintainer (must be allowlisted first).
+pub fn map_identity(repo: &Path, mxid: &str, maintainer_name: &str) -> Result<()> {
+    let mut list = load_maintainers(repo)?;
+    let entry = list
+        .iter_mut()
+        .find(|m| m.name == maintainer_name)
+        .ok_or_else(|| anyhow::anyhow!("maintainer '{maintainer_name}' is not registered"))?;
+    entry.mxid = Some(mxid.to_string());
+    std::fs::create_dir_all(allow_dir(repo))?;
+    std::fs::write(
+        maintainers_file(repo),
+        serde_json::to_string_pretty(&list).context("serialize maintainers")?,
+    )?;
+    Ok(())
 }
 
 pub fn load_maintainers(repo: &Path) -> Result<Vec<MaintainerEntry>> {
@@ -237,6 +437,7 @@ pub fn add_maintainer(repo: &Path, name: &str) -> Result<(String, bool)> {
     list.push(MaintainerEntry {
         name: name.to_string(),
         did: did.clone(),
+        mxid: None,
     });
     std::fs::create_dir_all(allow_dir(repo))?;
     std::fs::write(
@@ -305,5 +506,129 @@ mod tests {
             fab_allowlist(repo).unwrap(),
             vec!["did:key:zFAB".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn m(name: &str, mxid: Option<&str>) -> MaintainerEntry {
+        MaintainerEntry {
+            name: name.into(),
+            did: format!("did:key:{name}"),
+            mxid: mxid.map(String::from),
+        }
+    }
+
+    #[test]
+    fn test_resolve_signer_maps_known_mxid() {
+        let list = vec![
+            m("alice", Some("@alice:palpo")),
+            m("bob", Some("@bob:palpo")),
+        ];
+        let got = resolve_signer("@alice:palpo", &list).unwrap();
+        assert_eq!(got.name, "alice");
+    }
+
+    #[test]
+    fn test_resolve_signer_rejects_unmapped_mxid() {
+        let list = vec![m("alice", Some("@alice:palpo"))];
+        assert!(resolve_signer("@mallory:palpo", &list).is_err());
+    }
+
+    #[test]
+    fn test_resolve_signer_rejects_ambiguous_mxid() {
+        let list = vec![m("alice", Some("@x:palpo")), m("bob", Some("@x:palpo"))];
+        assert!(resolve_signer("@x:palpo", &list).is_err());
+    }
+
+    fn proj(name: &str, repo: &str) -> Project {
+        Project {
+            name: name.into(),
+            repo: repo.into(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_project_repo_default() {
+        let reg = vec![proj("alpha", "/ws/alpha")];
+        let def = Path::new("/ws/default");
+        assert_eq!(resolve_project_repo(&reg, None, def).unwrap(), def);
+        assert_eq!(
+            resolve_project_repo(&reg, Some("default"), def).unwrap(),
+            def
+        );
+        assert_eq!(resolve_project_repo(&reg, Some(""), def).unwrap(), def);
+    }
+
+    #[test]
+    fn test_resolve_project_repo_registered() {
+        let reg = vec![proj("alpha", "/ws/alpha"), proj("beta", "/ws/beta")];
+        let got = resolve_project_repo(&reg, Some("beta"), Path::new("/ws/default")).unwrap();
+        assert_eq!(got, PathBuf::from("/ws/beta"));
+    }
+
+    #[test]
+    fn test_resolve_project_repo_unknown() {
+        let reg = vec![proj("alpha", "/ws/alpha")];
+        assert!(resolve_project_repo(&reg, Some("ghost"), Path::new("/ws/default")).is_err());
+    }
+
+    #[test]
+    fn test_worktree_add_command() {
+        assert_eq!(
+            worktree_add_args("/src/repo", "/wt/alpha", "openfab/alpha"),
+            vec![
+                "-C",
+                "/src/repo",
+                "worktree",
+                "add",
+                "/wt/alpha",
+                "-b",
+                "openfab/alpha"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_worktree_paths() {
+        let pd = Path::new("/ws/projects");
+        assert_eq!(
+            worktree_path(pd, "selfdev"),
+            PathBuf::from("/ws/projects/selfdev")
+        );
+        assert_eq!(worktree_branch("selfdev"), "openfab/selfdev");
+    }
+
+    #[test]
+    fn test_resolve_room_project_bound() {
+        let b = vec![RoomBinding {
+            room: "!demoboard:palpo".into(),
+            project: "alpha".into(),
+        }];
+        assert_eq!(
+            resolve_room_project(&b, "!demoboard:palpo").as_deref(),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn test_resolve_room_project_unbound() {
+        let b = vec![RoomBinding {
+            room: "!demoboard:palpo".into(),
+            project: "alpha".into(),
+        }];
+        assert_eq!(resolve_room_project(&b, "!ghost:palpo"), None);
+    }
+
+    #[test]
+    fn test_valid_project_name_rejects_traversal() {
+        assert!(valid_project_name("alpha-1_x"));
+        assert!(!valid_project_name("../etc"));
+        assert!(!valid_project_name("a/b"));
+        assert!(!valid_project_name(".."));
+        assert!(!valid_project_name("default")); // reserved
+        assert!(!valid_project_name(""));
     }
 }

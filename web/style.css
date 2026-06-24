@@ -196,3 +196,10 @@ table.rep td.mono { font-family: var(--mono); font-size: 11px; }
 @keyframes sp { to { transform: rotate(360deg); } }
 .toast { position: fixed; bottom: 18px; right: 18px; background: var(--panel2); border: 1px solid var(--line); padding: 11px 15px; border-radius: 10px; font-size: 13px; box-shadow: 0 10px 30px rgba(0,0,0,.4); animation: fade .2s ease; max-width: 360px; }
 .toast.err { border-color: #5e2222; color: var(--bad); }
+
+/* top-nav links (shared by dashboard + console) */
+.navlinks { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.navlink { font-size: 12.5px; color: var(--muted); background: var(--panel); border: 1px solid var(--line);
+           padding: 6px 12px; border-radius: 999px; text-decoration: none; }
+.navlink:hover { border-color: var(--accent2); color: var(--ink); }
+.navlink.on { color: var(--accent); border-color: var(--accent2); }

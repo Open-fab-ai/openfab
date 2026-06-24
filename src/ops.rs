@@ -2,7 +2,7 @@
 //! two front-ends never duplicate the orchestration logic (R3). Each function returns
 //! plain data; the CLI prints it, the server JSON-encodes it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -33,13 +33,79 @@ pub struct RunRequest {
     pub authored_by: Option<String>,
 }
 
-/// Author a spec from a natural-language intent using the LLM (the Base). The user only
-/// supplies the intent; the model derives the acceptance criteria, language, assumptions,
-/// and open questions. The human then reviews/edits before building (the spec-time intent
-/// check). Returns the drafted Spec plus (model, provider) for the record.
+/// Where the spec to build comes from (Phase 2 spec-driven ingest).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecSource {
+    /// Ingest a pre-authored `.spec.md` (e.g. from the wf_coordinator conversation).
+    File(std::path::PathBuf),
+    /// Draft a `.spec.md` via agent-spec + the LLM.
+    AgentSpecDraft,
+    /// Native LLM author (OpenFab's built-in JSON spec author).
+    NativeLlm,
+}
+
+/// Pure source resolution (testable without env): explicit file > agent-spec draft > native.
+pub fn resolve_spec_source(spec_file: Option<&str>, agent_spec_enabled: bool) -> SpecSource {
+    match spec_file {
+        Some(f) if !f.trim().is_empty() => SpecSource::File(std::path::PathBuf::from(f)),
+        _ if agent_spec_enabled => SpecSource::AgentSpecDraft,
+        _ => SpecSource::NativeLlm,
+    }
+}
+
+/// Resolve the spec source from the environment.
+pub fn spec_source() -> SpecSource {
+    resolve_spec_source(
+        std::env::var("OPENFAB_SPEC_FILE").ok().as_deref(),
+        crate::adapters::agent_spec::enabled(),
+    )
+}
+
 pub fn author_spec(intent: &str) -> Result<(Spec, String, String)> {
+    author_spec_with_file(intent, None)
+}
+
+/// Author the spec, optionally ingesting an explicit `.spec.md` file (e.g. one the user
+/// uploaded in the dashboard) which takes precedence over the env-selected source.
+pub fn author_spec_with_file(
+    intent: &str,
+    spec_file: Option<&Path>,
+) -> Result<(Spec, String, String)> {
     if intent.trim().len() < 4 {
         bail!("describe what you want to build");
+    }
+    // Spec source (Phase 2): an explicit `.spec.md` file (an uploaded contract, or the
+    // wf_coordinator requirements conversation) takes precedence over the agent-spec LLM
+    // draft, which takes precedence over the native LLM author.
+    let spec_dir = std::env::var("OPENFAB_SPEC_DIR").unwrap_or_else(|_| "specs".to_string());
+    let source = match spec_file {
+        Some(p) => SpecSource::File(p.to_path_buf()),
+        None => spec_source(),
+    };
+    match source {
+        SpecSource::File(path) => {
+            let md = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading OPENFAB_SPEC_FILE {}", path.display()))?;
+            let authored = crate::adapters::agent_spec::author_from_md(
+                &md,
+                intent,
+                Path::new(&spec_dir),
+                "ingested".to_string(),
+                "coordinator".to_string(),
+            )?;
+            let spec = authored.contract.folded_spec();
+            spec.validate().context("the ingested spec was invalid")?;
+            return Ok((spec, authored.model, authored.provider));
+        }
+        SpecSource::AgentSpecDraft => {
+            let authored =
+                crate::adapters::agent_spec::author_via_agent_spec(intent, Path::new(&spec_dir))?;
+            let spec = authored.contract.folded_spec();
+            spec.validate()
+                .context("the agent-spec-authored spec was invalid")?;
+            return Ok((spec, authored.model, authored.provider));
+        }
+        SpecSource::NativeLlm => {}
     }
     let (a, model, provider) = crate::adapters::llm_backend::author_spec(intent)?;
     let spec = Spec {
@@ -80,7 +146,25 @@ pub fn build(
     gate_mode: &str,
     policy: &Policy,
 ) -> Result<RunRecord> {
-    let (spec, model, provider) = author_spec(intent)?;
+    build_with_spec_file(
+        repo, intent, run_id, base, forge_kind, forge_name, gate_mode, policy, None,
+    )
+}
+
+/// `build`, optionally ingesting an explicit uploaded `.spec.md` (Phase 2.1 #2).
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_spec_file(
+    repo: &Path,
+    intent: &str,
+    run_id: String,
+    base: &str,
+    forge_kind: &str,
+    forge_name: Option<String>,
+    gate_mode: &str,
+    policy: &Policy,
+    spec_file: Option<&Path>,
+) -> Result<RunRecord> {
+    let (spec, model, provider) = author_spec_with_file(intent, spec_file)?;
     start_run(
         repo,
         RunRequest {
@@ -136,6 +220,217 @@ pub fn refine(
         },
         policy,
     )
+}
+
+/// One stage of the spec-cycle pipeline for the dashboard process-detail view (C1).
+#[derive(Debug, Clone, Serialize)]
+pub struct Stage {
+    pub key: String,
+    pub label: String,
+    /// "done" | "active" | "pending" | "failed".
+    pub state: String,
+}
+
+/// Ordered pipeline stages and a substring marker that, if present in any event message,
+/// means the stage was reached.
+const STAGE_MARKERS: &[(&str, &str, &str)] = &[
+    ("spec", "Spec", "compiled into"),
+    ("implement", "Implement", "base '"),
+    ("verify", "Verify", "acceptance check"),
+    ("sign", "Sign", "signed in-toto"),
+    ("gate", "Gate", "trust gate"),
+];
+
+/// Derive the stage pipeline from a run's events + status (pure; the UI renders it).
+pub fn derive_stages(event_msgs: &[String], status: &str) -> Vec<Stage> {
+    let merged = status == "merged";
+    let failed = status == "failed";
+    let mut stages: Vec<Stage> = STAGE_MARKERS
+        .iter()
+        .map(|(key, label, marker)| {
+            let done = merged || event_msgs.iter().any(|m| m.contains(marker));
+            Stage {
+                key: key.to_string(),
+                label: label.to_string(),
+                state: if done { "done" } else { "pending" }.to_string(),
+            }
+        })
+        .collect();
+    stages.push(Stage {
+        key: "merge".into(),
+        label: "Merge".into(),
+        state: if merged { "done" } else { "pending" }.into(),
+    });
+    // The first pending stage becomes "active" (or "failed" if the run failed there).
+    if let Some(s) = stages.iter_mut().find(|s| s.state == "pending") {
+        s.state = if failed { "failed" } else { "active" }.into();
+    }
+    stages
+}
+
+/// Project a run's status/flags onto a kanban board lane (D1). `blocked` means the work is
+/// done (implemented, verified, signed) and only the human N-of-M release sign-off remains —
+/// so the lane is "sign-off", not "review" (the code review/verification already happened).
+pub fn board_lane(status: &str, accepted: bool, merged: bool) -> &'static str {
+    match status {
+        "merged" => "merged",
+        _ if merged => "merged",
+        "accepted" => "accepted",
+        _ if accepted => "accepted",
+        "blocked" => "sign-off",
+        "failed" => "failed",
+        "rejected" => "rejected",
+        "running" => "implementing",
+        _ => "implementing",
+    }
+}
+
+/// Render the multi-spec dependency graph (DOT) via `agent-spec graph` (D2).
+pub fn spec_graph(spec_dir: &Path) -> Result<String> {
+    let bin = std::env::var("OPENFAB_AGENT_SPEC_BIN").unwrap_or_else(|_| "agent-spec".to_string());
+    let out = Command::new(&bin)
+        .args(["graph", "--spec-dir", &spec_dir.to_string_lossy()])
+        .output()
+        .with_context(|| format!("running `{bin} graph` — is agent-spec installed?"))?;
+    if !out.status.success() {
+        bail!(
+            "agent-spec graph failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// An uploaded document is either an agent-spec contract or a requirements doc (Phase 2.1).
+pub fn classify_upload(name: &str, body: &str) -> &'static str {
+    let trimmed = body.trim_start();
+    if name.to_lowercase().ends_with(".spec.md") || trimmed.starts_with("spec:") {
+        "spec"
+    } else {
+        "requirements"
+    }
+}
+
+/// Destination filename for an uploaded doc in the project's spec dir: `<slug>.spec.md` or
+/// `<slug>.requirements.md`. The slug is filesystem-safe (no separators/traversal).
+pub fn upload_dest_name(name: &str, kind: &str) -> String {
+    let base = name
+        .trim_end_matches(".spec.md")
+        .trim_end_matches(".requirements.md");
+    let id = slug(base);
+    if kind == "spec" {
+        format!("{id}.spec.md")
+    } else {
+        format!("{id}.requirements.md")
+    }
+}
+
+/// Save an uploaded document into the project's spec dir; returns (id, kind, dest path).
+pub fn save_upload(spec_dir: &Path, name: &str, body: &str) -> Result<(String, String, PathBuf)> {
+    let kind = classify_upload(name, body).to_string();
+    let fname = upload_dest_name(name, &kind);
+    let id = fname
+        .trim_end_matches(".spec.md")
+        .trim_end_matches(".requirements.md")
+        .to_string();
+    std::fs::create_dir_all(spec_dir)
+        .with_context(|| format!("creating spec dir {}", spec_dir.display()))?;
+    let dest = spec_dir.join(&fname);
+    std::fs::write(&dest, body).with_context(|| format!("writing {}", dest.display()))?;
+    Ok((id, kind, dest))
+}
+
+/// Stage pipeline for one run (reads its events + status).
+pub fn stages(repo: &Path, run: &str) -> Result<Vec<Stage>> {
+    let rec = runstate::load_run(repo, run)?;
+    let msgs: Vec<String> = runstate::read_events(repo, run, 0)
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
+    Ok(derive_stages(&msgs, &rec.status))
+}
+
+/// One board card: a run with its derived lane + key links (D1).
+#[derive(Debug, Clone, Serialize)]
+pub struct BoardItem {
+    pub run_id: String,
+    pub spec_ref: String,
+    pub lane: String,
+    pub base_name: String,
+    pub pr_url: String,
+    pub created: String,
+}
+
+/// Project all runs onto the kanban board lanes.
+pub fn board(repo: &Path) -> Result<Vec<BoardItem>> {
+    Ok(runstate::list_runs(repo)?
+        .into_iter()
+        .map(|r| BoardItem {
+            lane: board_lane(&r.status, r.accepted, r.merged).to_string(),
+            run_id: r.run_id,
+            spec_ref: r.spec_ref,
+            base_name: r.base_name,
+            pr_url: r.pr_url,
+            created: r.created,
+        })
+        .collect())
+}
+
+/// A run document for the dashboard (Phase 2 A3 document engineering).
+#[derive(Debug, Clone, Serialize)]
+pub struct Doc {
+    pub name: String,
+    pub kind: String,
+    pub content: String,
+}
+
+/// Classify a committed file path into a document kind for the dashboard.
+pub fn classify_doc_kind(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    if n.ends_with(".requirements.md") {
+        "requirements"
+    } else if n.ends_with(".spec.md") || n.ends_with(".spec.yaml") {
+        "spec"
+    } else if n.ends_with(".design.md") {
+        "design"
+    } else if n.ends_with("readme.md") {
+        "readme"
+    } else if n.starts_with("provenance/") {
+        "provenance"
+    } else {
+        "code"
+    }
+}
+
+/// The document bundle for a run: requirements + spec contract + design + code + readme,
+/// classified and read from the committed repo (so docs travel with the product).
+pub fn docs(repo: &Path, run: &str) -> Result<Vec<Doc>> {
+    let rec = runstate::load_run(repo, run)?;
+    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, run)?)?;
+    let id = &spec.id;
+    let mut out = Vec::new();
+    let mut add = |rel: &str| {
+        if let Ok(content) = std::fs::read_to_string(repo.join(rel)) {
+            out.push(Doc {
+                name: rel.to_string(),
+                kind: classify_doc_kind(rel).to_string(),
+                content,
+            });
+        }
+    };
+    add(&format!("specs/{id}.requirements.md"));
+    add(&format!("specs/{id}.spec.md"));
+    add(&format!("specs/{id}.design.md"));
+    add("README.md");
+    // generated code files (from the signed attestation's per-file attribution).
+    if let Ok(text) = std::fs::read_to_string(rec.attestation_path(repo)) {
+        if let Ok(att) = Attestation::from_json(&text) {
+            for g in &att.statement.predicate.generated {
+                add(&g.path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Reserve a run id for a fresh NL build (no LLM call needed — derived from the intent).
@@ -237,6 +532,19 @@ pub struct SignoffOutcome {
 }
 
 /// A maintainer signs off; on N-of-M the gate opens and (for a local forge) the PR merges.
+/// Sign off as the maintainer mapped to a Matrix user id (Phase 2: Robrix approval relay).
+/// Rejects any mxid not mapped to exactly one allowlisted maintainer (see `resolve_signer`).
+pub fn signoff_by_mxid(
+    repo: &Path,
+    run: &str,
+    mxid: &str,
+    policy: &Policy,
+) -> Result<SignoffOutcome> {
+    let maintainers = runstate::load_maintainers(repo)?;
+    let name = runstate::resolve_signer(mxid, &maintainers)?.name.clone();
+    signoff(repo, run, &name, policy)
+}
+
 pub fn signoff(repo: &Path, run: &str, as_name: &str, policy: &Policy) -> Result<SignoffOutcome> {
     let mut rec = runstate::load_run(repo, run)?;
     let maint_dids = runstate::maintainer_dids(repo)?;
@@ -479,21 +787,39 @@ pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOut
         }
     }
 
-    // Re-run the contract in the sandbox.
+    // Re-run the contract. If the spec was authored via agent-spec (the attestation records
+    // a contract hash), re-verify by re-running `agent-spec lifecycle` against the committed
+    // `.spec.md`; otherwise re-run the native sandbox acceptance commands.
     let mut checks = vec![];
     let mut all_passed = true;
-    for a in &spec.acceptance {
-        let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
-        let exec = sandbox::exec_gated(policy, &cmd, repo)?;
-        if a.must_pass && !exec.passed() {
-            all_passed = false;
+    if att.statement.predicate.spec_contract_sha256.is_some() {
+        let spec_md = crate::adapters::agent_spec::repo_spec_md_path(repo, &spec.id);
+        let (outcomes, _verdicts) = crate::adapters::agent_spec::lifecycle_run(&spec_md, repo)?;
+        for o in &outcomes {
+            if !o.passed {
+                all_passed = false;
+            }
+            checks.push(ReproduceCheck {
+                id: o.id.clone(),
+                check: o.check.clone(),
+                passed: o.passed,
+                exit_code: o.exit_code,
+            });
         }
-        checks.push(ReproduceCheck {
-            id: a.id.clone(),
-            check: a.check.clone(),
-            passed: exec.passed(),
-            exit_code: exec.exit_code,
-        });
+    } else {
+        for a in &spec.acceptance {
+            let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
+            let exec = sandbox::exec_gated(policy, &cmd, repo)?;
+            if a.must_pass && !exec.passed() {
+                all_passed = false;
+            }
+            checks.push(ReproduceCheck {
+                id: a.id.clone(),
+                check: a.check.clone(),
+                passed: exec.passed(),
+                exit_code: exec.exit_code,
+            });
+        }
     }
 
     Ok(ReproduceOutcome {
@@ -700,4 +1026,98 @@ pub fn audit(repo: &Path, run: &str) -> Result<AuditTrail> {
             attributable provenance the EU Cyber Resilience Act (CRA) and SLSA expect."
             .into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_stages_marks_done_from_events() {
+        let msgs = vec![
+            "spec demo#v1 compiled into 1 task-card(s)".to_string(),
+            "base 'claude' (m) → implemented".to_string(),
+            "sandbox = x; running 2 acceptance check(s)".to_string(),
+            "signed in-toto/SLSA attestation".to_string(),
+        ];
+        let stages = derive_stages(&msgs, "blocked");
+        let by = |k: &str| stages.iter().find(|s| s.key == k).unwrap().state.clone();
+        assert_eq!(by("spec"), "done");
+        assert_eq!(by("implement"), "done");
+        assert_eq!(by("verify"), "done");
+        assert_eq!(by("sign"), "done");
+        assert_eq!(by("gate"), "active");
+        assert_eq!(by("merge"), "pending");
+    }
+
+    #[test]
+    fn test_derive_stages_merged_completes() {
+        let stages = derive_stages(&[], "merged");
+        assert!(stages.iter().all(|s| s.state == "done"));
+    }
+
+    #[test]
+    fn test_classify_upload_spec() {
+        assert_eq!(classify_upload("x.spec.md", "spec: task\nname: y"), "spec");
+        assert_eq!(classify_upload("anything.txt", "spec:\n..."), "spec");
+    }
+
+    #[test]
+    fn test_classify_upload_requirements() {
+        assert_eq!(
+            classify_upload("notes.md", "# Requirements\n\nWe need a CLI…"),
+            "requirements"
+        );
+        assert_eq!(classify_upload("doc", "just prose"), "requirements");
+    }
+
+    #[test]
+    fn test_upload_dest_name() {
+        assert_eq!(
+            upload_dest_name("My Spec.spec.md", "spec"),
+            "my-spec.spec.md"
+        );
+        assert_eq!(
+            upload_dest_name("Payment Flow", "requirements"),
+            "payment-flow.requirements.md"
+        );
+        // traversal/separators are slugged away
+        assert!(!upload_dest_name("../../etc/passwd", "requirements").contains('/'));
+    }
+
+    #[test]
+    fn test_board_lane_from_status() {
+        assert_eq!(board_lane("running", false, false), "implementing");
+        // blocked = work done, only the human release sign-off remains.
+        assert_eq!(board_lane("blocked", false, false), "sign-off");
+        assert_eq!(board_lane("merged", true, true), "merged");
+    }
+
+    #[test]
+    fn test_classify_doc_kind_spec_and_requirements() {
+        assert_eq!(classify_doc_kind("specs/x.spec.md"), "spec");
+        assert_eq!(classify_doc_kind("specs/x.requirements.md"), "requirements");
+    }
+
+    #[test]
+    fn test_classify_doc_kind_code() {
+        assert_eq!(classify_doc_kind("src/main.rs"), "code");
+        assert_eq!(classify_doc_kind("Cargo.toml"), "code");
+        assert_eq!(classify_doc_kind("README.md"), "readme");
+    }
+
+    #[test]
+    fn test_spec_source_prefers_file() {
+        assert_eq!(
+            resolve_spec_source(Some("specs/x.spec.md"), true),
+            SpecSource::File("specs/x.spec.md".into())
+        );
+        // empty file value is ignored
+        assert_eq!(
+            resolve_spec_source(Some("  "), true),
+            SpecSource::AgentSpecDraft
+        );
+        assert_eq!(resolve_spec_source(None, true), SpecSource::AgentSpecDraft);
+        assert_eq!(resolve_spec_source(None, false), SpecSource::NativeLlm);
+    }
 }

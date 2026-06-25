@@ -100,14 +100,48 @@ async function acFetch(path, opts = {}) {
 function instruction(body) {
   const checks = (body.acceptance || []).map((c, i) => `  ${i + 1}. ${c}`).join('\n');
   const assumptions = (body.assumptions || []).map((a) => `  - ${a}`).join('\n');
+  const tree = (body.existing_tree || []).map((p) => `  ${p}`).join('\n');
+  let modeBlock;
+  if (body.mode === 'workspace') {
+    modeBlock = [
+      `MODE: SHARED WORKSPACE. The repository is on THIS machine at:`,
+      `  ${body.repo_path}`,
+      `cd into it. READ whatever files you need for full context (imports, callers, types).`,
+      `EDIT the allowed file(s) IN PLACE there. Keep changes minimal; do NOT replace`,
+      `Cargo.toml/package.json wholesale or drop dependencies. Run the bound tests in that repo`,
+      `(e.g. cargo test <filter>) until they pass.`,
+      `When done, reply task_result with status:"completed", model, and`,
+      `changed_paths: ["<relpath you edited>", ...]  (NO files map needed — your edits are on disk).`,
+    ].join('\n');
+  } else if (body.mode === 'refactor') {
+    modeBlock = [
+      `MODE: REFACTOR an EXISTING repo. The current source is in schema.payload.existing_files`,
+      `(a map of relpath → full content)${body.existing_truncated ? ' — TRUNCATED; the full file tree is below' : ''}.`,
+      `Modify those files in place. Return ONLY the files you actually changed or added, with`,
+      `their FULL new content. Do NOT regenerate the project, replace Cargo.toml/package.json`,
+      `wholesale, or drop existing dependencies/modules — that breaks the build.`,
+      tree ? `REPO FILE TREE:\n${tree}` : '',
+    ].filter(Boolean).join('\n');
+  } else {
+    modeBlock = `MODE: GREENFIELD — emit a complete, buildable project at the target dir.`;
+  }
+  const allow = (body.allow || []).map((p) => `  - ${p}`).join('\n');
+  const requirements = (body.requirements || '').trim();
   return [
-    `OpenFab task — implement the spec below. Spec: ${body.spec_ref}`,
+    `═══ OpenFab task briefing ═══  (spec: ${body.spec_ref})`,
+    `You are the implementer. Everything you need is below — you should NOT have to reverse-`,
+    `engineer the task from the codebase. Read this briefing first, then do exactly this.`,
     ``,
-    `INTENT:\n${body.intent}`,
+    `WHAT TO BUILD (intent):\n${body.intent}`,
+    ``,
+    requirements ? `WHY / FULL REQUIREMENTS (the agreed brief):\n${requirements}\n` : '',
+    allow ? `FILES YOU MAY CHANGE (and ONLY these):\n${allow}\n` : '',
+    `HOW TO WORK:`,
+    modeBlock,
     ``,
     `LANGUAGE: ${body.language || 'any'}  TARGET DIR: ${body.target_dir || 'app'}/`,
     assumptions ? `CONSTRAINTS / DECISIONS:\n${assumptions}` : '',
-    checks ? `BOUND TEST SCENARIOS (your code + tests must make these pass):\n${checks}` : '',
+    checks ? `DONE WHEN these bound tests pass (write them with these EXACT names):\n${checks}` : '',
     ``,
     `When done, reply with a message whose schema.payload =`,
     `{ kind:"task_result", task_id:"<id>", status:"completed", model:"<model>",`,
@@ -142,7 +176,13 @@ async function createTask(body) {
       type: 'request',
       summary: `Implement ${body.spec_ref}`,
       full: prompt,
-      schema: { kind: 'task_request', version: 1, payload: { task_id: acTaskId, room: body.room } },
+      schema: { kind: 'task_request', version: 1, payload: {
+        task_id: acTaskId, room: body.room,
+        mode: body.mode || 'greenfield',
+        repo_path: body.repo_path || null,        // shared-workspace mode: edit in place here
+        existing_files: body.existing_files || {}, // mount mode: code shipped over the bridge
+        existing_tree: body.existing_tree || [],
+      } },
     }),
   });
 
@@ -168,11 +208,12 @@ function harvestResult(acTaskId) {
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     const p = m?.schema?.payload;
-    if (m?.schema?.kind === 'task_result' && p?.task_id === acTaskId && (p.files || p.attachments)) {
+    if (m?.schema?.kind === 'task_result' && p?.task_id === acTaskId && (p.files || p.attachments || p.changed_paths)) {
       const files = p.files || {};
       const file_hashes = {};
       for (const [fp, content] of Object.entries(files)) file_hashes[fp] = sha256(content);
-      return { files, file_hashes, model: p.model || '', prompt: p.prompt || '' };
+      // workspace mode: the agent edited in place and reports which paths it changed
+      return { files, file_hashes, model: p.model || '', prompt: p.prompt || '', changed_paths: p.changed_paths || [] };
     }
   }
   return null;
@@ -183,7 +224,7 @@ async function getTask(id) {
   // The implementer reports via a `task_result` message, not by transitioning the task —
   // so harvest the message FIRST, regardless of the agent-chat task status.
   const harvested = harvestResult(acTaskId);
-  if (harvested && Object.keys(harvested.files).length) {
+  if (harvested && (Object.keys(harvested.files).length || (harvested.changed_paths || []).length)) {
     return { status: 'done', ...harvested };
   }
   // No result yet: surface failed only if the task itself failed; else keep running.
@@ -197,17 +238,79 @@ async function getTask(id) {
   return { status: 'running' };
 }
 
-async function postMessage(room, msg) {
+// Resolve the agent-chat GROUP that maps to an OpenFab post target so the message reaches the
+// Matrix room (Robrix). `target` may be a room id (`!room:server`), a project name, or a group.
+// Chain: project → bound room (via /api/rooms) → group (from the message store's sourceRoom).
+async function resolveGroup(target) {
+  let room = target && target.startsWith('!') ? target : null;
+  if (!room && target) {
+    try {
+      const list = await (await fetch(`${OPENFAB_URL}/api/rooms`)).json();
+      const b = (list || []).find((x) => x.project === target) || (list || [])[0];
+      if (b) room = b.room;
+    } catch { /* fall through */ }
+  }
+  if (room && MESSAGES_FILE) {
+    try {
+      let msgs = JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
+      if (!Array.isArray(msgs)) msgs = msgs?.messages || [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if ((msgs[i].sourceRoom || msgs[i].source_room) === room && msgs[i].group) {
+          return msgs[i].group;
+        }
+      }
+    } catch { /* fall through */ }
+  }
+  return process.env.BRIDGE_POST_GROUP || null;
+}
+
+// Post OpenFab notifications straight into the Matrix room via the bot (which is a room member),
+// so they reach Robrix reliably — the agent-chat group/puppet path can't relay `openfab-bridge`
+// (it has no Matrix puppet in the room). Resolve the room from the project binding.
+const MX_HS = process.env.MATRIX_HOMESERVER || '';
+const MX_USER = process.env.MATRIX_BOT_USERNAME || '';
+const MX_PASS = process.env.MATRIX_BOT_PASSWORD || '';
+let _mxToken = null;
+let _mxTxn = 0;
+async function matrixToken() {
+  if (_mxToken) return _mxToken;
+  if (!MX_HS || !MX_USER || !MX_PASS) return null;
+  try {
+    const r = await fetch(`${MX_HS}/_matrix/client/v3/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'm.login.password', identifier: { type: 'm.id.user', user: MX_USER }, password: MX_PASS }),
+    });
+    _mxToken = (await r.json()).access_token || null;
+  } catch { _mxToken = null; }
+  return _mxToken;
+}
+async function resolveRoomId(target) {
+  if (target && target.startsWith('!')) return target;
+  try {
+    const list = await (await fetch(`${OPENFAB_URL}/api/rooms`)).json();
+    const b = (list || []).find((x) => x.project === target) || (list || [])[0];
+    return b ? b.room : null;
+  } catch { return null; }
+}
+async function postMessage(target, msg) {
+  const token = await matrixToken();
+  const room = await resolveRoomId(target);
+  if (token && room) {
+    const txn = `of-${Date.now()}-${_mxTxn++}`;
+    const res = await fetch(
+      `${MX_HS}/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.room.message/${txn}`,
+      { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ msgtype: 'm.text', body: msg }) },
+    );
+    if (res.ok) return;
+    if (res.status === 401) _mxToken = null; // token expired — drop so next call re-logs in
+    log(`matrix post to ${room} failed: ${res.status}`);
+  }
+  // Fallback: drop it into the agent-chat store (visible in the monitor, not the Matrix room).
   await acFetch('/api/messages', {
     method: 'POST',
-    body: JSON.stringify({
-      from: SELF,
-      to: ASSIGNEE,
-      type: 'inform',
-      summary: 'OpenFab',
-      full: msg,
-      schema: { kind: 'note', version: 1, payload: { room } },
-    }),
+    body: JSON.stringify({ from: SELF, to: ASSIGNEE, type: 'inform', summary: 'OpenFab', full: msg,
+      schema: { kind: 'note', version: 1, payload: { room: target } } }),
   });
 }
 
@@ -230,6 +333,55 @@ async function peekAgent(name, lines) {
   }
 }
 
+// --- Phase 3: dispatch an agent-spec AI review to the reviewer agent + harvest decisions ---
+const BRIDGE_REVIEWER = process.env.BRIDGE_REVIEWER || 'wf_reviewer';
+const reviews = new Map(); // review_id → { acTaskId }
+async function createReview(body) {
+  const created = await acFetch('/api/tasks', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: `OpenFab review: ${body.spec_ref}`,
+      description: 'Review AI-pending agent-spec scenarios',
+      priority: 'p1', granularity: 'task', assignee: BRIDGE_REVIEWER,
+      created_by: SELF, labels: ['openfab', 'review'],
+    }),
+  });
+  const acTaskId = created?.task?.id;
+  if (!acTaskId) throw new Error('agent-chat did not return a task id');
+  await acFetch('/api/messages', {
+    method: 'POST',
+    body: JSON.stringify({
+      from: SELF, to: BRIDGE_REVIEWER, type: 'request',
+      summary: `Review ${body.spec_ref}`,
+      full: 'OpenFab review request — decide each AI-pending scenario by reading the code.',
+      schema: { kind: 'review_request', version: 1, payload: {
+        review_id: acTaskId, spec_ref: body.spec_ref,
+        requests: body.requests || [], files: body.files || {} } },
+    }),
+  });
+  reviews.set(`rv-${acTaskId}`, { acTaskId });
+  return `rv-${acTaskId}`;
+}
+function harvestReview(acTaskId) {
+  if (!MESSAGES_FILE) return null;
+  let msgs;
+  try { msgs = JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8')); } catch { return null; }
+  if (!Array.isArray(msgs)) msgs = msgs?.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const p = msgs[i]?.schema?.payload;
+    if (msgs[i]?.schema?.kind === 'review_result' && p?.review_id === acTaskId && p.decisions) {
+      return { decisions: p.decisions };
+    }
+  }
+  return null;
+}
+async function getReview(id) {
+  const acTaskId = id.startsWith('rv-') ? id.slice(3) : id;
+  const h = harvestReview(acTaskId);
+  if (h && Array.isArray(h.decisions)) return { status: 'done', decisions: h.decisions };
+  return { status: 'running' };
+}
+
 // --- #3: submit a coordinator's finalized docs to OpenFab (scoped to the room's project) ---
 async function submitDoc({ room, id, requirements_md, spec_md, project }) {
   const res = await fetch(`${OPENFAB_URL}/api/ingest`, {
@@ -241,10 +393,42 @@ async function submitDoc({ room, id, requirements_md, spec_md, project }) {
   return { ok: res.ok, status: res.status, body: text.slice(0, 300) };
 }
 
+// Submit a build the agent-chat team produced in-room → OpenFab imports it and runs it through
+// the gate (verify → sign → conformance → N-of-M sign-off). The single convergence point: any
+// build path (dashboard or room) ends at OpenFab's gate. Pre-ingest the spec via submitDoc.
+async function submitBuild({ room, id, files, model, builder, gate, project }) {
+  const res = await fetch(`${OPENFAB_URL}/api/import-build`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room, id, files, model, builder, gate, project }),
+  });
+  const text = await res.text();
+  let run_id;
+  try { run_id = JSON.parse(text).run_id; } catch { /* surface raw below */ }
+  return { ok: res.ok, status: res.status, run_id, body: text.slice(0, 300) };
+}
+
 // --- B2: relay a Robrix approval to OpenFab's sign-off / reject API ---
-async function relayApproval(run, mxid, action) {
+// Resolve which OpenFab project a room is bound to (so a run's sign-off scopes to the right
+// workspace). Cached briefly; falls back to the default project when unbound.
+let _roomMapAt = 0, _roomMap = {};
+async function roomProject(room) {
+  if (!room) return null;
+  if (Date.now() - _roomMapAt > 3000) {
+    try {
+      const r = await fetch(`${OPENFAB_URL}/api/rooms`);
+      const list = await r.json();
+      _roomMap = Object.fromEntries((list || []).map((b) => [b.room, b.project]));
+      _roomMapAt = Date.now();
+    } catch { /* keep stale map */ }
+  }
+  return _roomMap[room] || null;
+}
+
+async function relayApproval(run, mxid, action, project) {
+  const q = project && project !== 'default' ? `?project=${encodeURIComponent(project)}` : '';
   if (action === 'reject') {
-    const res = await fetch(`${OPENFAB_URL}/api/runs/${encodeURIComponent(run)}/reject`, {
+    const res = await fetch(`${OPENFAB_URL}/api/runs/${encodeURIComponent(run)}/reject${q}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ by: mxid }),
@@ -252,7 +436,7 @@ async function relayApproval(run, mxid, action) {
     return { ok: res.ok, status: res.status };
   }
   // approve / sign → N-of-M sign-off as the mapped maintainer (OpenFab rejects unmapped mxids)
-  const res = await fetch(`${OPENFAB_URL}/api/runs/${encodeURIComponent(run)}/signoff`, {
+  const res = await fetch(`${OPENFAB_URL}/api/runs/${encodeURIComponent(run)}/signoff${q}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mxid }),
@@ -262,7 +446,19 @@ async function relayApproval(run, mxid, action) {
 }
 
 // B2 poller: scan the message store for Matrix-origin approval commands and relay them.
-const seenApprovals = new Set();
+// Bind the message's own Matrix room to an OpenFab project (Phase 2.1 #3, from-the-room UX):
+// a user types `/bind <project>` (or `bind <project>`) in the room; the room id comes from
+// the server-attested `source_room`, so no curl / no knowing the room id is needed.
+async function relayBind(room, project) {
+  const res = await fetch(`${OPENFAB_URL}/api/rooms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room, project }),
+  });
+  return { ok: res.ok, status: res.status };
+}
+
+const seenCmds = new Set();
 async function pollApprovals() {
   if (!MESSAGES_FILE) return;
   let msgs;
@@ -272,23 +468,44 @@ async function pollApprovals() {
     return;
   }
   if (!Array.isArray(msgs)) msgs = msgs?.messages || [];
-  const re = /^\s*(approve|sign|reject)\s+(\S+)/i;
+  const approveRe = /^\s*(approve|sign|reject)\s+(\S+)/i;
+  const bindRe = /^\s*\/?bind\s+(\S+)/i;
   for (const m of msgs) {
-    // Only honor approvals that genuinely came through Matrix (a server-attested sender) —
+    // Only honor commands that genuinely came through Matrix (a server-attested sender) —
     // do NOT trust a self-declared sender_mxid on a non-matrix message (privilege escalation).
     const mxid = m.sender_mxid || m.senderMxid;
     if (!mxid || m.source !== 'matrix') continue;
-    const body = m.full || m.summary || '';
-    const match = re.exec(body);
-    if (!match) continue;
+    // Strip leading Matrix mention markup (`[@coordinator](https://matrix.to/#/@…)`) so a
+    // natural "@coordinator approve <run>" is caught by the IDENTITY-CHECKED relay here, rather
+    // than falling through to an agent that would forge the sign-off via the CLI.
+    const body = (m.full || m.summary || '').replace(/\[@[^\]]*\]\([^)]*\)/g, '').trim();
+    const room = m.source_room || m.sourceRoom;
     const key = m.id || `${mxid}:${body}`;
-    if (seenApprovals.has(key)) continue;
-    seenApprovals.add(key);
+    if (seenCmds.has(key)) continue;
+
+    const bindM = bindRe.exec(body);
+    if (bindM && room) {
+      seenCmds.add(key);
+      try {
+        const r = await relayBind(room, bindM[1]);
+        log(`bound room ${room} → project ${bindM[1]} (by ${mxid}) → ${r.status}`);
+      } catch (e) {
+        log(`room bind failed for ${room}: ${e.message}`);
+      }
+      continue;
+    }
+
+    const match = approveRe.exec(body);
+    if (!match) continue;
+    seenCmds.add(key);
     const action = match[1].toLowerCase();
     const run = match[2];
     try {
-      const r = await relayApproval(run, mxid, action);
-      log(`relayed ${action} ${run} by ${mxid} → ${r.status}`);
+      // Scope the sign-off to the room's bound project (so a dashboard-built run in the
+      // `openfab` project is signed there, not in `default`).
+      const project = await roomProject(room);
+      const r = await relayApproval(run, mxid, action, project);
+      log(`relayed ${action} ${run} by ${mxid} (project ${project || 'default'}) → ${r.status}`);
     } catch (e) {
       log(`approval relay failed for ${run}: ${e.message}`);
     }
@@ -356,6 +573,22 @@ const server = http.createServer(async (req, res) => {
       const r = await submitDoc(body);
       return send(res, r.ok ? 200 : 502, r);
     }
+    // Room-built code → OpenFab gate — POST /submit-build {room, id, files, model, gate} → {run_id}
+    if (req.method === 'POST' && url.pathname === '/submit-build') {
+      const body = await readBody(req);
+      const r = await submitBuild(body);
+      return send(res, r.ok ? 200 : 502, r);
+    }
+    // Phase 3: agent-spec AI review — POST /review {spec_ref, requests, files, room} → {review_id}
+    if (req.method === 'POST' && url.pathname === '/review') {
+      const body = await readBody(req);
+      const review_id = await createReview(body);
+      return send(res, 200, { review_id });
+    }
+    const reviewMatch = url.pathname.match(/^\/review\/(.+)$/);
+    if (req.method === 'GET' && reviewMatch) {
+      return send(res, 200, await getReview(decodeURIComponent(reviewMatch[1])));
+    }
 
     send(res, 404, { error: 'not found' });
   } catch (e) {
@@ -364,12 +597,73 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Make the room↔project binding "live": actively harvest specs the coordinator produces in
+// its workspace (native issue-workflow writes `specs/*.spec.md` + `issues/*.md` there but never
+// calls the API) and ingest them into the bound OpenFab project, so issues built in Robrix show
+// up on the dashboard without anyone pushing. Set BRIDGE_COORDINATOR_WS (comma-separated paths).
+const COORD_WS = (process.env.BRIDGE_COORDINATOR_WS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+const seenSpecs = new Set();
+async function harvestProject() {
+  // explicit override, else the single bound project (unambiguous in the common case).
+  if (process.env.BRIDGE_HARVEST_PROJECT) return process.env.BRIDGE_HARVEST_PROJECT;
+  try {
+    const r = await fetch(`${OPENFAB_URL}/api/rooms`);
+    const list = await r.json();
+    if (Array.isArray(list) && list.length === 1) return list[0].project;
+  } catch { /* fall through */ }
+  return null;
+}
+async function harvestCoordinatorSpecs() {
+  if (!COORD_WS.length) return;
+  const project = await harvestProject();
+  if (!project) return; // ambiguous (0 or >1 bindings) → set BRIDGE_HARVEST_PROJECT
+  for (const ws of COORD_WS) {
+    const specDir = path.join(ws, 'specs');
+    let entries;
+    try { entries = fs.readdirSync(specDir); } catch { continue; }
+    for (const f of entries) {
+      if (!f.endsWith('.spec.md')) continue;
+      const full = path.join(specDir, f);
+      let mtime;
+      try { mtime = fs.statSync(full).mtimeMs; } catch { continue; }
+      const key = `${full}:${mtime}`;
+      if (seenSpecs.has(key)) continue;
+      seenSpecs.add(key);
+      // id = filename without `task-` prefix and `.spec.md` suffix.
+      const id = f.replace(/^task-/, '').replace(/\.spec\.md$/, '');
+      const num = (id.match(/^(\d+)/) || [])[1];
+      let spec_md, requirements_md = '';
+      try { spec_md = fs.readFileSync(full, 'utf8'); } catch { continue; }
+      if (num) {
+        for (const sub of ['issues', 'docs/designs', 'docs/plans']) {
+          try {
+            const hit = fs.readdirSync(path.join(ws, sub)).find((x) => x.startsWith(`${num}-`));
+            if (hit) { requirements_md = fs.readFileSync(path.join(ws, sub, hit), 'utf8'); break; }
+          } catch { /* keep looking */ }
+        }
+      }
+      try {
+        const res = await fetch(`${OPENFAB_URL}/api/ingest`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, project, spec_md, requirements_md }),
+        });
+        log(`harvested spec '${id}' → project ${project} → ${res.status}`);
+      } catch (e) {
+        log(`harvest ingest failed for ${id}: ${e.message}`);
+      }
+    }
+  }
+}
+
 server.listen(PORT, '127.0.0.1', () => {
   log(`listening on http://127.0.0.1:${PORT}  → agent-chat ${AC}  assignee=${ASSIGNEE}`);
   log(`approval relay → OpenFab ${OPENFAB_URL} (polling every ${APPROVAL_POLL_MS}ms)`);
   if (!MESSAGES_FILE) log('WARNING: set AGENTCHAT_DIR (the agent-chat repo path) so the bridge can harvest implementer results');
+  if (COORD_WS.length) log(`spec harvest watching: ${COORD_WS.join(', ')}`);
   registerSelf();
   setInterval(() => {
     pollApprovals().catch((e) => log(`approval poll error: ${e.message}`));
+    harvestCoordinatorSpecs().catch((e) => log(`harvest error: ${e.message}`));
   }, APPROVAL_POLL_MS);
 });

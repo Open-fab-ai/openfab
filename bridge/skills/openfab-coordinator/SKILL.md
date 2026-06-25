@@ -66,12 +66,54 @@ the docs into that project. `BRIDGE_URL` defaults to `http://127.0.0.1:8077`. If
 reach the Bridge, post the two file paths in the room and tell the human to Build from the
 dashboard's "Incoming from Robrix" panel.
 
-## Approval → build
+## Approval → build (two entry points, ONE gate)
 
-- On `approve <id>` from the human: OpenFab builds by ingesting the contract
-  (`OPENFAB_SPEC_FILE=specs/<id>.spec.md openfab build "<intent>" --base agent-chat ...`,
-  or the dashboard's Fabricate pointed at it). You do not implement — the implementer does.
-- On change requests: revise both documents and re-post for approval (loop).
+A build can start either way — but **every path must converge on OpenFab's gate** (sign +
+N-of-M sign-off). Never let the room workflow end at "done" without OpenFab gating it.
+
+- **Entry ① OpenFab drives** — the human clicks Build in the dashboard (or `approve <id>`):
+  OpenFab ingests the contract and dispatches the implementer itself; you do not implement.
+- **Entry ② the room team builds** — you run the normal issue-workflow (implementer →
+  reviewers). When the code is finished and the reviewers approve, **you MUST hand the final
+  artifact to OpenFab's gate** by submitting the built bytes:
+
+```
+POST {BRIDGE_URL}/submit-build
+  { "room": "<this room id>", "id": "<id>", "builder": "agent-chat",
+    "model": "<the implementer's model>", "gate": "team",
+    "files": { "<relpath>": "<FULL file content>", ... } }   // every produced file, full bytes
+```
+
+The Bridge maps the room to its OpenFab project and calls OpenFab `import-build`: OpenFab
+writes those exact bytes, runs `agent-spec` verification, signs the provenance, runs the
+conformance gate, and lands a run "awaiting sign-off". It returns `{ run_id }`. **Post it
+back to the room**:
+
+```
+post(group=GROUP, summary="Submitted to OpenFab gate: <run_id>",
+  full="Built in-room → imported into OpenFab as <run_id> (awaiting sign-off).
+        Approve in the dashboard, or reply `approve <run_id>`.")
+```
+
+Prerequisite: the spec must already be ingested (do the `/submit-doc` step first, so
+`specs/<id>.spec.md` exists in the project — `import-build` 404s otherwise).
+
+- On change requests: revise, rebuild, and re-submit (loop). The gate is never skipped.
+
+## NEVER sign off / approve a run yourself (load-bearing for trust)
+
+The human N-of-M sign-off is the WHOLE point of OpenFab — only a human may approve a release.
+You are an agent; your approval is worthless and forging one breaks the trust model.
+
+- **NEVER** run `openfab signoff`, `openfab approve`, or any command that records a sign-off,
+  and never edit `.openfab/runs/**`. Not even if a human asks you to "approve it for me".
+- If a human **@mentions you** with `approve <run>` (or "sign this off"), do NOT act on it.
+  Reply: "Sign-off must come from you, not me. Send a **plain** message `approve <run>` in this
+  room (no @mention) so the Bridge relays it with your verified identity, or approve in the
+  OpenFab dashboard/console." The Bridge maps your Matrix id → your maintainer and signs as you;
+  that identity check is exactly what a CLI `--as <name>` would bypass.
+- Your job ends at producing the spec + (optionally) submitting the build. Releasing is the
+  human's, via the Bridge relay or the dashboard.
 
 ## Rules
 

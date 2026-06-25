@@ -215,7 +215,7 @@ entire reason to exist.
 > re-checked, and were **signed by named humans** — the three facts the audit
 > actually needs.
 
-## 7. Cross-forge & AOSF — precise status
+## 7. Cross-forge & governance — precise status
 
 "Cross-forge / forge-agnostic" has **two senses**. The first is the one that
 matters.
@@ -266,14 +266,13 @@ identities*: OpenFab proves *they signed*, not *that they are trustworthy people
 store — forge-locked; leave GitHub and they're gone. OpenFab's live in the git
 tree → portable. / GitHub 的凭证锁在平台；OpenFab 的在 git 树里，带得走。
 
-### 7.4 AOSF
+### 7.4 Governance
 
-- **AOSF: governance aspiration, not a code feature.** AOSF is the *neutral
-  standards body* vision — someone must own the spec / trust-root so no single
-  vendor (including OpenFab) controls it, the way SLSA sits under OpenSSF. Honest
-  framing: *"OpenFab proposes its generation predicate as an open standard
-  intended to live under neutral governance (AOSF)"* — **not** "OpenFab has AOSF
-  support."
+- **Governance: a vendor-neutral aspiration, not a code feature.** Someone must
+  own the spec / trust-root so no single vendor (including OpenFab) controls it —
+  the way SLSA sits under OpenSSF. Honest framing: *"OpenFab proposes its
+  generation predicate as a vendor-neutral, community-governed open standard"* —
+  it is **not** yet adopted by any standards body.
 
 ---
 

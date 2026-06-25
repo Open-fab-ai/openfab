@@ -7,7 +7,7 @@ This page is what that URI **should resolve to** when published on the marketing
 human-readable + machine-readable definition of the predicate. This is that definition.
 
 > **Status:** draft open standard. Intended to be proposed as a neutral in-toto/SLSA
-> predicate type under neutral governance (AOSF / a foundation) — see `VALUE_PROPOSITION.md`.
+> predicate type under neutral, community governance — see `VALUE_PROPOSITION.md`.
 
 ---
 

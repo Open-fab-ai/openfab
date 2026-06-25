@@ -1,6 +1,6 @@
 # OpenFab — MVP Design & PRD
 
-**Status:** v0.2 implemented (this repo) · **License:** Apache-2.0 · **Governance:** AOSF (aosf.ai) — neutral foundation
+**Status:** v0.2 implemented (this repo) · **License:** Apache-2.0 · **Governance:** vendor-neutral, community-governed
 **Site:** open-fab.ai · **Implements:** SLSA · in-toto · Sigstore · C2PA · DID
 
 This document captures OpenFab's architecture decisions and its recursive (self-building) development method, and doubles as the product spec (PRD) for the MVP. It is the **design intent / north star**; for exactly what ships today and where each production-grade component is still a documented swap, see **§0 Implementation status** immediately below (and [`README.md`](../README.md), [ADR 0001](adr/0001-mvp-architecture-decisions.md), [ADR 0002](adr/0002-web-ui-and-base-forge-matrix.md)). Keep it short; detail lives in code and specs.
@@ -31,7 +31,7 @@ The repository implements this PRD through **v0.1** (the hand-built Core + CLI e
 
 ## 1. What OpenFab is
 
-**OpenFab is a fab** — an open-source software factory: natural language in, software products out. It is the first fab built on **open standards** (SLSA / in-toto / Sigstore / C2PA / DID) that makes its end products **reproducible · trustworthy · open · neutral · cross-forge**, running on a **swappable agent base** under neutral **AOSF** governance.
+**OpenFab is a fab** — an open-source software factory: natural language in, software products out. It is the first fab built on **open standards** (SLSA / in-toto / Sigstore / C2PA / DID) that makes its end products **reproducible · trustworthy · open · neutral · cross-forge**, running on a **swappable agent base** under vendor-neutral, community governance.
 
 OpenFab *composes* existing primitives (orchestrators, signing, provenance, identity) rather than reinventing them — but the **integrated whole is novel and unique**: no existing software delivers an open, neutral, cross-forge fab whose every output carries a reproducible build + signed provenance + AI/Human attribution. The fab is the product; the adjectives (reproducible · trustworthy · open · neutral · cross-forge) are what it *guarantees about everything it makes*. Artifacts (code) are cheap; the durable asset the fab produces is the **process + decision memory + signed provenance**.
 
@@ -249,4 +249,4 @@ These harness primitives are the *same* ones OpenFab formalizes in Core: feature
 
 ---
 
-*Implements: SLSA · in-toto · Sigstore · C2PA · DID. Governance: AOSF (aosf.ai). License: Apache-2.0.*
+*Implements: SLSA · in-toto · Sigstore · C2PA · DID. Vendor-neutral, community-governed. License: Apache-2.0.*

@@ -244,4 +244,4 @@ CLIs. Each lighter choice names its production-grade swap so nothing is overstat
 See [`docs/adr/0001-mvp-architecture-decisions.md`](docs/adr/0001-mvp-architecture-decisions.md)
 for why, and [`HANDOFF.md`](docs/HANDOFF.md) for done / next / open questions.
 
-License: Apache-2.0 · Governance: AOSF (aosf.ai) · Implements: SLSA · in-toto · Sigstore · DID.
+License: Apache-2.0 · vendor-neutral & community-governed · Implements: SLSA · in-toto · Sigstore · DID.

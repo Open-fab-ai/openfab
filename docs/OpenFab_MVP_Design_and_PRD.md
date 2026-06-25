@@ -15,7 +15,7 @@ The repository implements this PRD through **v0.1** (the hand-built Core + CLI e
 |---|---|---|
 | Language | Rust, single static binary | ✅ Rust 2021; `lib` + thin `bin` split |
 | NL → spec | a spec is derived from the NL ask | ✅ the **Base (LLM) authors the spec *and* its acceptance criteria** from the bare intent — **no mock, no template, no hardcoded app** |
-| Agent base | AgentScope + HiClaw, swappable | ✅ **5 bases** behind `BasePort`: `claude` (native) + `agentscope`/`hiclaw`/`agent-chat`/`openhands` (one `base_framework` adapter — **native** if its `OPENFAB_*_URL` is set, else **bridged** through the LLM backend, badged honestly) |
+| Agent base | AgentScope + HiClaw, swappable | ✅ **6 bases** behind `BasePort`: `claude` + `codex` (native CLIs) + `agentscope`/`hiclaw`/`agent-chat`/`openhands` (one `base_framework` adapter — **native** if its `OPENFAB_*_URL` is set, else **bridged** through the LLM backend, badged honestly) |
 | Forge | GitHub + Forgejo + Gitea (+ GitCode) | ✅ **4 forges** behind `ForgePort` (`forge_github` via `gh`; `forge_rest` for the Gitea-lineage three) — **live** if creds set, else an offline **local instance** that still proves portable in-repo provenance |
 | Identity / signing | Sigstore (cosign / fulcio / rekor) | did:key + ed25519, offline-verifiable — **swap:** Sigstore |
 | Provenance | in-toto + SLSA + `openfab/generation` predicate | ✅ in-toto Statement v1 + the custom `openfab/generation` predicate, DSSE-style signed over canonical JSON |

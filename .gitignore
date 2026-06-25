@@ -22,3 +22,7 @@ Cargo.lock.bak
 # Office temp/lock files
 ~$*
 **/~$*
+
+# Stray generated-app / python artifacts at repo root
+/app/
+**/__pycache__/

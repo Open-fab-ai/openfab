@@ -17,7 +17,7 @@ openfab serve --repo demo/.work/web --port 8787 --policy policy/trust.json
    You supply *only* the intent — the Base (LLM) authors the spec **and** its
    machine-checkable acceptance criteria from it; review them in the **Spec** step of the
    live workflow.
-2. **Pick a base and a forge.** Five bases, four forges. Each shows an honest badge:
+2. **Pick a base and a forge.** Six bases, four forges. Each shows an honest badge:
    - base runtime: `native` (claude, or a framework with its `OPENFAB_*_URL` set) or
      `bridged` (a framework whose native runtime isn't connected — the task runs via
      OpenFab's LLM backend and the provenance says so).

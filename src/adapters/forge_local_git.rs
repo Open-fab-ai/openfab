@@ -86,6 +86,12 @@ impl ForgePort for LocalGitForge {
     }
 
     fn branch(&self, name: &str) -> Result<()> {
+        // Clear any half-finished merge/rebase or dirty index from a prior op so a
+        // `git checkout` can never fail with "you need to resolve your current index
+        // first". Best-effort: ignore errors when there's nothing to abort/reset.
+        let _ = self.git(&["merge", "--abort"]);
+        let _ = self.git(&["rebase", "--abort"]);
+        let _ = self.git(&["reset", "-q", "--hard"]);
         // Create or switch to the branch.
         if self
             .git(&["rev-parse", "--verify", "--quiet", name])
@@ -102,8 +108,11 @@ impl ForgePort for LocalGitForge {
             let root = root.lines().last().unwrap_or("main").trim().to_string();
             self.git(&["checkout", "-q", "-b", name, &root])?;
             // Drop any untracked files left in the worktree by a previous run so the new
-            // app's generation + acceptance + launch see only its own files.
-            let _ = self.git(&["clean", "-qfd"]);
+            // app's generation + acceptance + launch see only its own files. EXCLUDE
+            // `.openfab/` — that is OpenFab's own control-plane state (the maintainer
+            // allowlist, run records, identities); wiping it on every branch dropped the
+            // allowlist so sign-off failed with "'me' is not a registered maintainer".
+            let _ = self.git(&["clean", "-qfd", "-e", ".openfab"]);
         }
         Ok(())
     }

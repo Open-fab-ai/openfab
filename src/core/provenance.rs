@@ -19,7 +19,7 @@ use crate::core::sha256_hex;
 use crate::core::timeutil;
 
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
-pub const PREDICATE_TYPE: &str = "https://openfab.ai/attestation/generation/v0.1";
+pub const PREDICATE_TYPE: &str = "https://open-fab.ai/attestation/generation/v0.1";
 
 /// in-toto subject: the thing the attestation is about (here: the generated app's
 /// frozen source bundle).

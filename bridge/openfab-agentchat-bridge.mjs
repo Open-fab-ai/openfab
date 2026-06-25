@@ -53,13 +53,13 @@ const OPERATOR = process.env.BRIDGE_OPERATOR || 'operator';
 // The implementer replies with a `task_result` message addressed to SELF. The HTTP
 // `/api/dm/:name/history` endpoint doesn't surface messages to a service agent, so we read
 // the message store on disk (same host) and match by task_id — robust and restart-safe.
+// Set AGENTCHAT_DIR (the agent-chat repo) or AGENTCHAT_MESSAGES_FILE on each machine; there
+// is no portable default. When unset, result harvesting is disabled (warned at startup).
 const MESSAGES_FILE =
   process.env.AGENTCHAT_MESSAGES_FILE ||
-  path.join(
-    process.env.AGENTCHAT_DIR || '/Users/zhangalex/Work/Projects/consult/agent-chat',
-    'data',
-    'messages.json',
-  );
+  (process.env.AGENTCHAT_DIR
+    ? path.join(process.env.AGENTCHAT_DIR, 'data', 'messages.json')
+    : null);
 
 const SELF = 'openfab-bridge'; // the sender identity; must be a registered agent-chat agent
 const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
@@ -155,6 +155,7 @@ async function createTask(body) {
 // store on disk and matching `schema.payload.task_id`. Robust to message-routing quirks
 // and to bridge restarts (no in-memory state needed).
 function harvestResult(acTaskId) {
+  if (!MESSAGES_FILE) { log('harvest: AGENTCHAT_DIR/AGENTCHAT_MESSAGES_FILE not set — cannot harvest results'); return null; }
   let msgs;
   try {
     msgs = JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
@@ -263,6 +264,7 @@ async function relayApproval(run, mxid, action) {
 // B2 poller: scan the message store for Matrix-origin approval commands and relay them.
 const seenApprovals = new Set();
 async function pollApprovals() {
+  if (!MESSAGES_FILE) return;
   let msgs;
   try {
     msgs = JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
@@ -365,6 +367,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   log(`listening on http://127.0.0.1:${PORT}  → agent-chat ${AC}  assignee=${ASSIGNEE}`);
   log(`approval relay → OpenFab ${OPENFAB_URL} (polling every ${APPROVAL_POLL_MS}ms)`);
+  if (!MESSAGES_FILE) log('WARNING: set AGENTCHAT_DIR (the agent-chat repo path) so the bridge can harvest implementer results');
   registerSelf();
   setInterval(() => {
     pollApprovals().catch((e) => log(`approval poll error: ${e.message}`));

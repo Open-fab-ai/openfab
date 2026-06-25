@@ -241,13 +241,25 @@ merged **without a manual refresh**.
 
 ---
 
-## 5. Known gap to harden (not yet fixed)
+## 5. Sign-off authentication (the gate's teeth)
 
-**`openfab signoff --as <maintainer>` has no credential check.** Any local process (including a
-shell-capable agent) can forge a human sign-off, bypassing the N-of-M gate. Mitigations in place:
-the coordinator skill forbids agents from signing, and the room relay is identity-checked. To
-truly close it, gate the CLI sign-off behind a credential / confirmation. Treat this as a
-deployment caveat: **do not let autonomous agents run the OpenFab CLI on a repo whose gate matters.**
+Name-based sign-off (CLI `--as`, API `{as}`) is **gated by a per-maintainer credential** so an
+agent can't forge a human sign-off:
+
+- **Matrix relay (recommended, no credential):** in the bound room send `approve <run>` — the
+  bridge maps your verified Matrix id → your maintainer and signs as you. This is the path to use.
+- **CLI / UI with a credential:** set one once, then present it.
+  ```bash
+  openfab maintainer-cred --repo <repo> --name alice --token "<passphrase>"   # stores only its hash
+  openfab signoff --repo <repo> --run <id> --as alice --cred "<passphrase>"   # or OPENFAB_SIGNOFF_TOKEN
+  ```
+  The dashboard/console sign-off buttons now prompt for this passphrase.
+- **Trusted single-operator override:** `OPENFAB_ALLOW_UNVERIFIED_SIGNOFF=1` re-allows
+  credential-less name sign-off. **Set it only on the serve/CLI of a machine where no autonomous
+  agent can reach the API or run the CLI** — otherwise the forge hole reopens. Default is OFF
+  (name sign-off without a credential is refused with guidance).
+
+Agents are independently forbidden (coordinator skill) from running `openfab signoff`.
 
 ---
 

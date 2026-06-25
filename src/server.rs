@@ -479,11 +479,15 @@ fn route(
             let body = body_json(req)?;
             // Accept either an explicit maintainer name (`as`) or a Matrix user id (`mxid`,
             // Phase 2 Robrix relay). mxid resolves to its mapped maintainer or is rejected.
+            // A Matrix user id (`mxid`, the Robrix relay) is identity-verified and signs directly.
+            // A bare maintainer name (`as`) is NOT — it must present that maintainer's credential
+            // (or the operator's explicit override), so an agent can't curl a forged sign-off.
             let outcome = if let Some(mxid) = body["mxid"].as_str().filter(|s| !s.is_empty()) {
                 ops::signoff_by_mxid(&repo, id, mxid, &state.policy)?
             } else {
                 let as_name = body["as"].as_str().unwrap_or("").to_string();
-                ops::signoff(&repo, id, &as_name, &state.policy)?
+                let cred = body["credential"].as_str().filter(|s| !s.is_empty());
+                ops::signoff_as(&repo, id, &as_name, cred, &state.policy)?
             };
             // Close the loop back to Robrix: when the gate opens in the dashboard, notify the
             // bound room (best-effort; needs Matrix/Bridge connected via OPENFAB_AGENTCHAT_URL).

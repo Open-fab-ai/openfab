@@ -163,9 +163,11 @@ async function renderSignoff(id){
 }
 
 async function doSignoff(name){
+  const credential = window.prompt(`Sign-off passphrase for "${name}" (blank if OPENFAB_ALLOW_UNVERIFIED_SIGNOFF=1):`);
+  if (credential === null) return;
   $("signmsg").textContent = `signing off as ${name}…`;
   try {
-    const r = await jpost(`/api/runs/${curRun}/signoff`, { as: name });
+    const r = await jpost(`/api/runs/${curRun}/signoff`, { as: name, credential });
     if (r.error){ $("signmsg").textContent = "error: " + r.error; return; }
     $("signmsg").innerHTML = r.merged ? `<b style="color:var(--ok)">✓ ${name} signed — gate ACCEPTED → merged</b>`
       : (r.accepted ? `<b style="color:var(--ok)">✓ accepted</b>`

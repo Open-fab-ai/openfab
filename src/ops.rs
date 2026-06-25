@@ -597,6 +597,52 @@ pub fn signoff_by_mxid(
     signoff(repo, run, &name, policy)
 }
 
+/// Decide whether a name-based sign-off is authorized (pure, so it's unit-tested). If the
+/// maintainer has a credential configured, the provided passphrase must hash-match it; if none
+/// is configured, refuse unless the operator set the explicit unverified-override. The
+/// Matrix-verified relay path (`signoff_by_mxid`) bypasses this entirely — Matrix identity is
+/// the authentication there.
+pub fn signoff_authorized(
+    cred_hash: Option<&str>,
+    provided: Option<&str>,
+    allow_unverified: bool,
+) -> Result<()> {
+    match cred_hash {
+        Some(hash) => {
+            let ok = provided
+                .map(|p| sha256_hex(p.as_bytes()) == hash)
+                .unwrap_or(false);
+            if !ok {
+                bail!("invalid sign-off credential for this maintainer");
+            }
+            Ok(())
+        }
+        None if allow_unverified => Ok(()),
+        None => bail!(
+            "name-based sign-off is refused without a credential (an agent must not be able to \
+             forge a human sign-off). Set one with `openfab maintainer-cred <name>` and pass it \
+             via `--cred`/`credential`, OR approve through the Matrix relay (room `approve <run>`, \
+             which verifies your Matrix identity), OR set OPENFAB_ALLOW_UNVERIFIED_SIGNOFF=1 only \
+             on a trusted single-operator machine."
+        ),
+    }
+}
+
+/// Name-based sign-off entry (CLI `--as`, API `{as}`) — gated by [`signoff_authorized`]. Routes
+/// to the verified core [`signoff`] once authorization passes.
+pub fn signoff_as(
+    repo: &Path,
+    run: &str,
+    as_name: &str,
+    credential: Option<&str>,
+    policy: &Policy,
+) -> Result<SignoffOutcome> {
+    let cred_hash = runstate::maintainer_cred_hash(repo, as_name);
+    let allow_unverified = std::env::var("OPENFAB_ALLOW_UNVERIFIED_SIGNOFF").as_deref() == Ok("1");
+    signoff_authorized(cred_hash.as_deref(), credential, allow_unverified)?;
+    signoff(repo, run, as_name, policy)
+}
+
 pub fn signoff(repo: &Path, run: &str, as_name: &str, policy: &Policy) -> Result<SignoffOutcome> {
     let mut rec = runstate::load_run(repo, run)?;
     let maint_dids = runstate::maintainer_dids(repo)?;
@@ -1083,6 +1129,21 @@ pub fn audit(repo: &Path, run: &str) -> Result<AuditTrail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_signoff_authorized_credential_gate() {
+        let secret = "correct horse";
+        let hash = sha256_hex(secret.as_bytes());
+        // with a credential configured: only the matching passphrase passes
+        assert!(signoff_authorized(Some(&hash), Some(secret), false).is_ok());
+        assert!(signoff_authorized(Some(&hash), Some("wrong"), false).is_err());
+        assert!(signoff_authorized(Some(&hash), None, false).is_err());
+        // the override does NOT bypass a configured credential (can't downgrade once set)
+        assert!(signoff_authorized(Some(&hash), Some("wrong"), true).is_err());
+        // no credential configured: refused by default, allowed only with the explicit override
+        assert!(signoff_authorized(None, None, false).is_err());
+        assert!(signoff_authorized(None, None, true).is_ok());
+    }
 
     #[test]
     fn test_derive_stages_marks_done_from_events() {

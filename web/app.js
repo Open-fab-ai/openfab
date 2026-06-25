@@ -453,9 +453,13 @@ async function rejectRun() {
   } catch (e) { toast(e.message, true); }
 }
 async function signoff(name, btn) {
+  // Name-based sign-off needs the maintainer's credential (so an agent can't forge it). Prompt
+  // for it; the Matrix relay path (room `approve`) is the no-credential, identity-verified route.
+  const credential = window.prompt(`Sign-off passphrase for "${name}" (blank if OPENFAB_ALLOW_UNVERIFIED_SIGNOFF=1):`);
+  if (credential === null) return; // cancelled
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
   try {
-    const out = await api("POST", `/api/runs/${STATE.runId}/signoff`, { as: name });
+    const out = await api("POST", `/api/runs/${STATE.runId}/signoff`, { as: name, credential });
     toast(out.merged ? "approved → released (merged) ✅" : out.accepted ? "approved ✅" : `${name} approved — more needed`);
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     STATE.verify = null;

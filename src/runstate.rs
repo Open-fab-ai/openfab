@@ -452,6 +452,31 @@ pub fn load_maintainer_identity(repo: &Path, name: &str) -> Result<Identity> {
     Identity::load_or_create(&maintainer_seed_dir(repo), name)
 }
 
+/// Per-maintainer sign-off credential — the sha256 of a passphrase the human chooses. Only the
+/// hash is stored (gitignored with the rest of `.openfab/identity/`); the plaintext never is.
+/// Name-based sign-off (CLI `--as` / API `{as}`) must present a matching passphrase, closing the
+/// "any local process can sign as anyone" hole. The Matrix-verified relay path doesn't need it.
+fn maintainer_cred_path(repo: &Path, name: &str) -> PathBuf {
+    maintainer_seed_dir(repo).join(format!("{name}.cred"))
+}
+
+pub fn maintainer_cred_hash(repo: &Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(maintainer_cred_path(repo, name))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn set_maintainer_cred(repo: &Path, name: &str, passphrase: &str) -> Result<()> {
+    let p = maintainer_cred_path(repo, name);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&p, crate::core::sha256_hex(passphrase.as_bytes()))
+        .with_context(|| format!("writing sign-off credential for {name}"))?;
+    Ok(())
+}
+
 // --- fab allowlist (the trusted fab identities) ---
 
 fn fab_allow_file(repo: &Path) -> PathBuf {

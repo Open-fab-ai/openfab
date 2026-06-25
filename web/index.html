@@ -7,12 +7,29 @@
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+<!-- doc viewer overlay (incoming spec + requirements) -->
+<div id="docview" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;padding:5vh 6vw" onclick="if(event.target===this)closeDocView()">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:980px;margin:0 auto;max-height:90vh;overflow:auto;padding:18px 20px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <h2 id="dv-title" style="margin:0;font-size:14px">Document</h2>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="closeDocView()">✕ close</button>
+    </div>
+    <div class="tabs" id="dv-tabs"></div>
+    <div class="docbody" id="dv-body" style="margin-top:10px;white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;line-height:1.5"></div>
+  </div>
+</div>
 <div class="wrap">
   <header class="top">
     <div class="logo">⚙</div>
     <div class="brand">
       <h1>OpenFab</h1>
       <p>natural language in · <b>trustworthy software</b> out — reproducible, signed, attributed, cross-forge</p>
+    </div>
+    <div class="navlinks">
+      <label class="hint" style="margin:0 6px 0 0">Project</label>
+      <select id="project" style="width:auto;padding:6px 10px"></select>
+      <a class="navlink on" href="/">⚙ Fabricate</a>
+      <a class="navlink" href="/console">▦ Console</a>
     </div>
   </header>
   <div class="chips" id="propchips">
@@ -33,6 +50,11 @@
         <h2><span class="n">1</span> What do you want to build?</h2>
         <label class="fld">Describe it in plain English — the Base (LLM) writes the spec &amp; acceptance</label>
         <textarea id="intent" placeholder="e.g. a command-line tool that converts temperatures between Celsius, Fahrenheit and Kelvin, with a --selftest flag that verifies all conversions"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <input type="file" id="docfile" accept=".md,.markdown,.txt,.spec" style="display:none" />
+          <button class="btn ghost sm" id="uploadbtn" type="button" title="upload a requirements/decision doc or a .spec.md contract">📎 Upload requirements / spec doc</button>
+          <span class="hint" id="uploadmsg"></span>
+        </div>
 
         <div class="selectrow" style="margin-top:14px">
           <div>
@@ -61,12 +83,38 @@
       </div>
 
       <div class="card">
+        <h2>Projects <span class="muted">(workspaces · point at an existing repo to self-host)</span></h2>
+        <div class="maintainers" id="projectlist"></div>
+        <label class="fld" style="margin-top:10px">New project name</label>
+        <input type="text" id="projname" placeholder="e.g. openfab-selfdev" />
+        <label class="fld" style="margin-top:8px">Existing repo path <span class="muted">(optional — leave blank to create an empty workspace)</span></label>
+        <input type="text" id="projpath" placeholder="/Users/you/Work/Projects/FW/openfab" />
+        <label class="chk" style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12.5px;color:var(--muted)">
+          <input type="checkbox" id="projworktree" checked style="width:auto" />
+          Isolate with a git worktree <span class="muted">(recommended — OpenFab works in a separate checkout)</span>
+        </label>
+        <button class="btn ghost sm" id="createproj" type="button" style="margin-top:10px">+ Create project</button>
+        <div class="hint" id="projmsg" style="margin-top:8px">Dogfood OpenFab with OpenFab: point a project at the OpenFab repo. With the worktree option, OpenFab auto-creates an isolated checkout (branch <span class="mono">openfab/&lt;name&gt;</span>) so your working tree is untouched.</div>
+      </div>
+
+      <div class="card">
         <h2>Maintainers <span class="muted">(N-of-M sign-off allowlist)</span></h2>
         <div class="maintainers" id="maintainers"></div>
         <div style="display:flex; gap:8px; margin-top:10px">
           <input type="text" id="newmaint" placeholder="add maintainer (e.g. carol)" />
           <button class="btn ghost sm" id="addmaint" type="button">add</button>
         </div>
+      </div>
+
+      <div class="card" id="incomingcard" style="display:none">
+        <h2>📥 Incoming from Robrix <span class="muted">(coordinator-submitted docs)</span></h2>
+        <div id="incoming"></div>
+      </div>
+
+      <div class="card">
+        <h2>Run history <span class="muted">(all projects · persisted · click to reopen)</span></h2>
+        <div id="recentruns"><div class="empty">No runs yet. Fabricate one above.</div></div>
+        <div class="hint" style="margin-top:8px">Full board &amp; docs in the <a href="/console">▦ Console</a>.</div>
       </div>
 
       <div class="card">

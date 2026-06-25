@@ -209,6 +209,26 @@ impl BasePort for FrameworkBase {
         let prompt = llm_backend::build_prompt(task);
 
         let (manifest, model, mode, provider) = match &self.native_endpoint {
+            // agent-chat native = the Matrix-room agent team (via the OpenFab→agent-chat
+            // Bridge): dispatch the task into the room, poll for the produced files, and
+            // verify their integrity before OpenFab signs them (Phase 1-Trust).
+            Some(endpoint) if self.fw == Framework::AgentChat => {
+                let room = std::env::var("OPENFAB_AGENTCHAT_ROOM")
+                    .unwrap_or_else(|_| "openfab".to_string());
+                let result =
+                    crate::adapters::bridge_client::dispatch_and_wait(endpoint, task, &room)?;
+                let model = if result.model.is_empty() {
+                    "agent-chat".to_string()
+                } else {
+                    result.model.clone()
+                };
+                (
+                    result.into_manifest(),
+                    model,
+                    "native",
+                    "agent-chat (matrix bridge)".to_string(),
+                )
+            }
             Some(endpoint) => {
                 let (m, model) = self.dispatch_native(endpoint, task)?;
                 (
@@ -259,8 +279,21 @@ impl BasePort for FrameworkBase {
     }
 
     fn post(&self, channel: &str, msg: &str) -> Result<()> {
-        // HiClaw/agent-chat would post to their collaboration channel (the Matrix room is
-        // the audit trail when base = HiClaw). Without a live server we tag the channel.
+        // agent-chat native: post the message (e.g. gate/provenance summary) into the
+        // Matrix room via the Bridge, so it shows up in the robrix2 cockpit.
+        if self.fw == Framework::AgentChat {
+            if let Some(endpoint) = &self.native_endpoint {
+                let room = if channel == "openfab" {
+                    std::env::var("OPENFAB_AGENTCHAT_ROOM")
+                        .unwrap_or_else(|_| "openfab".to_string())
+                } else {
+                    channel.to_string()
+                };
+                return crate::adapters::bridge_client::post_message(endpoint, &room, msg);
+            }
+        }
+        // HiClaw/others, or bridged: tag the channel (the Matrix room is the audit trail
+        // when a live runtime is wired).
         let ch = if channel == "openfab" {
             self.fw.comms_channel()
         } else {

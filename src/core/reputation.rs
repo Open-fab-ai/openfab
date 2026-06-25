@@ -78,6 +78,10 @@ mod tests {
                 }],
                 materials: vec![],
                 acceptance_passed: passed,
+                spec_contract_sha256: None,
+                agent_spec_verdicts: vec![],
+                run_log_ref: None,
+                requirements_sha256: None,
             },
             fab,
         )

@@ -76,6 +76,14 @@ pub struct SignoffRecord {
     pub timestamp: String,
 }
 
+/// One scenario's machine verdict from `agent-spec lifecycle` (pass/fail/skip/uncertain),
+/// recorded in the predicate so the contract's verification is part of the signed evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioVerdict {
+    pub scenario: String,
+    pub verdict: String,
+}
+
 /// The `openfab/generation` predicate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenfabGeneration {
@@ -90,6 +98,20 @@ pub struct OpenfabGeneration {
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signoffs: Vec<SignoffRecord>,
+    /// SHA-256 of the agent-spec `.spec.md` Task Contract (the spec is the contract, so its
+    /// exact bytes are part of the signed evidence). `None` for the native-spec path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_contract_sha256: Option<String>,
+    /// Per-scenario verdicts from `agent-spec lifecycle` (skip ≠ pass).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_spec_verdicts: Vec<ScenarioVerdict>,
+    /// Reference to the agent-spec run log (path or uri), when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_log_ref: Option<String>,
+    /// SHA-256 of the requirements document the spec was distilled from (Phase 2: the
+    /// `wf_coordinator` requirements conversation). Makes requirements→spec→code traceable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements_sha256: Option<String>,
 }
 
 /// An in-toto Statement v1 with the OpenFab generation predicate.
@@ -136,6 +158,11 @@ pub struct GenerationInput {
     pub generated: Vec<GeneratedRange>,
     pub materials: Vec<Material>,
     pub acceptance_passed: bool,
+    /// agent-spec evidence (empty/None for the native-spec path).
+    pub spec_contract_sha256: Option<String>,
+    pub agent_spec_verdicts: Vec<ScenarioVerdict>,
+    pub run_log_ref: Option<String>,
+    pub requirements_sha256: Option<String>,
 }
 
 impl Attestation {
@@ -159,6 +186,10 @@ impl Attestation {
             acceptance_passed: input.acceptance_passed,
             timestamp: timeutil::iso_now(),
             signoffs: vec![],
+            spec_contract_sha256: input.spec_contract_sha256,
+            agent_spec_verdicts: input.agent_spec_verdicts,
+            run_log_ref: input.run_log_ref,
+            requirements_sha256: input.requirements_sha256,
         };
         let statement = Statement {
             _type: STATEMENT_TYPE.to_string(),
@@ -332,6 +363,10 @@ mod tests {
             }],
             materials: vec![],
             acceptance_passed: true,
+            spec_contract_sha256: None,
+            agent_spec_verdicts: vec![],
+            run_log_ref: None,
+            requirements_sha256: None,
         }
     }
 
@@ -366,6 +401,53 @@ mod tests {
         // An attacker swaps the generated file digest after signing.
         att.statement.predicate.generated[0].sha256 = "0000".to_string();
         assert!(att.verify_signatures().is_err());
+    }
+
+    #[test]
+    fn records_agent_spec_evidence_and_tampering_breaks() {
+        let fab = Identity::generate("fab").unwrap();
+        let mut input = sample_input(&fab.did());
+        input.spec_contract_sha256 = Some("contracthash123".to_string());
+        input.agent_spec_verdicts = vec![
+            ScenarioVerdict {
+                scenario: "happy".to_string(),
+                verdict: "pass".to_string(),
+            },
+            ScenarioVerdict {
+                scenario: "error".to_string(),
+                verdict: "pass".to_string(),
+            },
+        ];
+        input.run_log_ref = Some(".agent-spec/runs/run1".to_string());
+
+        let att = Attestation::build_and_sign(input, &fab).unwrap();
+        // evidence is recorded in the predicate
+        assert_eq!(
+            att.statement.predicate.spec_contract_sha256.as_deref(),
+            Some("contracthash123")
+        );
+        assert_eq!(att.statement.predicate.agent_spec_verdicts.len(), 2);
+        // ...and is covered by the fab signature (tampering breaks verification)
+        att.verify_signatures().unwrap();
+        let mut tampered = att.clone();
+        tampered.statement.predicate.spec_contract_sha256 = Some("evil".to_string());
+        assert!(tampered.verify_signatures().is_err());
+    }
+
+    #[test]
+    fn test_requirements_sha256_recorded_and_tamper_breaks() {
+        let fab = Identity::generate("fab").unwrap();
+        let mut input = sample_input(&fab.did());
+        input.requirements_sha256 = Some("r".repeat(64));
+        let att = Attestation::build_and_sign(input, &fab).unwrap();
+        assert_eq!(
+            att.statement.predicate.requirements_sha256.as_deref(),
+            Some("r".repeat(64).as_str())
+        );
+        att.verify_signatures().unwrap();
+        let mut tampered = att.clone();
+        tampered.statement.predicate.requirements_sha256 = Some("evil".to_string());
+        assert!(tampered.verify_signatures().is_err());
     }
 
     #[test]

@@ -3,8 +3,20 @@
 
 const $ = (s) => document.querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
+// Escape untrusted values before interpolating into innerHTML (element + attribute contexts).
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"'`]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
+// selected project (workspace); scopes all run/maintainer calls. Persisted so a page refresh
+// keeps the project you were on (otherwise it reset to "default" and hid that project's data).
+let PROJECT = (() => { try { return localStorage.getItem("openfab_project") || "default"; } catch { return "default"; } })();
+// append ?project= to project-scoped URLs (catalog/config/projects are global, skip them)
+function withProject(url) {
+  if (!PROJECT || PROJECT === "default") return url;
+  if (!url.startsWith("/api/")) return url;
+  if (/^\/api\/(projects|config|bases|forges)/.test(url)) return url;
+  return url + (url.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(PROJECT);
+}
 const api = async (m, url, body) => {
-  const r = await fetch(url, { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(withProject(url), { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `${r.status}`);
   return j;
@@ -28,8 +40,176 @@ async function init() {
   document.querySelectorAll(".step").forEach((s) => (s.onclick = () => showPhase(s.dataset.step)));
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
 
+  $("#project").onchange = onProjectChange;
+  $("#createproj").onclick = createProject;
+  $("#uploadbtn").onclick = () => $("#docfile").click();
+  $("#docfile").onchange = uploadDoc;
+  await loadProjects();
   await Promise.all([loadBases(), loadForges(), loadMaintainers(), loadReputation()]);
   await ensureDefaultMaintainers();
+  await loadRecentRuns();
+  await loadIncoming();
+}
+
+// Upload a requirements/decision doc or a .spec.md. A spec contract is built directly; a
+// requirements doc seeds the intent and is committed (and hashed) into the run's provenance.
+async function uploadDoc(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const content = await file.text();
+  try {
+    const r = await api("POST", "/api/upload", { name: file.name, content });
+    if (r.kind === "spec") {
+      STATE.uploadedSpecId = r.id;
+      $("#uploadmsg").innerHTML = `✓ spec contract <b>${esc(r.id)}.spec.md</b> — click Fabricate to build it`;
+      if (!$("#intent").value.trim()) $("#intent").value = `Build the uploaded spec '${r.id}'.`;
+    } else {
+      STATE.uploadedSpecId = null;
+      $("#uploadmsg").innerHTML = `✓ requirements <b>${esc(r.id)}.requirements.md</b> attached — add intent &amp; Fabricate`;
+      if (!$("#intent").value.trim()) $("#intent").value = file.name.replace(/\.[^.]+$/, "");
+    }
+  } catch (e) { $("#uploadmsg").textContent = "error: " + e.message; }
+  ev.target.value = "";
+}
+
+async function loadProjects() {
+  try {
+    const projs = await api("GET", "/api/projects");
+    const sel = $("#project"); sel.innerHTML = "";
+    projs.forEach((p) => { const o = el("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
+    sel.value = PROJECT;
+    // list with repo paths (name on top, full path wraps below — never overflows the card)
+    const box = $("#projectlist");
+    if (box) box.innerHTML = projs.map((p) =>
+      `<div style="padding:5px 0;border-bottom:1px solid var(--line)">
+        <b>${esc(p.name)}</b>
+        <div class="mono muted" title="${esc(p.repo || "")}" style="font-size:11px;overflow-wrap:anywhere;word-break:break-all">${esc(p.repo || "")}</div></div>`).join("");
+  } catch { /* registry optional */ }
+}
+// Register a project. An existing repo path enables self-hosting (dogfood OpenFab with
+// OpenFab); leaving it blank creates an empty workspace under the projects dir.
+async function createProject() {
+  const name = ($("#projname").value || "").trim();
+  const repo = ($("#projpath").value || "").trim();
+  const worktree = $("#projworktree").checked;
+  if (!name) { $("#projmsg").textContent = "enter a project name first"; toast("enter a project name first", true); $("#projname").focus(); return; }
+  $("#projmsg").textContent = "creating…";
+  try {
+    const payload = repo ? { name, repo, worktree } : { name };
+    if (repo && worktree) $("#projmsg").textContent = "creating git worktree…";
+    const r = await api("POST", "/api/projects", payload);
+    $("#projmsg").innerHTML = `✓ created <b>${esc(r.name)}</b> → <span class="mono">${esc(r.repo)}</span>`;
+    $("#projname").value = ""; $("#projpath").value = "";
+    await loadProjects();
+    $("#project").value = name; await onProjectChange();
+  } catch (e) { $("#projmsg").textContent = "error: " + e.message; }
+}
+async function onProjectChange() {
+  PROJECT = $("#project").value;
+  try { localStorage.setItem("openfab_project", PROJECT); } catch {}
+  STATE.runId = null; clearInterval(STATE.poll); STATE.poll = null;
+  resetFlow(); setStatus("idle");
+  await Promise.all([loadMaintainers(), loadReputation(), loadRecentRuns(), loadIncoming()]);
+  toast(`switched to project "${PROJECT}"`);
+}
+
+// Docs ingested from a bound Robrix room (the coordinator submitted them) show up here so
+// the user can build them without uploading anything.
+async function loadIncoming() {
+  let docs = [];
+  try { docs = await api("GET", "/api/incoming"); } catch { /* none */ }
+  // hide specs that already have a run
+  let runs = [];
+  try { runs = await api("GET", "/api/runs"); } catch {}
+  const built = new Set(runs.map((r) => (r.spec_ref || "").split("#")[0]));
+  const pending = docs.filter((d) => !built.has(d.id));
+  const card = $("#incomingcard"), box = $("#incoming");
+  if (!pending.length) { card.style.display = "none"; return; }
+  card.style.display = "";
+  box.innerHTML = "";
+  pending.forEach((d) => {
+    const row = el("div", "maintainers");
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)";
+    const name = el("span", "mono", `${esc(d.id)}${d.has_requirements ? " 📄" : ""}`);
+    name.style.cssText = "font-size:12px;cursor:pointer;flex:1";
+    name.title = "view spec + requirements";
+    name.onclick = () => viewIncoming(d.id);
+    row.appendChild(name);
+    const v = el("button", "btn ghost sm", "View");
+    v.onclick = () => viewIncoming(d.id);
+    const b = el("button", "btn ghost sm", "Build");
+    b.onclick = () => { STATE.uploadedSpecId = d.id; $("#intent").value = `Build '${d.id}' (from Robrix).`; startRun(); };
+    row.appendChild(v); row.appendChild(b); box.appendChild(row);
+  });
+}
+
+// Open an incoming doc (spec contract + requirements) in the viewer overlay.
+async function viewIncoming(id) {
+  try {
+    const d = await api("GET", `/api/incoming/${encodeURIComponent(id)}`);
+    $("#dv-title").textContent = id;
+    window._dvDocs = [];
+    if (d.spec_md) window._dvDocs.push({ label: "spec contract (.spec.md)", body: d.spec_md });
+    if (d.requirements_md) window._dvDocs.push({ label: "requirements", body: d.requirements_md });
+    $("#dv-tabs").innerHTML = window._dvDocs.map((doc, i) =>
+      `<span class="tab ${i === 0 ? "active" : ""}" onclick="showDvDoc(${i},this)">${esc(doc.label)}</span>`).join("");
+    showDvDoc(0);
+    $("#docview").style.display = "";
+  } catch (e) { toast(e.message, true); }
+}
+function showDvDoc(i, el2) {
+  document.querySelectorAll("#dv-tabs .tab").forEach((x) => x.classList.remove("active"));
+  if (el2) el2.classList.add("active");
+  $("#dv-body").textContent = (window._dvDocs[i] || {}).body || "";
+}
+function closeDocView() { $("#docview").style.display = "none"; }
+
+// Runs are persisted server-side (`.openfab/runs/`). The live-workflow panel is per-session
+// client state, so on a page reload we restore it: re-open the most recent run that still
+// needs attention (running/blocked), and list recent runs so any can be reopened.
+async function loadRecentRuns() {
+  // Cross-project history: every run across all projects, newest first, each tagged with its
+  // project — so refreshing or switching projects never "hides" your history.
+  let runs = [];
+  try { runs = await api("GET", "/api/history"); } catch { /* none yet */ }
+  runs.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+  const box = $("#recentruns");
+  if (!runs.length) { box.innerHTML = '<div class="empty">No runs yet. Fabricate one above.</div>'; return; }
+  box.innerHTML = "";
+  runs.slice(0, 20).forEach((r) => {
+    const proj = r.project || "default";
+    const row = el("div", "maintainers");
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--line)";
+    row.innerHTML =
+      `<span style="display:flex;flex-direction:column;min-width:0;flex:1">` +
+      `<span class="mono" style="font-size:12px;overflow-wrap:anywhere">${esc(r.spec_ref || r.run_id)}</span>` +
+      `<span class="muted" style="font-size:10.5px">${esc(proj)} · ${esc((r.created || "").replace("T", " ").replace("Z", ""))}</span></span>` +
+      `<span class="pill ${esc(r.status)}">${esc(r.status)}</span>`;
+    row.onclick = () => openHistoryRun(proj, r.run_id);
+    box.appendChild(row);
+  });
+}
+
+// Open a run from the cross-project history: switch to its project (so scoped event/detail
+// calls resolve), then attach the live-workflow panel.
+async function openHistoryRun(project, runId) {
+  if (project && project !== PROJECT) {
+    PROJECT = project;
+    try { localStorage.setItem("openfab_project", PROJECT); } catch {}
+    const sel = $("#project"); if (sel) sel.value = PROJECT;
+    await onProjectChange();
+  }
+  attachRun(runId);
+}
+
+// Re-attach the live-workflow panel to an existing run; polling replays its persisted
+// timeline (events.jsonl) from seq 0, so the whole workflow view is restored.
+function attachRun(runId) {
+  resetFlow();
+  STATE.runId = runId; STATE.lastSeq = 0;
+  setStatus("running");
+  startPolling();
+  $("#flowcard").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function loadBases() {
@@ -96,10 +276,11 @@ async function startRun() {
   resetFlow();
   $("#run").disabled = true; $("#run").innerHTML = '<span class="spin"></span> the LLM is authoring the spec & building…';
   try {
-    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value });
+    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value, spec_id: STATE.uploadedSpecId || undefined });
     STATE.runId = run_id; STATE.lastSeq = 0;
     setStatus("queued");
     startPolling();
+    loadRecentRuns();
   } catch (e) { toast(e.message, true); resetRunBtn(); }
 }
 function resetRunBtn() { $("#run").disabled = false; $("#run").innerHTML = "⚙ Fabricate trusted software"; }
@@ -113,6 +294,7 @@ function resetFlow() {
 
 function startPolling() {
   clearInterval(STATE.poll);
+  STATE.lastStatus = null;
   STATE.poll = setInterval(tick, 650);
   tick();
 }
@@ -124,10 +306,20 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
-    if (["blocked", "accepted", "merged", "failed"].includes(run.status)) {
+    if (run.status === "blocked") {
+      // Awaiting human sign-off is NOT terminal — a sign-off (dashboard, console, or a Robrix
+      // relay) flips it to merged. Render the gate UI once, then KEEP polling (slower) so the
+      // panel updates live, with no manual refresh.
+      if (STATE.lastStatus !== "blocked") {
+        onRunDone(run); loadRecentRuns(); resetRunBtn();
+        clearInterval(STATE.poll); STATE.poll = setInterval(tick, 2500);
+      }
+    } else if (["accepted", "merged", "failed", "rejected"].includes(run.status)) {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       onRunDone(run);
+      loadRecentRuns();
     }
+    STATE.lastStatus = run.status;
   } catch (e) { /* transient while files are written */ }
 }
 
@@ -261,9 +453,13 @@ async function rejectRun() {
   } catch (e) { toast(e.message, true); }
 }
 async function signoff(name, btn) {
+  // Name-based sign-off needs the maintainer's credential (so an agent can't forge it). Prompt
+  // for it; the Matrix relay path (room `approve`) is the no-credential, identity-verified route.
+  const credential = window.prompt(`Sign-off passphrase for "${name}" (blank if OPENFAB_ALLOW_UNVERIFIED_SIGNOFF=1):`);
+  if (credential === null) return; // cancelled
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
   try {
-    const out = await api("POST", `/api/runs/${STATE.runId}/signoff`, { as: name });
+    const out = await api("POST", `/api/runs/${STATE.runId}/signoff`, { as: name, credential });
     toast(out.merged ? "approved → released (merged) ✅" : out.accepted ? "approved ✅" : `${name} approved — more needed`);
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     STATE.verify = null;

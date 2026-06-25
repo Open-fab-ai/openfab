@@ -72,7 +72,14 @@ pub fn list_bases() -> Vec<BaseInfo> {
             },
             connected: true,
             note: if native {
-                format!("native runtime configured ({})", fw.native_env())
+                if fw == Framework::AgentChat {
+                    format!(
+                        "native via matrix bridge ({}) — implementer agents in a Matrix room",
+                        fw.native_env()
+                    )
+                } else {
+                    format!("native runtime configured ({})", fw.native_env())
+                }
             } else {
                 format!(
                     "bridged via OpenFab LLM (set {} for native)",
@@ -112,7 +119,10 @@ fn forge_display(kind: &str) -> &str {
 /// merges locally vs. defers to the remote forge's UI/API.
 pub fn forge_live(kind: &str) -> bool {
     match kind {
-        "github" => std::env::var("OPENFAB_GITHUB_REMOTE").is_ok(),
+        // GitHub is live via the REST API (token + repo) OR the legacy `gh` CLI remote.
+        "github" => {
+            RestForge::is_configured("github") || std::env::var("OPENFAB_GITHUB_REMOTE").is_ok()
+        }
         "forgejo" | "gitea" | "gitcode" => RestForge::is_configured(kind),
         _ => false,
     }
@@ -133,7 +143,11 @@ pub fn list_forges() -> Vec<ForgeInfo> {
                 display: forge_display(kind).to_string(),
                 live,
                 note: if live {
-                    "live instance configured".into()
+                    if kind == "github" && RestForge::is_configured("github") {
+                        "live — GitHub REST API (token)".into()
+                    } else {
+                        "live instance configured".into()
+                    }
                 } else {
                     "local instance (portable provenance, offline)".into()
                 },
@@ -152,7 +166,11 @@ pub fn build_forge(kind: &str, name: Option<String>, repo: &Path) -> Result<Box<
             repo.to_path_buf(),
         ))),
         "github" => {
-            if forge_live("github") {
+            if RestForge::is_configured("github") {
+                // Token-based GitHub REST API (api.github.com) — no `gh` CLI dependency.
+                Ok(Box::new(RestForge::from_env("github", repo.to_path_buf())?))
+            } else if std::env::var("OPENFAB_GITHUB_REMOTE").is_ok() {
+                // Legacy path: the `gh` CLI.
                 Ok(Box::new(GitHubForge::from_env(repo.to_path_buf())?))
             } else {
                 Ok(Box::new(LocalGitForge::with_kind(

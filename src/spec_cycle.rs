@@ -240,37 +240,77 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         ),
     );
     let mut outcomes = vec![];
-    for a in &spec.acceptance {
-        let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
-        let exec = base.run_sandboxed(&cmd, &repo)?;
-        let passed = exec.passed();
-        tl.step(
-            base,
-            if passed { "✅" } else { "❌" },
-            &format!(
-                "acceptance [{}] `{}` → {}",
-                a.id,
-                a.check,
-                if passed { "pass" } else { "FAIL" }
-            ),
-        );
-        if !passed {
-            let detail = first_nonempty(&exec.stdout, &exec.stderr);
-            if !detail.is_empty() {
-                tl.step(
-                    base,
-                    "  ›",
-                    &format!("sandbox output: {}", truncate(&detail, 160)),
-                );
-            }
+    let mut agent_spec_verdicts: Vec<crate::core::provenance::ScenarioVerdict> = vec![];
+    let mut spec_contract_sha256: Option<String> = None;
+    if crate::adapters::agent_spec::enabled() {
+        // Verification is delegated to `agent-spec lifecycle` (the contract's BDD scenarios
+        // bound to real tests). With OPENFAB_REVIEW=caller, AI-pending scenarios (design intent
+        // / quality) are additionally routed to the reviewer agent, whose verdict is merged in.
+        let (outs, verdicts) = if crate::adapters::agent_spec::review_caller_enabled() {
+            let bridge = std::env::var("OPENFAB_AGENTCHAT_URL").unwrap_or_default();
+            let room = std::env::var("OPENFAB_AGENTCHAT_ROOM").unwrap_or_else(|_| "openfab".into());
+            let paths: Vec<String> = changed_files.iter().map(|f| f.path.clone()).collect();
+            tl.step(
+                base,
+                "🔎",
+                "review: routing AI-pending scenarios to the reviewer (caller mode)",
+            );
+            crate::adapters::agent_spec::verify_with_review(spec, &repo, &bridge, &room, &paths)?
+        } else {
+            crate::adapters::agent_spec::verify_via_lifecycle(spec, &repo)?
+        };
+        outcomes = outs;
+        agent_spec_verdicts = verdicts;
+        spec_contract_sha256 = crate::adapters::agent_spec::contract_sha256(spec);
+        for o in &outcomes {
+            tl.step(
+                base,
+                if o.passed { "✅" } else { "❌" },
+                &format!(
+                    "scenario [{}] {} → {}",
+                    o.id,
+                    o.check,
+                    if o.passed { "pass" } else { "FAIL" }
+                ),
+            );
         }
-        outcomes.push(AcceptanceOutcome {
-            id: a.id.clone(),
-            check: a.check.clone(),
-            passed,
-            exit_code: exec.exit_code,
-        });
+    } else {
+        for a in &spec.acceptance {
+            let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
+            let exec = base.run_sandboxed(&cmd, &repo)?;
+            let passed = exec.passed();
+            tl.step(
+                base,
+                if passed { "✅" } else { "❌" },
+                &format!(
+                    "acceptance [{}] `{}` → {}",
+                    a.id,
+                    a.check,
+                    if passed { "pass" } else { "FAIL" }
+                ),
+            );
+            if !passed {
+                let detail = first_nonempty(&exec.stdout, &exec.stderr);
+                if !detail.is_empty() {
+                    tl.step(
+                        base,
+                        "  ›",
+                        &format!("sandbox output: {}", truncate(&detail, 160)),
+                    );
+                }
+            }
+            outcomes.push(AcceptanceOutcome {
+                id: a.id.clone(),
+                check: a.check.clone(),
+                passed,
+                exit_code: exec.exit_code,
+            });
+        }
     }
+    // Requirements doc (Phase 2): if the spec was distilled from a requirements conversation,
+    // record its hash in the signed provenance (requirements → spec → code traceability).
+    let requirements_sha256 = crate::adapters::agent_spec::requirements_sha256(&spec.id);
+
     let acceptance_passed = spec.acceptance.iter().filter(|a| a.must_pass).all(|a| {
         outcomes
             .iter()
@@ -317,6 +357,10 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             generated,
             materials,
             acceptance_passed,
+            spec_contract_sha256,
+            agent_spec_verdicts,
+            run_log_ref: None,
+            requirements_sha256,
         },
         cfg.fab,
     )?;
@@ -353,7 +397,51 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     let mut commit_paths: Vec<PathBuf> = changed_files.iter().map(|f| repo.join(&f.path)).collect();
     commit_paths.push(att_path.clone());
     commit_paths.push(sbom_path.clone());
-    let trailers = Trailers::new()
+
+    // When authored via agent-spec, commit the `.spec.md` contract into the repo so it
+    // travels with the code (portable, reproducible).
+    if crate::adapters::agent_spec::enabled() {
+        if let Ok(md) = std::fs::read(crate::adapters::agent_spec::spec_md_path(&spec.id)) {
+            let dest = crate::adapters::agent_spec::repo_spec_md_path(&repo, &spec.id);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, md).context("committing .spec.md into repo")?;
+            tl.step(
+                base,
+                "📄",
+                &format!("committed contract specs/{}.spec.md", spec.id),
+            );
+            commit_paths.push(dest);
+        }
+    }
+
+    // Commit the requirements document (Phase 2) into the repo so requirements travel with
+    // the code, matching the hash recorded in the attestation.
+    {
+        let spec_dir = std::env::var("OPENFAB_SPEC_DIR").unwrap_or_else(|_| "specs".to_string());
+        let req_src = crate::adapters::agent_spec::requirements_md_path_in(
+            std::path::Path::new(&spec_dir),
+            &spec.id,
+        );
+        if let Ok(req) = std::fs::read(&req_src) {
+            let dest = repo
+                .join("specs")
+                .join(format!("{}.requirements.md", spec.id));
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, req).context("committing requirements.md into repo")?;
+            tl.step(
+                base,
+                "📝",
+                &format!("committed requirements specs/{}.requirements.md", spec.id),
+            );
+            commit_paths.push(dest);
+        }
+    }
+
+    let mut trailers = Trailers::new()
         .with("Spec", &spec.spec_ref())
         .with(
             "Co-Authored-By",
@@ -369,6 +457,9 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
                 "failed"
             },
         );
+    if let Some(h) = &att.statement.predicate.spec_contract_sha256 {
+        trailers = trailers.with("OpenFab-Spec-Contract", h);
+    }
     let commit_msg = format!("feat({}): {}", spec.id, truncate(&spec.intent, 60));
     let sha = forge.commit(&commit_paths, &commit_msg, &trailers)?;
     tl.step(
@@ -434,6 +525,19 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             }
         ),
     );
+    // Make dashboard→Robrix approval smooth: when the run blocks at the gate, tell the room the
+    // exact run id + how to approve from chat (reaches the room when base = agent-chat). The user
+    // need not copy the id off the dashboard.
+    if !decision.accepted {
+        tl.step(
+            base,
+            "🔔",
+            &format!(
+                "Run `{}` is awaiting sign-off. Reply `approve {}` here to release it, or sign in the OpenFab dashboard.",
+                run_id, run_id
+            ),
+        );
+    }
 
     // 10. Persist run state + decision.
     let final_status = if !acceptance_passed {

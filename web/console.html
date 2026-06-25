@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenFab — Collaborative Console</title>
+<link rel="stylesheet" href="/style.css" />
+<style>
+  /* console-specific bits, built on the shared design tokens in /style.css */
+  .cgrid { display: grid; grid-template-columns: 420px 1fr; gap: 18px; align-items: start; }
+  .lanes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .lane { background: #0d111a; border: 1px solid var(--line); border-radius: 10px; padding: 8px; min-height: 64px; }
+  .lane h3 { font-size: 11px; color: var(--muted); margin: 2px 4px 8px; text-transform: capitalize; letter-spacing: .04em; }
+  .rcard { background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; margin-bottom: 7px; cursor: pointer; }
+  .rcard:hover { border-color: var(--accent2); }
+  .rcard .ref { color: var(--accent); font-weight: 600; font-size: 12.5px; }
+  .rcard .meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .pipe { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+  .pstage { padding: 5px 11px; border-radius: 999px; font-size: 11.5px; border: 1px solid var(--line); color: var(--faint); background: var(--panel); }
+  .pstage.done { color: var(--ok); border-color: #1f5e4b; background: #0e201a; }
+  .pstage.active { color: var(--accent); border-color: var(--accent2); background: #0e1830; }
+  .pstage.failed { color: var(--bad); border-color: #5e2330; background: #200e12; }
+  .psep { color: var(--faint); font-size: 11px; }
+  .agentrow { display: flex; justify-content: space-between; align-items: center; padding: 7px 6px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .agentrow:last-child { border-bottom: none; }
+  .agentrow:hover { background: var(--panel2); }
+  .agentrow .nm { font-size: 13px; }
+  .agentrow .st { color: var(--muted); font-size: 11.5px; }
+  .adot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+  .adot.on { background: var(--ok); } .adot.off { background: var(--faint); }
+  .peek { background: #0d111a; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto;
+          max-height: 46vh; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+  .docbody { background: #0d111a; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto;
+             max-height: 50vh; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+  .idrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .idrow input { width: auto; flex: 1; min-width: 120px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="logo">⚙</div>
+    <div class="brand">
+      <h1>OpenFab</h1>
+      <p><b>Collaborative console</b> — documents · process · agents · identity</p>
+    </div>
+    <div class="navlinks">
+      <label class="hint" style="margin:0 6px 0 0">Project</label>
+      <select id="project" onchange="onProjectChange()" style="width:auto;padding:6px 10px"></select>
+      <a class="navlink" href="/">⚙ Fabricate</a>
+      <a class="navlink on" href="/console">▦ Console</a>
+    </div>
+  </header>
+
+  <div class="cgrid">
+    <!-- LEFT -->
+    <div>
+      <div class="card">
+        <h2>Project board</h2>
+        <div class="lanes" id="board"><span class="muted">loading…</span></div>
+      </div>
+      <div class="card">
+        <h2>Agents <span class="muted">(live, via bridge)</span></h2>
+        <div id="agents"><span class="muted">loading…</span></div>
+      </div>
+      <div class="card">
+        <h2>Identity mapping <span class="muted">(Matrix → maintainer)</span></h2>
+        <div class="idrow">
+          <input id="mxid" placeholder="@alice:127.0.0.1:8128" />
+          <input id="maint" placeholder="alice" style="max-width:110px" />
+          <button class="btn sm" type="button" onclick="mapIdentity()">Map</button>
+        </div>
+        <div class="hint" id="idmsg" style="margin-top:8px">Only a mapped Matrix user can sign off in a Robrix room.</div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div>
+      <div class="card">
+        <h2 id="runtitle">Run detail</h2>
+        <div class="pipe" id="pipe"><span class="muted">select a run from the board →</span></div>
+        <div id="signoff"></div>
+        <div class="tabs" id="tabs" style="margin-top:14px"></div>
+        <div id="detail" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <h2>tmux peek <span class="muted">(agent live session)</span></h2>
+        <div id="peek" class="peek muted">click an agent on the left to peek its live session</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let curRun = null;
+let PROJECT = (()=>{ try { return localStorage.getItem("openfab_project") || "default"; } catch { return "default"; } })();   // selected project; persisted across refresh
+// append ?project= to project-scoped URLs (agent status is global, so skip it there)
+function P(u){ if (PROJECT && PROJECT!=="default" && u.startsWith("/api/") && !u.startsWith("/api/agents") && !u.startsWith("/api/projects"))
+  return u + (u.includes("?")?"&":"?") + "project=" + encodeURIComponent(PROJECT); return u; }
+const LANES = ["implementing","sign-off","accepted","merged","failed","rejected"];
+// `blocked` runs land in "sign-off": work is done & signed, only human release remains.
+const LANE_LABEL = { "implementing":"Implementing", "sign-off":"Awaiting sign-off",
+  "accepted":"Accepted", "merged":"Merged", "failed":"Failed", "rejected":"Rejected" };
+
+async function jget(u){ const r=await fetch(P(u)); if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error||r.status); return r.json(); }
+async function jpost(u,b){ const r=await fetch(P(u),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)}); return r.json(); }
+
+async function loadProjects(){
+  try {
+    const projs = await jget("/api/projects");
+    const sel = $("project");
+    sel.innerHTML = projs.map(p=>`<option value="${esc(p.name)}" ${p.name===PROJECT?"selected":""}>${esc(p.name)}</option>`).join("");
+  } catch(e){ /* registry optional */ }
+}
+function onProjectChange(){ PROJECT = $("project").value; try { localStorage.setItem("openfab_project", PROJECT); } catch {} curRun=null; $("pipe").innerHTML='<span class="muted">select a run →</span>'; $("signoff").innerHTML=""; $("detail").innerHTML=""; loadBoard(); }
+// Project creation lives on the dashboard (the primary surface); the console only selects.
+
+async function loadBoard(){
+  try {
+    const items = await jget("/api/board");
+    const lanes = {}; LANES.forEach(l=>lanes[l]=[]);
+    items.forEach(it=>{ (lanes[it.lane]||(lanes[it.lane]=[])).push(it); });
+    $("board").innerHTML = LANES.filter(l => l!=="rejected" || lanes[l].length).map(l=>`
+      <div class="lane"><h3>${LANE_LABEL[l]||l} <span class="muted">(${(lanes[l]||[]).length})</span></h3>${(lanes[l]||[]).map(it=>`
+        <div class="rcard" onclick="openRun('${esc(it.run_id)}')">
+          <div class="ref">${esc(it.spec_ref||it.run_id)}</div>
+          <div class="meta">${esc(it.base_name||"")}</div>
+        </div>`).join("")}</div>`).join("");
+  } catch(e){ $("board").innerHTML=`<span class="muted">board: ${e.message}</span>`; }
+}
+
+async function openRun(id){
+  curRun = id; $("runtitle").textContent = "Run · " + id;
+  try {
+    const stages = await jget(`/api/runs/${id}/stages`);
+    $("pipe").innerHTML = stages.map((s,i)=>
+      `${i?'<span class="psep">›</span>':''}<span class="pstage ${esc(s.state)}">${esc(s.label)}</span>`).join("");
+  } catch(e){ $("pipe").innerHTML=`<span class="muted">${e.message}</span>`; }
+  await renderSignoff(id);
+  $("tabs").innerHTML = ["docs","verify","audit"].map((t,i)=>
+    `<span class="tab ${i===0?'active':''}" onclick="showTab('${t}',this)">${t}</span>`).join("");
+  showTab("docs");
+}
+
+// Human-in-the-loop: when a run is blocked (work done & signed), show the release sign-off
+// panel right here in the console so a maintainer can approve without leaving the page.
+async function renderSignoff(id){
+  const box = $("signoff");
+  try {
+    const rec = await jget(`/api/runs/${id}`);
+    if (rec.status !== "blocked") { box.innerHTML = ""; return; }
+    const need = ({solo:1, team:2, crowd:2})[rec.gate_mode] || 2;
+    const maints = await jget("/api/maintainers");
+    box.innerHTML = `<div class="gaterow" style="margin-top:14px;padding:12px;border:1px solid var(--warn);border-radius:10px;background:#1f1a0e">
+      <div style="font-weight:600;color:var(--warn)">⛏ Awaiting release sign-off — ${esc(rec.gate_mode)} gate (need ${need})</div>
+      <div class="hint" style="margin:6px 0 10px">Work is implemented, verified and signed. Approve to release &amp; merge.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap" id="signbtns">
+        ${maints.map(m=>`<button class="btn ghost sm" onclick="doSignoff('${esc(m.name)}')">Sign off as ${esc(m.name)}</button>`).join("")}
+      </div>
+      <div class="hint" id="signmsg" style="margin-top:10px"></div></div>`;
+  } catch(e){ box.innerHTML = `<span class="muted">${e.message}</span>`; }
+}
+
+async function doSignoff(name){
+  const credential = window.prompt(`Sign-off passphrase for "${name}" (blank if OPENFAB_ALLOW_UNVERIFIED_SIGNOFF=1):`);
+  if (credential === null) return;
+  $("signmsg").textContent = `signing off as ${name}…`;
+  try {
+    const r = await jpost(`/api/runs/${curRun}/signoff`, { as: name, credential });
+    if (r.error){ $("signmsg").textContent = "error: " + r.error; return; }
+    $("signmsg").innerHTML = r.merged ? `<b style="color:var(--ok)">✓ ${name} signed — gate ACCEPTED → merged</b>`
+      : (r.accepted ? `<b style="color:var(--ok)">✓ accepted</b>`
+        : `${name} signed — still blocked: ${(r.blocking||[]).join("; ")}`);
+    await openRun(curRun); await loadBoard();   // refresh pipeline + board
+  } catch(e){ $("signmsg").textContent = e.message; }
+}
+
+async function showTab(t, el){
+  if(el){ document.querySelectorAll('#tabs .tab').forEach(x=>x.classList.remove('active')); el.classList.add('active'); }
+  if(!curRun) return;
+  const d = $("detail");
+  try {
+    if(t==="docs"){
+      const docs = await jget(`/api/runs/${curRun}/docs`);
+      if(!docs.length){ d.innerHTML='<span class="muted">no documents committed</span>'; return; }
+      window._docs = docs;
+      d.innerHTML = `<div class="tabs" style="margin-bottom:8px">${docs.map((doc,i)=>
+        `<span class="tab ${i===0?'active':''}" onclick="showDoc(${i},this)">${esc(doc.kind)} · ${esc(doc.name.split('/').pop())}</span>`).join("")}</div><div class="docbody" id="docbody"></div>`;
+      renderDoc(0);
+    } else if(t==="verify"){
+      const v = await jget(`/api/runs/${curRun}/verify`);
+      d.innerHTML = `<div class="hint">conformant: <b style="color:${v.conformant?'var(--ok)':'var(--bad)'}">${v.conformant}</b></div>`+
+        `<div class="docbody" style="margin-top:8px">${(v.checks||[]).map(c=>`${c.passed?'✓':'✗'} ${esc(c.id)} — ${esc(c.detail)}`).join("\n")}</div>`;
+    } else if(t==="audit"){
+      const a = await jget(`/api/runs/${curRun}/audit`);
+      d.innerHTML = `<div class="docbody">${esc(JSON.stringify(a,null,2))}</div>`;
+    }
+  } catch(e){ d.innerHTML=`<span class="muted">${esc(e.message)}</span>`; }
+}
+function showDoc(i,el){ document.querySelectorAll('#detail .tabs .tab').forEach(x=>x.classList.remove('active')); if(el)el.classList.add('active'); renderDoc(i); }
+function renderDoc(i){ const doc=window._docs[i]; $("docbody").textContent = doc? doc.content : ""; }
+// Escape for both element-content and quoted-attribute contexts (incl. quotes).
+function esc(s){ return String(s==null?"":s).replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c])); }
+function escapeHtml(s){ return esc(s); }
+
+async function loadAgents(){
+  try {
+    const ags = await jget("/api/agents");
+    const arr = Array.isArray(ags) ? ags : (ags.agents||[]);
+    $("agents").innerHTML = arr.map(a=>{
+      const name=a.name||a; const on=a.online||a.agentOnline;
+      return `<div class="agentrow" onclick="peek('${esc(name)}')"><span class="nm"><span class="adot ${on?'on':'off'}"></span>${esc(name)}</span><span class="st">${esc(a.state||"")}${a.model?(' · '+esc(a.model)):''}</span></div>`;
+    }).join("");
+  } catch(e){ $("agents").innerHTML=`<span class="muted">agents: ${e.message}<br>(is the Bridge running?)</span>`; }
+}
+let MONITOR_URL = "http://127.0.0.1:8084";
+async function loadConfig(){
+  try { const c = await jget("/api/config"); if(c.agentchat_monitor) MONITOR_URL = c.agentchat_monitor.replace(/\/$/,""); } catch {}
+}
+let peekMode = "monitor";   // "monitor" (agent-chat) | "text" (capture-pane)
+let peekAgent = null;
+function peek(name){ peekAgent = name; renderPeek(); }
+function setPeekMode(m){ peekMode = m; renderPeek(); }
+async function renderPeek(){
+  const box = $("peek");
+  const head = `<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <b style="color:var(--accent)">${peekAgent||""}</b>
+      <span class="tab ${peekMode==='monitor'?'active':''}" onclick="setPeekMode('monitor')">Agent Monitor</span>
+      <span class="tab ${peekMode==='text'?'active':''}" onclick="setPeekMode('text')">tmux text</span>
+      <a class="navlink" style="margin-left:auto" href="${MONITOR_URL}/?agent=${encodeURIComponent(peekAgent||'')}" target="_blank">open ↗</a>
+    </div>`;
+  box.classList.remove("muted");
+  if(!peekAgent){ box.className="peek muted"; box.textContent="click an agent on the left to peek its live session"; return; }
+  if(peekMode==="monitor"){
+    box.innerHTML = head + `<iframe src="${MONITOR_URL}/?agent=${encodeURIComponent(peekAgent)}" title="agent-chat monitor"
+      style="width:100%;height:42vh;border:1px solid var(--line);border-radius:8px;background:#000"></iframe>`;
+  } else {
+    box.innerHTML = head + `<div class="docbody" id="peektext" style="max-height:40vh">loading…</div>`;
+    try { const r = await jget(`/api/agents/${encodeURIComponent(peekAgent)}/peek?lines=120`);
+      $("peektext").textContent = r.error ? r.error : (r.lines||[]).join("\n"); }
+    catch(e){ $("peektext").textContent = e.message; }
+  }
+}
+async function mapIdentity(){
+  const r = await jpost("/api/identity",{mxid:$("mxid").value.trim(),maintainer:$("maint").value.trim()});
+  $("idmsg").textContent = r.error ? ("error: "+r.error) : (`mapped ${r.mxid} → ${r.maintainer}`);
+}
+
+loadConfig(); loadProjects(); loadBoard(); loadAgents();
+setInterval(loadBoard, 5000); setInterval(loadAgents, 5000);
+</script>
+</body>
+</html>

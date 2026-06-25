@@ -93,6 +93,16 @@ enum Cmd {
         #[arg(long)]
         name: String,
     },
+    /// Set a maintainer's sign-off credential (passphrase) — required for name-based sign-off,
+    /// so an agent can't forge one. Only its hash is stored.
+    MaintainerCred {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        token: String,
+    },
     /// Sign off a run as a maintainer. On N-of-M the gate opens and the PR merges.
     Signoff {
         #[arg(long)]
@@ -101,6 +111,9 @@ enum Cmd {
         run: String,
         #[arg(long = "as")]
         as_name: String,
+        /// Sign-off credential (passphrase); also read from OPENFAB_SIGNOFF_TOKEN.
+        #[arg(long)]
+        cred: Option<String>,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -187,12 +200,21 @@ pub fn run() -> Result<()> {
             policy.as_deref(),
         ),
         Cmd::MaintainerAdd { repo, name } => cmd_maintainer_add(&repo, &name),
+        Cmd::MaintainerCred { repo, name, token } => {
+            runstate::set_maintainer_cred(&repo, &name, &token)?;
+            println!("✓ sign-off credential set for {name} (only its hash is stored)");
+            Ok(())
+        }
         Cmd::Signoff {
             repo,
             run,
             as_name,
+            cred,
             policy,
-        } => cmd_signoff(&repo, &run, &as_name, policy.as_deref()),
+        } => {
+            let cred = cred.or_else(|| std::env::var("OPENFAB_SIGNOFF_TOKEN").ok());
+            cmd_signoff(&repo, &run, &as_name, cred.as_deref(), policy.as_deref())
+        }
         Cmd::Verify { repo, run } => cmd_verify(&repo, &run),
         Cmd::Reputation { repo } => cmd_reputation(&repo),
         Cmd::List { repo } => cmd_list(&repo),
@@ -244,6 +266,7 @@ fn cmd_run(
             run_id: None,
             gate_mode: gate.to_string(),
             authored_by: None,
+            prebuilt: None,
         },
         &policy,
     )?;
@@ -304,10 +327,16 @@ fn cmd_maintainer_add(repo: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_signoff(repo: &Path, run: &str, as_name: &str, policy_path: Option<&Path>) -> Result<()> {
+fn cmd_signoff(
+    repo: &Path,
+    run: &str,
+    as_name: &str,
+    cred: Option<&str>,
+    policy_path: Option<&Path>,
+) -> Result<()> {
     let repo = abs(repo)?;
     let policy = load_policy(policy_path)?;
-    let out = ops::signoff(&repo, run, as_name, &policy)?;
+    let out = ops::signoff_as(&repo, run, as_name, cred, &policy)?;
     println!("✍️  {as_name} ({}) signed off", short(&out.signer_did));
     for s in &out.satisfied {
         println!("  ✓ {s}");

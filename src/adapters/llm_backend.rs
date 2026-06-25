@@ -42,12 +42,6 @@ pub struct GenOutput {
 /// Build the coding prompt from a task card (the spec's NL intent + the contract).
 pub fn build_prompt(task: &TaskCard) -> String {
     let lang = task.language.as_deref().unwrap_or("any suitable language");
-    let checks = task
-        .acceptance
-        .iter()
-        .map(|a| format!("  - [{}] `{}` (must exit 0)", a.id, a.check))
-        .collect::<Vec<_>>()
-        .join("\n");
     let assumptions = if task.assumptions.is_empty() {
         "(none)".to_string()
     } else {
@@ -58,6 +52,62 @@ pub fn build_prompt(task: &TaskCard) -> String {
     } else {
         task.context.join(", ")
     };
+    // Path guidance differs for a root-layout project (target_dir ".") vs a nested app dir.
+    let (path_rule, path_example) = if task.target_dir == "." {
+        (
+            "Paths are relative to the repo ROOT (e.g. \"src/main.rs\", \"Cargo.toml\", \"tests/cli.rs\").".to_string(),
+            "<relpath>".to_string(),
+        )
+    } else {
+        (
+            format!("Paths must start with \"{}/\".", task.target_dir),
+            format!("{}/<relpath>", task.target_dir),
+        )
+    };
+
+    // agent-spec mode: the acceptance criteria are BDD scenarios bound to named tests
+    // (`agent-spec test: <pkg>::<filter>`), executed by `agent-spec lifecycle` (cargo test,
+    // pytest, …). The agent must write BOTH the implementation AND those exact tests.
+    let agent_spec_mode = task
+        .acceptance
+        .iter()
+        .any(|a| a.check.starts_with("agent-spec test:"));
+
+    let (checks_heading, checks, extra_rules) = if agent_spec_mode {
+        let lines = task
+            .acceptance
+            .iter()
+            .map(|a| {
+                let sel = a.check.trim_start_matches("agent-spec test:").trim();
+                let (_pkg, filter) = sel.split_once("::").unwrap_or(("", sel));
+                format!(
+                    "  - scenario \"{}\" → write a test named `{}`",
+                    a.id, filter
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (
+            "BOUND TEST SCENARIOS — implement the code AND write each named test so it passes",
+            lines,
+            "- These tests are executed by `agent-spec lifecycle` (e.g. `cargo test`, `pytest`).\n\
+             - Create each test with EXACTLY the given name so the contract's selector matches.\n\
+             - Emit a complete, buildable project at the repo root (e.g. Cargo.toml + src/ + tests/).",
+        )
+    } else {
+        let lines = task
+            .acceptance
+            .iter()
+            .map(|a| format!("  - [{}] `{}` (must exit 0)", a.id, a.check))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (
+            "MACHINE ACCEPTANCE CHECKS (your code MUST make every one pass)",
+            lines,
+            "- Include every file needed to pass the acceptance checks.",
+        )
+    };
+
     format!(
         r#"You are a coding agent inside OpenFab, a software fab. Implement the task below.
 
@@ -67,31 +117,28 @@ NATURAL-LANGUAGE INTENT:
 {intent}
 
 LANGUAGE: {lang}
-TARGET DIRECTORY (all files go under this, relative paths): {target_dir}/
 CONTEXT: {context}
-RECORDED ASSUMPTIONS: {assumptions}
+RECORDED ASSUMPTIONS / DECISIONS / BOUNDARIES: {assumptions}
 
-MACHINE ACCEPTANCE CHECKS (your code MUST make every one pass):
+{checks_heading}:
 {checks}
 
 OUTPUT CONTRACT — respond with ONLY a single JSON object, no prose, no markdown
 fences, exactly this shape:
-{{"files": {{"{target_dir}/<relpath>": "<full file contents>", ...}}, "notes": "<one line>"}}
+{{"files": {{"{path_example}": "<full file contents>", ...}}, "notes": "<one line>"}}
 
 Rules:
-- Include every file needed to pass the acceptance checks.
-- Use only the standard library; assume nothing is pip/npm-installed.
-- Paths must start with "{target_dir}/".
+{extra_rules}
+- Use only the standard library; assume nothing is pip/npm-installed unless declared.
+- {path_rule}
 - If this is a web app/server, bind to 127.0.0.1 and read the port from the PORT
   environment variable (default 8000) so it can be launched and opened in a browser.
 - The JSON must be valid and parseable. Do not wrap it in code fences."#,
         spec_ref = task.spec_ref(),
         intent = task.intent,
         lang = lang,
-        target_dir = task.target_dir,
         context = context,
         assumptions = assumptions,
-        checks = checks,
     )
 }
 
@@ -105,6 +152,17 @@ fn claude_text(prompt: &str) -> Result<(String, String)> {
         "--output-format".to_string(),
         "json".to_string(),
     ];
+    // Treat the claude CLI as a plain completion backend: load only project/local setting
+    // sources, NOT the user's global ~/.claude (hooks, CLAUDE.md, skills, MCP). Otherwise a
+    // global Stop/SessionStart hook (e.g. a knowledge-build "dream" pass) hijacks the call
+    // and returns governance prose instead of the requested JSON/spec. OAuth login + model
+    // still apply. Override with OPENFAB_CLAUDE_SETTING_SOURCES (empty = don't pass the flag).
+    let sources = std::env::var("OPENFAB_CLAUDE_SETTING_SOURCES")
+        .unwrap_or_else(|_| "project,local".to_string());
+    if !sources.is_empty() {
+        args.push("--setting-sources".to_string());
+        args.push(sources);
+    }
     if let Some(m) = &model_override {
         args.push("--model".to_string());
         args.push(m.clone());

@@ -106,6 +106,11 @@ fn route(
 
         // --- catalog ---
         (Method::Get, ["api", "bases"]) => Ok(json_resp(200, &json!(registry::list_bases()))),
+        // Bring a base's native runtime up (so the user can run it for real, not bridged).
+        (Method::Post, ["api", "base", id, "launch"]) => match registry::launch_base(id) {
+            Ok(outcome) => Ok(json_resp(200, &json!(outcome))),
+            Err(e) => Ok(json_resp(400, &json!({ "error": e.to_string() }))),
+        },
         (Method::Get, ["api", "forges"]) => Ok(json_resp(200, &json!(registry::list_forges()))),
         (Method::Get, ["api", "maintainers"]) => Ok(json_resp(
             200,
@@ -128,11 +133,22 @@ fn route(
         (Method::Post, ["api", "author"]) => {
             let body = body_json(req)?;
             let intent = body["intent"].as_str().unwrap_or("").to_string();
-            let (spec, model, provider) = ops::author_spec(&intent)?;
+            let author_model = body["author_model"].as_str().filter(|s| !s.is_empty());
+            let (spec, model, provider) = ops::author_spec(&intent, author_model)?;
             Ok(json_resp(
                 200,
                 &json!({ "spec": spec, "model": model, "provider": provider }),
             ))
+        }
+        // Models available on the configured Ollama endpoint (key stays server-side).
+        (Method::Get, ["api", "models"]) => {
+            match crate::adapters::llm_backend::list_ollama_models() {
+                Ok(models) => Ok(json_resp(200, &json!({ "models": models }))),
+                Err(e) => Ok(json_resp(
+                    200,
+                    &json!({ "models": [], "error": e.to_string() }),
+                )),
+            }
         }
 
         // --- runs ---
@@ -229,6 +245,22 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
     } else {
         RunMode::Release
     };
+    let allow_bridged = body["allow_bridged"].as_bool().unwrap_or(false);
+    let author_model = body["author_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let base_model = body["base_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    // Pre-flight: if the chosen base's native runtime isn't running and the user hasn't
+    // opted into the bridged stand-in, refuse up-front with a structured response so the UI
+    // can offer to launch it (or run bridged) — never a silent substitution (R14).
+    if let Some(resp) = base_unavailable_response(&base, allow_bridged) {
+        return Ok(resp);
+    }
 
     // Natural-language path: author + build in the background.
     if let Some(intent) = body["intent"]
@@ -240,6 +272,7 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
         seed_status(state, &run_id, "authoring spec…", "authoring");
         let st = state.clone();
         let (rid, b, f, fname, g) = (run_id.clone(), base, forge, forge_name, gate);
+        let (am, bm) = (author_model, base_model);
         thread::spawn(move || {
             let _guard = st.lock.lock().unwrap();
             if let Err(e) = ops::build(
@@ -251,6 +284,9 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
                 fname,
                 &g,
                 mode,
+                allow_bridged,
+                am.as_deref(),
+                bm,
                 &st.policy,
             ) {
                 fail_run(&st, &rid, "authoring", &e);
@@ -275,9 +311,43 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
             gate_mode: gate,
             authored_by: None,
             mode,
+            allow_bridged,
+            base_model,
         },
     );
     Ok(json_resp(200, &json!({ "run_id": run_id })))
+}
+
+/// If `base` is a framework whose native runtime is unreachable and the user did not opt
+/// into bridging, return a 409 with everything the UI needs to offer Launch / bridged.
+/// Returns `None` when the run may proceed (base reachable, bridging allowed, or claude).
+fn base_unavailable_response(
+    base: &str,
+    allow_bridged: bool,
+) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+    if allow_bridged {
+        return None;
+    }
+    let st = registry::base_status(base);
+    if !st.is_framework || st.reachable {
+        return None;
+    }
+    let display = base; // id doubles as a fine label here
+    Some(json_resp(
+        409,
+        &json!({
+            "error_kind": "base_unavailable",
+            "base": st.id,
+            "display": display,
+            "launchable": st.launchable,
+            "endpoint": st.endpoint,
+            "hint": if st.launchable {
+                format!("{display} is not running. Launch it, or run with the bridged stand-in.")
+            } else {
+                format!("{display} is not running and has no bundled launcher. Start its adapter, or run bridged.")
+            },
+        }),
+    ))
 }
 
 /// Refine: re-author the spec from the human's feedback and rebuild (v→v+1).
@@ -294,14 +364,38 @@ fn feedback(
     } else {
         RunMode::Release
     };
+    let allow_bridged = body["allow_bridged"].as_bool().unwrap_or(false);
+    let author_model = body["author_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let base_model = body["base_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(resp) = base_unavailable_response(&base, allow_bridged) {
+        return Ok(resp);
+    }
     let run_id = ops::reserve_refine_run_id(&state.repo, id)?;
 
     seed_status(state, &run_id, "re-authoring spec…", "authoring");
     let st = state.clone();
     let (rid, prior, n, b) = (run_id.clone(), id.to_string(), note, base);
+    let (am, bm) = (author_model, base_model);
     thread::spawn(move || {
         let _guard = st.lock.lock().unwrap();
-        if let Err(e) = ops::refine(&st.repo, &prior, &n, rid.clone(), &b, mode, &st.policy) {
+        if let Err(e) = ops::refine(
+            &st.repo,
+            &prior,
+            &n,
+            rid.clone(),
+            &b,
+            mode,
+            allow_bridged,
+            am.as_deref(),
+            bm,
+            &st.policy,
+        ) {
             fail_run(&st, &rid, "re-authoring", &e);
         }
     });

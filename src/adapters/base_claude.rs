@@ -1,9 +1,9 @@
-//! `base_claude` — the claude CLI as a coding-agent base (its native runtime).
+//! `base_claude` — a local coding-CLI as a base (its native runtime): **claude** or **codex**.
 //!
-//! The headline base: a genuine LLM turns the spec's NL intent into working source. The
-//! generation mechanics (prompt building, manifest parsing, the CLI call, file writing)
-//! live in `llm_backend` so every base shares one robust path; this file is just the
-//! `BasePort` wiring. Swapping bases changes only which adapter is constructed.
+//! The headline base: a genuine LLM turns the spec's NL intent into working source. Both CLIs
+//! share one `BasePort` wiring (R3 — no near-duplicate adapters); only which `llm_backend`
+//! generator runs differs. The generation mechanics (prompt, manifest parse, CLI call, file
+//! writing) live in `llm_backend`. Swapping bases changes only which adapter is constructed.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,15 +16,45 @@ use crate::core::spec::TaskCard;
 use crate::core::trust::Policy;
 use crate::ports::base::{BasePort, Capabilities, ExecResult, RunHandle, RunResult};
 
+/// Which local coding CLI backs this base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliKind {
+    Claude,
+    Codex,
+}
+
+impl CliKind {
+    fn id(&self) -> &'static str {
+        match self {
+            CliKind::Claude => "claude-cli",
+            CliKind::Codex => "codex-cli",
+        }
+    }
+
+    fn generate(&self, prompt: &str) -> Result<llm_backend::GenOutput> {
+        match self {
+            CliKind::Claude => llm_backend::generate_claude(prompt),
+            CliKind::Codex => llm_backend::generate_codex(prompt),
+        }
+    }
+}
+
 pub struct ClaudeBase {
+    kind: CliKind,
     policy: Policy,
     results: RefCell<HashMap<String, RunResult>>,
     memory: RefCell<HashMap<String, Vec<u8>>>,
 }
 
 impl ClaudeBase {
+    /// The claude CLI base (back-compat constructor).
     pub fn new(policy: Policy) -> Self {
+        Self::with_kind(CliKind::Claude, policy)
+    }
+
+    pub fn with_kind(kind: CliKind, policy: Policy) -> Self {
         ClaudeBase {
+            kind,
             policy,
             results: RefCell::new(HashMap::new()),
             memory: RefCell::new(HashMap::new()),
@@ -34,7 +64,7 @@ impl ClaudeBase {
 
 impl BasePort for ClaudeBase {
     fn name(&self) -> &str {
-        "claude-cli"
+        self.kind.id()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -48,10 +78,10 @@ impl BasePort for ClaudeBase {
 
     fn dispatch(&self, task: &TaskCard) -> Result<RunHandle> {
         let handle = RunHandle {
-            id: format!("{}-claude", task.id),
+            id: format!("{}-{}", task.id, self.kind.id()),
         };
         let prompt = llm_backend::build_prompt(task);
-        let gen = llm_backend::generate_claude(&prompt)?;
+        let gen = self.kind.generate(&prompt)?;
         let changed = llm_backend::write_manifest(&task.workdir, &gen.manifest)?;
         let result = RunResult {
             task_id: task.id.clone(),
@@ -59,7 +89,8 @@ impl BasePort for ClaudeBase {
             model: gen.model,
             prompt,
             log: format!(
-                "claude-cli implemented spec '{}' via {} — {} file(s); notes: {}",
+                "{} implemented spec '{}' via {} — {} file(s); notes: {}",
+                self.kind.id(),
                 task.spec_id,
                 gen.provider,
                 gen.manifest.files.len(),
@@ -80,7 +111,7 @@ impl BasePort for ClaudeBase {
     }
 
     fn post(&self, channel: &str, msg: &str) -> Result<()> {
-        eprintln!("[claude comms #{channel}] {msg}");
+        eprintln!("[{} comms #{channel}] {msg}", self.kind.id());
         Ok(())
     }
 

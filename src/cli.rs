@@ -54,6 +54,9 @@ enum Cmd {
         /// Fast iterate: generate + run acceptance only, NO sign/gate/PR (un-attested draft).
         #[arg(long)]
         draft: bool,
+        /// If the chosen base's native runtime is down, allow OpenFab's LLM bridge to stand in.
+        #[arg(long)]
+        allow_bridged: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -74,6 +77,9 @@ enum Cmd {
         /// Fast iterate: generate + run acceptance only, NO sign/gate/PR (un-attested draft).
         #[arg(long)]
         draft: bool,
+        /// If the chosen base's native runtime is down, allow OpenFab's LLM bridge to stand in.
+        #[arg(long)]
+        allow_bridged: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -90,6 +96,9 @@ enum Cmd {
         add_check: Option<String>,
         #[arg(long, default_value = "claude")]
         base: String,
+        /// If the chosen base's native runtime is down, allow OpenFab's LLM bridge to stand in.
+        #[arg(long)]
+        allow_bridged: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -127,6 +136,18 @@ enum Cmd {
         #[arg(long)]
         run: String,
     },
+    /// Forge-agnostic verify: reproduce straight from a committed attestation file against
+    /// the working tree — no `.openfab/` run-state needed (clone from any forge, verify offline).
+    VerifyFile {
+        /// Repo / working tree holding the generated source (default: current dir).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Path to the committed attestation, e.g. provenance/<spec>-vN.att.json
+        #[arg(long)]
+        att: PathBuf,
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
     /// Project reputation from the signed attestations in a repo.
     Reputation {
         #[arg(long)]
@@ -160,6 +181,7 @@ pub fn run() -> Result<()> {
             forge_name,
             gate,
             draft,
+            allow_bridged,
             policy,
         } => cmd_run(
             &spec,
@@ -169,6 +191,7 @@ pub fn run() -> Result<()> {
             forge_name,
             &gate,
             mode_of(draft),
+            allow_bridged,
             policy.as_deref(),
             None,
         ),
@@ -180,6 +203,7 @@ pub fn run() -> Result<()> {
             forge_name,
             gate,
             draft,
+            allow_bridged,
             policy,
         } => cmd_build(
             &intent,
@@ -189,6 +213,7 @@ pub fn run() -> Result<()> {
             forge_name,
             &gate,
             mode_of(draft),
+            allow_bridged,
             policy.as_deref(),
         ),
         Cmd::Promote { repo, run, policy } => cmd_promote(&repo, &run, policy.as_deref()),
@@ -198,6 +223,7 @@ pub fn run() -> Result<()> {
             note,
             add_check,
             base,
+            allow_bridged,
             policy,
         } => cmd_feedback(
             &repo,
@@ -205,6 +231,7 @@ pub fn run() -> Result<()> {
             &note,
             add_check.as_deref(),
             &base,
+            allow_bridged,
             policy.as_deref(),
         ),
         Cmd::MaintainerAdd { repo, name } => cmd_maintainer_add(&repo, &name),
@@ -215,6 +242,7 @@ pub fn run() -> Result<()> {
             policy,
         } => cmd_signoff(&repo, &run, &as_name, policy.as_deref()),
         Cmd::Verify { repo, run } => cmd_verify(&repo, &run),
+        Cmd::VerifyFile { repo, att, policy } => cmd_verify_file(&repo, &att, policy.as_deref()),
         Cmd::Reputation { repo } => cmd_reputation(&repo),
         Cmd::List { repo } => cmd_list(&repo),
         Cmd::Serve { repo, port, policy } => {
@@ -249,6 +277,7 @@ fn cmd_run(
     forge_name: Option<String>,
     gate: &str,
     mode: RunMode,
+    allow_bridged: bool,
     policy_path: Option<&Path>,
     parent_run: Option<String>,
 ) -> Result<()> {
@@ -276,6 +305,8 @@ fn cmd_run(
             gate_mode: gate.to_string(),
             authored_by: None,
             mode,
+            allow_bridged,
+            base_model: None,
         },
         &policy,
     )?;
@@ -294,6 +325,7 @@ fn cmd_build(
     forge_name: Option<String>,
     gate: &str,
     mode: RunMode,
+    allow_bridged: bool,
     policy_path: Option<&Path>,
 ) -> Result<()> {
     let repo = abs(repo)?;
@@ -308,7 +340,18 @@ fn cmd_build(
     );
     let run_id = ops::reserve_intent_run_id(intent);
     ops::build(
-        &repo, intent, run_id, base_name, forge_kind, forge_name, gate, mode, &policy,
+        &repo,
+        intent,
+        run_id,
+        base_name,
+        forge_kind,
+        forge_name,
+        gate,
+        mode,
+        allow_bridged,
+        None,
+        None,
+        &policy,
     )?;
     Ok(())
 }
@@ -341,6 +384,7 @@ fn cmd_feedback(
     note: &str,
     _add_check: Option<&str>,
     base_name: &str,
+    allow_bridged: bool,
     policy_path: Option<&Path>,
 ) -> Result<()> {
     let repo = abs(repo)?;
@@ -354,6 +398,9 @@ fn cmd_feedback(
         run_id,
         base_name,
         RunMode::Release,
+        allow_bridged,
+        None,
+        None,
         &policy,
     )?;
     Ok(())
@@ -392,6 +439,37 @@ fn cmd_signoff(repo: &Path, run: &str, as_name: &str, policy_path: Option<&Path>
     } else {
         println!("🛡️  gate still BLOCKED — needs more sign-off.");
     }
+    Ok(())
+}
+
+fn cmd_verify_file(repo: &Path, att: &Path, policy_path: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let policy = load_policy(policy_path)?;
+    let out = ops::reproduce_from_file(&repo, att, &policy)?;
+    println!("== openfab verify-file: {} ==", out.run_id);
+    println!(
+        "  signatures valid: {}    source bit-identical: {} ({} files)",
+        yn(out.signature_valid),
+        yn(out.source_identical),
+        out.files_checked
+    );
+    for c in &out.checks {
+        println!(
+            "  [{}] {} — `{}`",
+            if c.passed { "PASS" } else { "FAIL" },
+            c.id,
+            c.check
+        );
+    }
+    if out.checks.is_empty() {
+        println!(
+            "  (no acceptance checks embedded — pre-v0.2 attestation; integrity+authenticity only)"
+        );
+    }
+    if !out.reproducible {
+        bail!("NOT reproducible (signature / digest / acceptance mismatch)");
+    }
+    println!("✅ reproducible: signature valid, source bit-identical, contract re-passed — verified offline, no run-state.");
     Ok(())
 }
 

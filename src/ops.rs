@@ -33,17 +33,23 @@ pub struct RunRequest {
     pub authored_by: Option<String>,
     /// Draft (fast, un-attested) vs Release (full ceremony). Defaults to Release.
     pub mode: RunMode,
+    /// When a framework base's native runtime is unreachable, permit OpenFab's LLM bridge
+    /// to stand in (explicit opt-in only — otherwise the run refuses, R14).
+    pub allow_bridged: bool,
+    /// Optional per-run model override for the BASE's code generation (native dispatch
+    /// payload + the bridged path). `None` → the base's own default.
+    pub base_model: Option<String>,
 }
 
 /// Author a spec from a natural-language intent using the LLM (the Base). The user only
 /// supplies the intent; the model derives the acceptance criteria, language, assumptions,
 /// and open questions. The human then reviews/edits before building (the spec-time intent
 /// check). Returns the drafted Spec plus (model, provider) for the record.
-pub fn author_spec(intent: &str) -> Result<(Spec, String, String)> {
+pub fn author_spec(intent: &str, author_model: Option<&str>) -> Result<(Spec, String, String)> {
     if intent.trim().len() < 4 {
         bail!("describe what you want to build");
     }
-    let (a, model, provider) = crate::adapters::llm_backend::author_spec(intent)?;
+    let (a, model, provider) = crate::adapters::llm_backend::author_spec(intent, author_model)?;
     let spec = Spec {
         id: slug(intent),
         version: 1,
@@ -81,9 +87,12 @@ pub fn build(
     forge_name: Option<String>,
     gate_mode: &str,
     mode: RunMode,
+    allow_bridged: bool,
+    author_model: Option<&str>,
+    base_model: Option<String>,
     policy: &Policy,
 ) -> Result<RunRecord> {
-    let (spec, model, provider) = author_spec(intent)?;
+    let (spec, model, provider) = author_spec(intent, author_model)?;
     start_run(
         repo,
         RunRequest {
@@ -96,6 +105,8 @@ pub fn build(
             gate_mode: gate_mode.to_string(),
             authored_by: Some(format!("{provider} · {model}")),
             mode,
+            allow_bridged,
+            base_model,
         },
         policy,
     )
@@ -113,6 +124,9 @@ pub fn refine(
     run_id: String,
     base: &str,
     mode: RunMode,
+    allow_bridged: bool,
+    author_model: Option<&str>,
+    base_model: Option<String>,
     policy: &Policy,
 ) -> Result<RunRecord> {
     let prior = runstate::load_run(repo, prior_run)?;
@@ -122,7 +136,7 @@ pub fn refine(
         prior_spec.intent.trim(),
         note.trim()
     );
-    let (mut spec, model, provider) = author_spec(&combined)?;
+    let (mut spec, model, provider) = author_spec(&combined, author_model)?;
     spec.id = prior_spec.id.clone();
     spec.version = prior_spec.version + 1;
     spec.intent = combined;
@@ -140,6 +154,8 @@ pub fn refine(
                 "{provider} · {model} (re-authored from your feedback)"
             )),
             mode,
+            allow_bridged,
+            base_model,
         },
         policy,
     )
@@ -198,7 +214,7 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
 
     let forge = registry::build_forge(&req.forge_kind, req.forge_name.clone(), repo)?;
     forge.clone_repo(repo)?;
-    let base = registry::build_base(&req.base, policy)?;
+    let base = registry::build_base(&req.base, policy, req.allow_bridged, req.base_model.clone())?;
 
     // The human-approval gate is a policy choice per run (solo / team / crowd / none).
     let gate_policy = policy.for_gate_mode(&req.gate_mode);
@@ -270,6 +286,11 @@ pub fn promote(
             gate_mode: draft.gate_mode.clone(),
             authored_by: Some(format!("promoted from draft {}", draft.run_id)),
             mode: RunMode::Release,
+            // A signed release must be built by the real base — never a bridged stand-in.
+            allow_bridged: false,
+            // Release uses the base's configured default model (the draft's per-run override
+            // isn't persisted in the run record).
+            base_model: None,
         },
         policy,
     )?;
@@ -523,9 +544,7 @@ pub struct ReproduceOutcome {
 /// the sandbox. This is the sovereign/air-gapped proof — "don't trust, verify".
 pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOutcome> {
     let rec = runstate::load_run(repo, run)?;
-    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, run)?)?;
     let att = Attestation::from_json(&std::fs::read_to_string(rec.attestation_path(repo))?)?;
-    let signature_valid = att.verify_signatures().is_ok();
 
     // Check out the run's source so the working tree holds exactly what was attested.
     let forge = registry::build_forge(
@@ -534,6 +553,34 @@ pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOut
         repo,
     )?;
     forge.branch(&rec.branch)?;
+    reproduce_from_attestation(repo, &att, policy)
+}
+
+/// Forge-agnostic verification: reproduce **directly from a committed attestation file**,
+/// against the current working tree — no `.openfab/` run-state required. This is the
+/// "clone from any forge (or a tarball) and verify offline" path: signatures, file
+/// digests, and the **embedded acceptance contract** all travel inside the attestation.
+pub fn reproduce_from_file(
+    repo: &Path,
+    att_path: &Path,
+    policy: &Policy,
+) -> Result<ReproduceOutcome> {
+    let att = Attestation::from_json(&std::fs::read_to_string(att_path)?)
+        .with_context(|| format!("reading attestation {}", att_path.display()))?;
+    reproduce_from_attestation(repo, &att, policy)
+}
+
+/// The self-contained verification core. Everything it needs is inside `att`:
+/// signatures (authenticity), generated digests (integrity), and the embedded acceptance
+/// checks (conformance). Pre-v0.2 attestations without embedded checks verify
+/// integrity+authenticity but report zero checks (conformance unverifiable from the file
+/// alone — fall back to `reproduce(run)` which has the local spec).
+pub fn reproduce_from_attestation(
+    repo: &Path,
+    att: &Attestation,
+    policy: &Policy,
+) -> Result<ReproduceOutcome> {
+    let signature_valid = att.verify_signatures().is_ok();
 
     // Each generated file must hash-match its recorded digest (bit-identical source).
     let mut source_identical = true;
@@ -546,10 +593,10 @@ pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOut
         }
     }
 
-    // Re-run the contract in the sandbox.
+    // Re-run the frozen contract embedded in the attestation.
     let mut checks = vec![];
     let mut all_passed = true;
-    for a in &spec.acceptance {
+    for a in &att.statement.predicate.acceptance {
         let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
         let exec = sandbox::exec_gated(policy, &cmd, repo)?;
         if a.must_pass && !exec.passed() {
@@ -564,7 +611,7 @@ pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOut
     }
 
     Ok(ReproduceOutcome {
-        run_id: rec.run_id,
+        run_id: att.statement.predicate.spec_ref.clone(),
         signature_valid,
         source_identical,
         all_acceptance_passed: all_passed,
@@ -595,23 +642,32 @@ pub struct ArtifactFile {
 
 pub fn artifacts(repo: &Path, run: &str) -> Result<ArtifactBundle> {
     let rec = runstate::load_run(repo, run)?;
-    let att_text = std::fs::read_to_string(rec.attestation_path(repo))?;
-    let attestation: serde_json::Value = serde_json::from_str(&att_text)?;
+    // A draft has no attestation/SBOM yet (the ceremony only runs on release). Degrade
+    // gracefully so the spec, acceptance and timeline are still inspectable — clicking a
+    // workflow step on a draft should show what it produced, not an empty placeholder.
+    let att_text = std::fs::read_to_string(rec.attestation_path(repo)).ok();
+    let (attestation, files) = match att_text.as_deref() {
+        Some(text) => {
+            let attestation: serde_json::Value = serde_json::from_str(text)?;
+            let att = Attestation::from_json(text)?;
+            let mut files = vec![];
+            for g in &att.statement.predicate.generated {
+                let contents = std::fs::read_to_string(repo.join(&g.path)).unwrap_or_default();
+                files.push(ArtifactFile {
+                    path: g.path.clone(),
+                    contents,
+                    sha256: g.sha256.clone(),
+                    author: g.author.clone(),
+                });
+            }
+            (attestation, files)
+        }
+        None => (serde_json::Value::Null, vec![]),
+    };
     let sbom: serde_json::Value = std::fs::read_to_string(repo.join(&rec.sbom_repo_path))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
-    let att = Attestation::from_json(&att_text)?;
-    let mut files = vec![];
-    for g in &att.statement.predicate.generated {
-        let contents = std::fs::read_to_string(repo.join(&g.path)).unwrap_or_default();
-        files.push(ArtifactFile {
-            path: g.path.clone(),
-            contents,
-            sha256: g.sha256.clone(),
-            author: g.author.clone(),
-        });
-    }
     let timeline = std::fs::read_to_string(runstate::run_dir(repo, run).join("timeline.md"))
         .unwrap_or_default();
     let spec: serde_json::Value = serde_yaml::from_str(&runstate::load_run_spec_yaml(repo, run)?)

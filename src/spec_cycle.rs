@@ -244,8 +244,21 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     let mut spec_contract_sha256: Option<String> = None;
     if crate::adapters::agent_spec::enabled() {
         // Verification is delegated to `agent-spec lifecycle` (the contract's BDD scenarios
-        // bound to real tests), not OpenFab's own sandbox acceptance commands.
-        let (outs, verdicts) = crate::adapters::agent_spec::verify_via_lifecycle(spec, &repo)?;
+        // bound to real tests). With OPENFAB_REVIEW=caller, AI-pending scenarios (design intent
+        // / quality) are additionally routed to the reviewer agent, whose verdict is merged in.
+        let (outs, verdicts) = if crate::adapters::agent_spec::review_caller_enabled() {
+            let bridge = std::env::var("OPENFAB_AGENTCHAT_URL").unwrap_or_default();
+            let room = std::env::var("OPENFAB_AGENTCHAT_ROOM").unwrap_or_else(|_| "openfab".into());
+            let paths: Vec<String> = changed_files.iter().map(|f| f.path.clone()).collect();
+            tl.step(
+                base,
+                "🔎",
+                "review: routing AI-pending scenarios to the reviewer (caller mode)",
+            );
+            crate::adapters::agent_spec::verify_with_review(spec, &repo, &bridge, &room, &paths)?
+        } else {
+            crate::adapters::agent_spec::verify_via_lifecycle(spec, &repo)?
+        };
         outcomes = outs;
         agent_spec_verdicts = verdicts;
         spec_contract_sha256 = crate::adapters::agent_spec::contract_sha256(spec);
@@ -512,6 +525,19 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             }
         ),
     );
+    // Make dashboard→Robrix approval smooth: when the run blocks at the gate, tell the room the
+    // exact run id + how to approve from chat (reaches the room when base = agent-chat). The user
+    // need not copy the id off the dashboard.
+    if !decision.accepted {
+        tl.step(
+            base,
+            "🔔",
+            &format!(
+                "Run `{}` is awaiting sign-off. Reply `approve {}` here to release it, or sign in the OpenFab dashboard.",
+                run_id, run_id
+            ),
+        );
+    }
 
     // 10. Persist run state + decision.
     let final_status = if !acceptance_passed {

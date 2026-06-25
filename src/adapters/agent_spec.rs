@@ -396,6 +396,100 @@ pub fn outcomes_from_lifecycle(json: &serde_json::Value) -> Result<(Vec<Acceptan
     Ok((outcomes, acceptance_passed))
 }
 
+/// One AI-pending scenario the reviewer must decide (from caller-mode's pending requests).
+#[derive(Debug, Clone)]
+pub struct ReviewItem {
+    pub scenario_name: String,
+    pub intent: String,
+}
+
+/// Parse the caller-mode `pending-ai-requests.json` (an array of AiRequest objects) into the
+/// review items OpenFab sends to the reviewer agent.
+pub fn parse_ai_requests(json: &serde_json::Value) -> Vec<ReviewItem> {
+    let arr = json.as_array().cloned().unwrap_or_default();
+    arr.iter()
+        .filter_map(|r| {
+            let scenario_name = r
+                .get("scenario_name")
+                .or_else(|| r.get("scenario"))
+                .and_then(|v| v.as_str())?
+                .to_string();
+            let intent = r
+                .get("intent")
+                .or_else(|| r.get("contract_intent"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(ReviewItem {
+                scenario_name,
+                intent,
+            })
+        })
+        .collect()
+}
+
+/// A reviewer agent's decision on one AI-pending scenario.
+#[derive(Debug, Clone)]
+pub struct ReviewDecision {
+    pub scenario_name: String,
+    pub verdict: String, // "pass" | "fail"
+    pub confidence: f64,
+    pub reasoning: String,
+    pub model: String,
+}
+
+/// Serialize reviewer decisions into the `agent-spec resolve-ai --decisions` JSON format.
+pub fn decisions_to_json(decisions: &[ReviewDecision]) -> serde_json::Value {
+    serde_json::Value::Array(
+        decisions
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "scenario_name": d.scenario_name,
+                    "model": if d.model.is_empty() { "openfab-reviewer" } else { d.model.as_str() },
+                    "confidence": d.confidence,
+                    "verdict": d.verdict,
+                    "reasoning": d.reasoning,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Parse reviewer decisions from a `review_result` payload's `decisions` array (from the
+/// Bridge), tolerant of missing fields.
+pub fn parse_review_decisions(json: &serde_json::Value) -> Vec<ReviewDecision> {
+    json.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| {
+                    let scenario_name =
+                        d.get("scenario_name").and_then(|v| v.as_str())?.to_string();
+                    Some(ReviewDecision {
+                        scenario_name,
+                        verdict: d
+                            .get("verdict")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("fail")
+                            .to_string(),
+                        confidence: d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        reasoning: d
+                            .get("reasoning")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        model: d
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Extract per-scenario verdicts from an `agent-spec lifecycle --format json` report, for
 /// recording in the signed provenance predicate.
 pub fn verdicts_from_lifecycle(json: &serde_json::Value) -> Vec<ScenarioVerdict> {
@@ -590,6 +684,105 @@ pub fn lifecycle_run(
     ])?;
     let (outcomes, _passed) = outcomes_from_lifecycle(&json)?;
     let verdicts = verdicts_from_lifecycle(&json);
+    Ok((outcomes, verdicts))
+}
+
+/// Run `agent-spec lifecycle <spec> --code <repo> --ai-mode caller` and return the report.
+/// In caller mode, scenarios whose bound test couldn't verify mechanically are surfaced as
+/// AI-pending (see `lifecycle_ai_pending`) for a reviewer agent to decide.
+pub fn lifecycle_caller_run(spec_md: &Path, repo: &Path) -> Result<serde_json::Value> {
+    let path_str = spec_md.to_string_lossy().to_string();
+    let repo_str = repo.to_string_lossy().to_string();
+    run_agent_spec_json(&[
+        "lifecycle",
+        &path_str,
+        "--code",
+        &repo_str,
+        "--ai-mode",
+        "caller",
+        "--format",
+        "json",
+    ])
+}
+
+/// Merge a reviewer's decisions back via `agent-spec resolve-ai` and return the final report.
+/// Writes the decisions JSON to a temp file alongside the spec.
+pub fn resolve_ai_run(
+    spec_md: &Path,
+    repo: &Path,
+    decisions: &[ReviewDecision],
+) -> Result<serde_json::Value> {
+    let dec_path = repo.join(".openfab-ai-decisions.json");
+    std::fs::write(
+        &dec_path,
+        serde_json::to_string_pretty(&decisions_to_json(decisions))?,
+    )
+    .context("writing ai decisions")?;
+    let path_str = spec_md.to_string_lossy().to_string();
+    let repo_str = repo.to_string_lossy().to_string();
+    let dec_str = dec_path.to_string_lossy().to_string();
+    let out = run_agent_spec_json(&[
+        "resolve-ai",
+        &path_str,
+        "--code",
+        &repo_str,
+        "--decisions",
+        &dec_str,
+        "--format",
+        "json",
+    ]);
+    let _ = std::fs::remove_file(&dec_path);
+    out
+}
+
+/// Whether OpenFab should route AI-pending scenarios to a reviewer (agent-spec caller mode):
+/// `OPENFAB_REVIEW=caller`.
+pub fn review_caller_enabled() -> bool {
+    std::env::var("OPENFAB_REVIEW").as_deref() == Ok("caller")
+}
+
+/// Verify in caller mode: run agent-spec lifecycle with `--ai-mode caller`; for any AI-pending
+/// scenario (design intent / quality a bound test can't verify), send the code to the reviewer
+/// agent via the Bridge, merge its decisions with `resolve-ai`, and map the final report. This
+/// is the layer where the reviewer's *code* judgment feeds OpenFab's gate — distinct from the
+/// contract+sign-off layer. Falls back to mechanical lifecycle when no Bridge is configured.
+pub fn verify_with_review(
+    spec: &Spec,
+    repo: &Path,
+    bridge_url: &str,
+    room: &str,
+    changed_paths: &[String],
+) -> Result<(Vec<AcceptanceOutcome>, Vec<ScenarioVerdict>)> {
+    let spec_md = spec_md_path(&spec.id);
+    let caller = lifecycle_caller_run(&spec_md, repo)?;
+
+    let report = match lifecycle_ai_pending(&caller) {
+        Some(req_file) if !bridge_url.is_empty() => {
+            // Read the AI-pending requests and the implemented code, ask the reviewer to decide.
+            let requests: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&req_file).unwrap_or_default())
+                    .unwrap_or(serde_json::json!([]));
+            let mut files = std::collections::BTreeMap::new();
+            for p in changed_paths {
+                if let Ok(content) = std::fs::read_to_string(repo.join(p)) {
+                    files.insert(p.clone(), content);
+                }
+            }
+            let decisions_json = crate::adapters::bridge_client::review_and_wait(
+                bridge_url,
+                &spec.spec_ref(),
+                &requests,
+                &files,
+                room,
+            )?;
+            let decisions = parse_review_decisions(&decisions_json);
+            resolve_ai_run(&spec_md, repo, &decisions)?
+        }
+        // No AI-pending scenarios (or no Bridge): the caller-mode report is already final.
+        _ => caller,
+    };
+    let (outcomes, _passed) = outcomes_from_lifecycle(&report)?;
+    let verdicts = verdicts_from_lifecycle(&report);
     Ok((outcomes, verdicts))
 }
 
@@ -825,6 +1018,71 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
         assert!(passed);
         assert!(outcomes.iter().all(|o| o.passed));
+    }
+
+    #[test]
+    fn test_parse_ai_requests() {
+        let json = serde_json::json!([
+            { "scenario_name": "code is clean", "intent": "well-structured and idiomatic", "code_paths": ["src/main.rs"] },
+            { "scenario_name": "handles edge", "intent": "covers the empty case" }
+        ]);
+        let items = parse_ai_requests(&json);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].scenario_name, "code is clean");
+        assert_eq!(items[0].intent, "well-structured and idiomatic");
+        assert_eq!(items[1].scenario_name, "handles edge");
+    }
+
+    #[test]
+    fn test_decisions_to_json() {
+        let decs = vec![
+            ReviewDecision {
+                scenario_name: "code is clean".into(),
+                verdict: "pass".into(),
+                confidence: 0.9,
+                reasoning: "idiomatic".into(),
+                model: "claude".into(),
+            },
+            ReviewDecision {
+                scenario_name: "handles edge".into(),
+                verdict: "fail".into(),
+                confidence: 0.7,
+                reasoning: "no empty check".into(),
+                model: "".into(),
+            },
+        ];
+        let v = decisions_to_json(&decs);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["scenario_name"], "code is clean");
+        assert_eq!(arr[0]["verdict"], "pass");
+        assert_eq!(arr[0]["model"], "claude");
+        assert!(arr[0]["reasoning"].is_string() && arr[0]["confidence"].is_number());
+        // empty model is defaulted (never serialized blank)
+        assert_eq!(arr[1]["model"], "openfab-reviewer");
+        // round-trips through the reviewer parser
+        let back = parse_review_decisions(&v);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[1].verdict, "fail");
+    }
+
+    #[test]
+    fn test_caller_outcomes_block_on_fail() {
+        // a resolve-ai merged report with one fail → acceptance not passed (skip ≠ pass already
+        // covered; here the AI verdict itself is fail).
+        let resolved = serde_json::json!({
+            "passed": false,
+            "verification": { "results": [
+                { "scenario_name": "adds correctly", "verdict": "pass" },
+                { "scenario_name": "code is clean", "verdict": "fail" }
+            ]}
+        });
+        let (outcomes, passed) = outcomes_from_lifecycle(&resolved).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(!passed);
+        assert!(outcomes
+            .iter()
+            .any(|o| o.id == "code is clean" && !o.passed));
     }
 
     #[test]

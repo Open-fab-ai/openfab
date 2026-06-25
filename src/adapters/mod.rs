@@ -10,6 +10,7 @@
 pub mod agent_spec;
 pub mod base_claude;
 pub mod base_framework;
+pub mod base_prebuilt;
 pub mod bridge_client;
 pub mod forge_github;
 pub mod forge_local_git;

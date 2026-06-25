@@ -31,6 +31,11 @@ pub struct RunRequest {
     pub gate_mode: String,
     /// "provider · model" when the spec was LLM-authored (shown in the timeline).
     pub authored_by: Option<String>,
+    /// Import path (Robrix-built → OpenFab gate): when set, OpenFab does NOT dispatch the base
+    /// to generate code — it imports these already-built files `(label, model, files)` and runs
+    /// the rest of the cycle (verify → sign → conformance → gate). So any build path converges
+    /// on the single OpenFab gate.
+    pub prebuilt: Option<(String, String, std::collections::BTreeMap<String, String>)>,
 }
 
 /// Where the spec to build comes from (Phase 2 spec-driven ingest).
@@ -176,6 +181,44 @@ pub fn build_with_spec_file(
             run_id: Some(run_id),
             gate_mode: gate_mode.to_string(),
             authored_by: Some(format!("{provider} · {model}")),
+            prebuilt: None,
+        },
+        policy,
+    )
+}
+
+/// Import a build produced elsewhere (e.g. the agent-chat team in a Robrix room) and run it
+/// through OpenFab's gate: load the ingested `.spec.md`, write the supplied files via a
+/// PrebuiltBase (no dispatch), then verify → sign → conformance → N-of-M gate. The run lands
+/// "blocked / awaiting sign-off" like any other — the single convergence point for every build
+/// path.
+#[allow(clippy::too_many_arguments)]
+pub fn import_build(
+    repo: &Path,
+    run_id: String,
+    spec_file: Option<&Path>,
+    builder: &str,
+    model: &str,
+    files: std::collections::BTreeMap<String, String>,
+    gate_mode: &str,
+    policy: &Policy,
+) -> Result<RunRecord> {
+    let (spec, _m, _p) = author_spec_with_file(
+        &format!("Import pre-built artifact from {builder}."),
+        spec_file,
+    )?;
+    start_run(
+        repo,
+        RunRequest {
+            spec,
+            base: "prebuilt".to_string(),
+            forge_kind: "local".to_string(),
+            forge_name: None,
+            parent_run: None,
+            run_id: Some(run_id),
+            gate_mode: gate_mode.to_string(),
+            authored_by: Some(format!("imported from {builder} · {model}")),
+            prebuilt: Some((builder.to_string(), model.to_string(), files)),
         },
         policy,
     )
@@ -217,6 +260,7 @@ pub fn refine(
             authored_by: Some(format!(
                 "{provider} · {model} (re-authored from your feedback)"
             )),
+            prebuilt: None,
         },
         policy,
     )
@@ -486,7 +530,15 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
 
     let forge = registry::build_forge(&req.forge_kind, req.forge_name.clone(), repo)?;
     forge.clone_repo(repo)?;
-    let base = registry::build_base(&req.base, policy)?;
+    let base: Box<dyn crate::ports::base::BasePort> = match &req.prebuilt {
+        Some((label, model, files)) => Box::new(crate::adapters::base_prebuilt::PrebuiltBase::new(
+            label.clone(),
+            model.clone(),
+            files.clone(),
+            policy.clone(),
+        )),
+        None => registry::build_base(&req.base, policy)?,
+    };
 
     // The human-approval gate is a policy choice per run (solo / team / crowd / none).
     let gate_policy = policy.for_gate_mode(&req.gate_mode);

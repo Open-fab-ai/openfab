@@ -244,6 +244,7 @@ fn cmd_run(
             run_id: None,
             gate_mode: gate.to_string(),
             authored_by: None,
+            prebuilt: None,
         },
         &policy,
     )?;

@@ -238,6 +238,69 @@ fn route(
             ))
         }
 
+        // Import a build produced elsewhere (Robrix/agent-chat team) and run it through the gate.
+        // POST {id, files:{path:content}, model?, builder?, gate?, project?|room?} → {run_id}.
+        // Every build path converges here on OpenFab's verify → sign → conformance → N-of-M gate.
+        (Method::Post, ["api", "import-build"]) => {
+            let body = body_json(req)?;
+            let id = match safe_id(body["id"].as_str().unwrap_or("")) {
+                Some(id) => id,
+                None => return Ok(json_resp(400, &json!({"error":"invalid id"}))),
+            };
+            // resolve target project: explicit `project`, else the bound `room` (like ingest).
+            let project = match body["project"].as_str().filter(|s| !s.is_empty()) {
+                Some(p) => Some(p.to_string()),
+                None => body["room"].as_str().and_then(|room| {
+                    let b = runstate::load_room_bindings(&state.projects_dir).unwrap_or_default();
+                    runstate::resolve_room_project(&b, room)
+                }),
+            };
+            let reg = runstate::load_projects(&state.projects_dir).unwrap_or_default();
+            let target_repo =
+                runstate::resolve_project_repo(&reg, project.as_deref(), &state.repo)?;
+            let spec_file = target_repo.join("specs").join(format!("{id}.spec.md"));
+            if !spec_file.exists() {
+                return Ok(json_resp(
+                    404,
+                    &json!({"error": format!("no ingested spec '{id}' in this project — submit the spec first")}),
+                ));
+            }
+            let files: std::collections::BTreeMap<String, String> = body["files"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if files.is_empty() {
+                return Ok(json_resp(400, &json!({"error":"no files to import"})));
+            }
+            let builder = body["builder"].as_str().unwrap_or("agent-chat").to_string();
+            let model = body["model"].as_str().unwrap_or("unknown").to_string();
+            let gate = body["gate"].as_str().unwrap_or("team").to_string();
+            let run_id = ops::reserve_intent_run_id(&format!("import {id}"));
+            seed_status(&target_repo, &run_id, "importing build…", "importing");
+            let st = state.clone();
+            let (rid, sf) = (run_id.clone(), spec_file.clone());
+            thread::spawn(move || {
+                let _guard = st.lock.lock().unwrap();
+                if let Err(e) = ops::import_build(
+                    &target_repo,
+                    rid.clone(),
+                    Some(sf.as_path()),
+                    &builder,
+                    &model,
+                    files,
+                    &gate,
+                    &st.policy,
+                ) {
+                    fail_run(&target_repo, &rid, "importing", &e);
+                }
+            });
+            Ok(json_resp(200, &json!({ "run_id": run_id })))
+        }
+
         // Incoming docs: spec/requirements files in the project (e.g. ingested from Robrix).
         (Method::Get, ["api", "incoming"]) => {
             let spec_dir = repo.join("specs");
@@ -252,6 +315,24 @@ fn route(
                 }
             }
             Ok(json_resp(200, &json!(docs)))
+        }
+        // View one incoming doc's content (spec contract + requirements) before building.
+        (Method::Get, ["api", "incoming", id]) => {
+            let id = match safe_id(id) {
+                Some(id) => id,
+                None => return Ok(json_resp(400, &json!({"error":"invalid id"}))),
+            };
+            let spec_dir = repo.join("specs");
+            let spec_md = std::fs::read_to_string(spec_dir.join(format!("{id}.spec.md"))).ok();
+            let requirements_md =
+                std::fs::read_to_string(spec_dir.join(format!("{id}.requirements.md"))).ok();
+            if spec_md.is_none() && requirements_md.is_none() {
+                return Ok(json_resp(404, &json!({"error":"no such incoming doc"})));
+            }
+            Ok(json_resp(
+                200,
+                &json!({"id": id, "spec_md": spec_md, "requirements_md": requirements_md}),
+            ))
         }
 
         (Method::Get, ["api", "maintainers"]) => {
@@ -320,6 +401,33 @@ fn route(
         // --- runs ---
         (Method::Post, ["api", "run"]) => start_run(req, state, &repo),
         (Method::Get, ["api", "runs"]) => Ok(json_resp(200, &json!(runstate::list_runs(&repo)?))),
+        // Cross-project run history: every project's runs, each tagged with its project, newest
+        // first. Lets the dashboard show a complete history regardless of the selected project.
+        (Method::Get, ["api", "history"]) => {
+            let mut all: Vec<Value> = vec![];
+            let mut push_runs = |project: &str, repo: &Path| {
+                if let Ok(runs) = runstate::list_runs(repo) {
+                    for r in runs {
+                        if let Ok(mut v) = serde_json::to_value(&r) {
+                            v["project"] = json!(project);
+                            all.push(v);
+                        }
+                    }
+                }
+            };
+            push_runs("default", &state.repo);
+            for p in runstate::load_projects(&state.projects_dir).unwrap_or_default() {
+                let r = PathBuf::from(&p.repo);
+                push_runs(&p.name, &r);
+            }
+            all.sort_by(|a, b| {
+                b.get("created")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .cmp(a.get("created").and_then(|v| v.as_str()).unwrap_or(""))
+            });
+            Ok(json_resp(200, &json!(all)))
+        }
         (Method::Get, ["api", "runs", id]) => run_view(id, &repo),
         (Method::Get, ["api", "runs", id, "events"]) => {
             let since = parse_since(query);
@@ -377,6 +485,9 @@ fn route(
                 let as_name = body["as"].as_str().unwrap_or("").to_string();
                 ops::signoff(&repo, id, &as_name, &state.policy)?
             };
+            // Close the loop back to Robrix: when the gate opens in the dashboard, notify the
+            // bound room (best-effort; needs Matrix/Bridge connected via OPENFAB_AGENTCHAT_URL).
+            notify_room_on_signoff(state, query, id, &outcome);
             Ok(json_resp(200, &json!(outcome)))
         }
         (Method::Post, ["api", "runs", id, "reproduce"]) => {
@@ -484,6 +595,7 @@ fn start_run(
             run_id: Some(run_id.clone()),
             gate_mode: gate,
             authored_by: None,
+            prebuilt: None,
         },
     );
     Ok(json_resp(200, &json!({ "run_id": run_id })))
@@ -811,6 +923,47 @@ fn csrf_ok(req: &Request) -> bool {
 }
 
 /// Extract a query-string parameter value (e.g. `project=alpha`), URL-decoding `%xx`/`+`.
+/// Notify the Robrix room bound to this run's project when a dashboard sign-off opens the gate.
+/// Best-effort and non-fatal: silently does nothing if no Bridge/room is configured or the
+/// post fails — the sign-off itself already succeeded.
+fn notify_room_on_signoff(
+    state: &Arc<State>,
+    query: &str,
+    run_id: &str,
+    outcome: &ops::SignoffOutcome,
+) {
+    let bridge = match std::env::var("OPENFAB_AGENTCHAT_URL") {
+        Ok(b) if !b.is_empty() => b,
+        _ => return,
+    };
+    // Reverse-resolve the room bound to this run's project (default project → OPENFAB_AGENTCHAT_ROOM).
+    let project = query_param(query, "project");
+    let bindings = runstate::load_room_bindings(&state.projects_dir).unwrap_or_default();
+    let room = match &project {
+        Some(p) => bindings
+            .iter()
+            .find(|b| &b.project == p)
+            .map(|b| b.room.clone()),
+        None => std::env::var("OPENFAB_AGENTCHAT_ROOM").ok(),
+    };
+    let Some(room) = room else { return };
+    let msg = if outcome.accepted {
+        format!(
+            "✅ OpenFab gate opened for {run_id} — signed off by {}{}. The signed, attributed build is released.",
+            outcome.signer_name,
+            if outcome.merged { " and merged" } else { "" }
+        )
+    } else {
+        format!(
+            "🖊️ {} signed off {run_id} ({} of N). Still awaiting: {}.",
+            outcome.signer_name,
+            outcome.satisfied.len(),
+            outcome.blocking.join(", ")
+        )
+    };
+    let _ = crate::adapters::bridge_client::post_message(&bridge, &room, &msg);
+}
+
 fn query_param(query: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}=");
     query
@@ -886,7 +1039,13 @@ fn html(s: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 }
 
 fn asset(s: &str, ct: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_data(s.as_bytes().to_vec()).with_header(ctype(ct))
+    // The UI is embedded in the binary and changes across rebuilds; tell the browser not to
+    // serve a stale cached copy (a dev tool — correctness over caching).
+    let no_cache = Header::from_bytes(&b"Cache-Control"[..], &b"no-cache, must-revalidate"[..])
+        .expect("static header");
+    Response::from_data(s.as_bytes().to_vec())
+        .with_header(ctype(ct))
+        .with_header(no_cache)
 }
 
 fn ctype(ct: &str) -> Header {

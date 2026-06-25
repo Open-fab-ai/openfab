@@ -413,6 +413,22 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         })
         .collect();
 
+    // Embed the frozen acceptance contract (the actual check commands + result) into the
+    // signed predicate, so `reproduce` works from any clone off any forge — no local
+    // run-state needed. This is what makes contract-replay genuinely forge-agnostic.
+    let acceptance_checks = spec
+        .acceptance
+        .iter()
+        .map(|a| crate::core::provenance::AcceptanceCheck {
+            id: a.id.clone(),
+            check: a.check.clone(),
+            must_pass: a.must_pass,
+            passed: outcomes
+                .iter()
+                .find(|o| o.id == a.id)
+                .is_some_and(|o| o.passed),
+        })
+        .collect::<Vec<_>>();
     let att = Attestation::build_and_sign(
         GenerationInput {
             spec_ref: spec.spec_ref(),
@@ -426,6 +442,7 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             generated,
             materials,
             acceptance_passed,
+            acceptance: acceptance_checks,
         },
         cfg.fab,
     )?;

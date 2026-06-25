@@ -6,7 +6,7 @@ const el = (t, c, h) => { const e = document.createElement(t); if (c) e.classNam
 const api = async (m, url, body) => {
   const r = await fetch(url, { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || `${r.status}`);
+  if (!r.ok) { const e = new Error(j.error || j.hint || `${r.status}`); e.status = r.status; e.body = j; throw e; }
   return j;
 };
 function toast(msg, err) { const t = el("div", "toast" + (err ? " err" : ""), msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
@@ -15,7 +15,7 @@ let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null
 
 // ---------- init ----------
 async function init() {
-  $("#run").onclick = startRun;
+  $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
   $("#reprobtn").onclick = reproduce;
@@ -26,14 +26,29 @@ async function init() {
   $("#mode").onchange = updateModeHint; updateModeHint();
   $("#promote").onclick = promoteDraft;
   $("#draftrun").onclick = runDraftApp;
-  $("#drefine").onclick = refineDraft;
+  $("#drefine").onclick = () => refineDraft(false);
   $("#reqchanges").onclick = () => { $("#fbnote").scrollIntoView({ block: "center" }); $("#fbnote").focus(); };
   $("#rejectbtn").onclick = rejectRun;
   document.querySelectorAll(".step").forEach((s) => (s.onclick = () => showPhase(s.dataset.step)));
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
 
-  await Promise.all([loadBases(), loadForges(), loadMaintainers(), loadReputation(), loadApps()]);
+  await Promise.all([loadBases(), loadForges(), loadModels(), loadMaintainers(), loadReputation(), loadApps()]);
   await ensureDefaultMaintainers();
+}
+
+// Populate both model pickers from the configured Ollama endpoint (key stays server-side).
+async function loadModels() {
+  let models = [], err = null;
+  try { const r = await api("GET", "/api/models"); models = r.models || []; err = r.error; }
+  catch (e) { err = e.message; }
+  for (const id of ["#authormodel", "#basemodel"]) {
+    const sel = $(id); const keep = sel.value;
+    sel.innerHTML = '<option value="">default</option>' + models.map((m) => `<option value="${m}">${m}</option>`).join("");
+    if (keep) sel.value = keep;
+  }
+  $("#modelhint").textContent = models.length
+    ? `${models.length} models available · empty = each side's configured default. Applies to LLM-driven generation (bridged, agentscope, agent-chat llm-mode); claude & agent-chat orchestrate/team run on their own CLI.`
+    : (err ? `model list unavailable: ${err}` : "no models configured (set OPENFAB_OLLAMA_URL/KEY)");
 }
 
 async function loadBases() {
@@ -45,8 +60,9 @@ async function loadBases() {
 }
 function updateBaseBadge(bases) {
   const b = bases.find((x) => x.id === $("#base").value);
-  $("#basebadge").innerHTML = b ? `<span class="badge ${b.runtime}">${b.runtime}</span>` : "";
+  $("#basebadge").innerHTML = b ? `<span class="badge ${b.runtime}">${b.runtime === "native" ? "● live" : "○ " + b.runtime}</span>` : "";
   $("#basehint").textContent = b ? b.note : "";
+  $("#baseprompt").classList.add("hidden");
 }
 async function loadForges() {
   const forges = await api("GET", "/api/forges");
@@ -94,17 +110,46 @@ async function addMaintainer() {
 
 // ---------- run ----------
 // The UI sends only the intent; the server has the LLM author the spec, then builds.
-async function startRun() {
+async function startRun(allowBridged) {
   const intent = $("#intent").value.trim();
   if (intent.length < 4) return toast("describe what you want to build first", true);
   resetFlow();
+  $("#baseprompt").classList.add("hidden");
   $("#run").disabled = true; $("#run").innerHTML = '<span class="spin"></span> the LLM is authoring the spec & building…';
   try {
-    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value, mode: $("#mode").value });
+    const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value, mode: $("#mode").value, allow_bridged: !!allowBridged, author_model: $("#authormodel").value, base_model: $("#basemodel").value });
     STATE.runId = run_id; STATE.lastSeq = 0;
     setStatus("queued");
     startPolling();
-  } catch (e) { toast(e.message, true); resetRunBtn(); }
+  } catch (e) {
+    if (e.body && e.body.error_kind === "base_unavailable") { showBasePrompt(e.body, () => startRun(true)); resetRunBtn(); return; }
+    toast(e.message, true); resetRunBtn();
+  }
+}
+
+// The chosen base's native runtime isn't running. Offer to launch it (if OpenFab bundles a
+// launcher) or to run with the bridged LLM stand-in — never substitute silently (R14).
+// `onBridged` re-issues the original action with allow_bridged=true.
+function showBasePrompt(info, onBridged) {
+  const p = $("#baseprompt"); p.classList.remove("hidden");
+  const launchBtn = info.launchable
+    ? `<button class="btn small" id="bp-launch">▶ Launch ${info.display}</button>`
+    : `<span class="muted">No bundled launcher — start its adapter, then retry.</span>`;
+  p.innerHTML =
+    `<div class="bp-title">⚠ ${info.display} is not running</div>` +
+    `<div class="muted">${info.hint}</div>` +
+    `<div class="bp-actions">${launchBtn}` +
+    `<button class="btn small ghost" id="bp-bridge">Use bridged stand-in (OpenFab LLM, not the real base)</button></div>` +
+    `<div class="bp-log" id="bp-log"></div>`;
+  $("#bp-bridge").onclick = () => { p.classList.add("hidden"); onBridged(); };
+  if (info.launchable) $("#bp-launch").onclick = async () => {
+    const btn = $("#bp-launch"); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> launching… (~30s)';
+    try {
+      const out = await api("POST", `/api/base/${info.base}/launch`);
+      if (out.reachable) { $("#bp-log").textContent = "✅ " + out.detail; await loadBases(); p.classList.add("hidden"); startRun(false); }
+      else { $("#bp-log").textContent = "⚠ " + out.detail; btn.disabled = false; btn.innerHTML = `▶ Launch ${info.display}`; }
+    } catch (err) { $("#bp-log").textContent = "✖ " + err.message; btn.disabled = false; btn.innerHTML = `▶ Launch ${info.display}`; }
+  };
 }
 function resetRunBtn() { $("#run").disabled = false; $("#run").innerHTML = "⚙ Fabricate trusted software"; }
 function resetFlow() {
@@ -161,7 +206,11 @@ function markPriorDone(steps, cur) { let hit = false; steps.forEach((s) => { if 
 async function showPhase(step) {
   const pd = $("#phasedetail"); pd.classList.remove("hidden");
   if (!STATE.artifacts) { pd.innerHTML = `<div class="ph-h">${step}</div><div class="muted">Run a fabrication first — then each step reveals exactly what it produced.</div>`; return; }
-  const a = STATE.artifacts, p = a.attestation.statement.predicate;
+  const a = STATE.artifacts;
+  // A draft has no attestation yet (sign/gate only run on release). The predicate may be absent.
+  const signed = a.attestation && a.attestation.statement;
+  const p = signed ? a.attestation.statement.predicate : null;
+  const draftNote = `<div class="muted">This is a <b>draft</b> — the trust ceremony (sign + gate) hasn't run yet. <b>Promote to a signed release</b> to produce in-toto/SLSA provenance.</div>`;
   let h = "";
   if (step === "spec") {
     h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div>
@@ -169,22 +218,26 @@ async function showPhase(step) {
       <pre class="code">${escapeHtml(JSON.stringify(a.spec, null, 2))}</pre>`;
   } else if (step === "generate") {
     h = `<div class="ph-h">🤖 Generate — what the agent authored</div>
-      <div class="kv"><div class="k">base · model</div><div class="v">${p.agent.base} · ${p.agent.model}</div>
-      <div class="k">runtime</div><div class="v">${a.run.base_runtime}</div>
-      <div class="k">prompt sha256</div><div class="v">${p.prompt_sha256}</div></div>` +
-      a.files.map((f) => `<div class="file-h">${f.path} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${f.author}">${f.author}</span></div>`).join("") +
-      `<div class="muted">Full source is in the Software tab; run it in “Try the software”.</div>`;
+      <div class="kv"><div class="k">base · model</div><div class="v">${p ? p.agent.base + " · " + p.agent.model : a.run.base_name}</div>
+      <div class="k">runtime</div><div class="v">${a.run.base_runtime}</div>` +
+      (p ? `<div class="k">prompt sha256</div><div class="v">${p.prompt_sha256}</div></div>` : `</div>`) +
+      (a.files.length
+        ? a.files.map((f) => `<div class="file-h">${f.path} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${f.author}">${f.author}</span></div>`).join("")
+        : `<div class="muted">Files are committed to the draft branch <span class="mono">${a.run.branch}</span>. The signed file manifest (sha256 + author per file) is produced on release.</div>`) +
+      `<div class="muted">Run it in “Run the app”.</div>`;
   } else if (step === "verify") {
     h = `<div class="ph-h">🧪 Verify — the acceptance contract, executed in the sandbox</div>
       <div class="muted">“Acceptance” = the machine-checkable definition of done. Each id (a1, a2, …) is one criterion: a shell command that must exit 0. They are re-run on every reproduce.</div>
       <table class="rep"><tr><th>id</th><th>check (must exit 0)</th><th>result</th></tr>` +
       (a.run.acceptance || []).map((o) => `<tr><td class="mono">${o.id}</td><td class="mono">${escapeHtml(o.check)}</td><td>${o.passed ? "✅ pass" : "❌ fail (" + o.exit_code + ")"}</td></tr>`).join("") + `</table>`;
   } else if (step === "sign") {
-    h = `<div class="ph-h">🔏 Sign — cryptographic provenance (in-toto/SLSA)</div>
+    if (!signed) { h = `<div class="ph-h">🔏 Sign — cryptographic provenance (in-toto/SLSA)</div>${draftNote}`; }
+    else h = `<div class="ph-h">🔏 Sign — cryptographic provenance (in-toto/SLSA)</div>
       <div class="kv"><div class="k">payload sha256</div><div class="v">${a.attestation.payload_sha256}</div></div>
       <table class="rep"><tr><th>role</th><th>signer (did:key)</th><th>algo</th></tr>` +
       (a.attestation.signatures || []).map((s) => `<tr><td>${s.role}</td><td class="mono">${shortDid(s.keyid)}</td><td>${s.algo}</td></tr>`).join("") + `</table>`;
   } else if (step === "gate") {
+    if (!signed) { pd.innerHTML = `<div class="ph-h">🛡️ Gate — the trust decision</div>${draftNote}`; return; }
     if (!STATE.verify) STATE.verify = await api("GET", `/api/runs/${STATE.runId}/verify`);
     const v = STATE.verify;
     h = `<div class="ph-h">🛡️ Gate — the trust decision (blocks merge until satisfied)</div>
@@ -203,7 +256,7 @@ function setStatus(st) {
 async function onRunDone(run) {
   loadApps();   // refresh the app list whenever a build finishes
   if (run.status === "failed") { toast("run failed — see the timeline", true); return; }
-  if (run.status === "draft") { showDraft(run); return; }   // un-attested fast loop — no provenance/gate
+  if (run.status === "draft") { await loadArtifacts(); showDraft(run); return; }   // un-attested fast loop — no provenance/gate, but spec/acceptance are inspectable
   await loadArtifacts();          // load first so approval can show the approval count
   await showApproval(run);
   await loadReputation();
@@ -263,15 +316,18 @@ async function promoteDraft() {
   }
 }
 
-async function refineDraft() {
+async function refineDraft(allowBridged) {
   const note = $("#dfbnote").value.trim(); if (!note) return toast("describe the change you want", true);
   const priorRun = STATE.runId;
   resetFlow();
   try {
-    const { run_id } = await api("POST", `/api/runs/${priorRun}/feedback`, { note, base: $("#base").value, mode: "draft" });
+    const { run_id } = await api("POST", `/api/runs/${priorRun}/feedback`, { note, base: $("#base").value, mode: "draft", allow_bridged: !!allowBridged, author_model: $("#authormodel").value, base_model: $("#basemodel").value });
     STATE.runId = run_id; STATE.lastSeq = 0; $("#dfbnote").value = "";
     toast("re-drafting → the LLM re-authors the spec & rebuilds (v→v+1)"); setStatus("queued"); startPolling();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    if (e.body && e.body.error_kind === "base_unavailable") { STATE.runId = priorRun; showBasePrompt(e.body, () => refineDraft(true)); return; }
+    toast(e.message, true);
+  }
 }
 
 // ---------- approval ----------

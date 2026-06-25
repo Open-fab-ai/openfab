@@ -51,6 +51,18 @@ header.top {
 }
 .chip b { color: var(--accent); font-weight: 600; }
 
+/* Advanced-options disclosure — keeps the build panel uncluttered for the demo. */
+.adv { border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); }
+.adv > summary {
+  cursor: pointer; list-style: none; padding: 9px 12px; font-size: 12.5px;
+  color: var(--muted); user-select: none;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: "▸ "; color: var(--accent); }
+.adv[open] > summary::before { content: "▾ "; }
+.adv > summary:hover { color: var(--ink); }
+.adv .advbody { padding: 0 12px 12px; }
+
 .grid { display: grid; grid-template-columns: 380px 1fr; gap: 18px; align-items: start; }
 @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } }
 
@@ -80,7 +92,15 @@ textarea:focus, input:focus, select:focus { outline: none; border-color: var(--a
 .badge.bridged { color: var(--ai); border-color: #4a3a6b; background: #1a1430; }
 .badge.live { color: var(--ok); border-color: #1f5e4b; background: #0e201a; }
 .badge.local { color: var(--warn); border-color: #5e521f; background: #20200b; }
+.badge.offline { color: var(--warn); border-color: #5e521f; background: #20200b; }
 .badge.dot::before { content: "●"; margin-right: 4px; font-size: 9px; }
+
+/* Base-unavailable prompt (offer to launch the real base, or run bridged) */
+.baseprompt { margin-top: 12px; padding: 12px 14px; border: 1px solid #5e521f; border-radius: 10px; background: #1c1a0d; }
+.baseprompt .bp-title { font-weight: 700; color: var(--warn); margin-bottom: 4px; }
+.baseprompt .bp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.baseprompt .bp-log { margin-top: 8px; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+.btn.small { padding: 6px 12px; font-size: 13px; margin-top: 0; }
 
 .hint { font-size: 11.5px; color: var(--faint); margin-top: 6px; }
 

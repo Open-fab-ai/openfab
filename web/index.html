@@ -16,14 +16,10 @@
     </div>
   </header>
   <div class="chips" id="propchips">
-    <span class="chip"><b>NL → software</b></span>
     <span class="chip"><b>signed provenance</b> (in-toto / SLSA)</span>
     <span class="chip"><b>AI vs Human</b> attribution</span>
-    <span class="chip"><b>human-in-the-loop</b> N-of-M gate</span>
-    <span class="chip"><b>swappable base</b> ×5</span>
-    <span class="chip"><b>cross-forge</b> ×4</span>
-    <span class="chip"><b>reproduce</b> / verify</span>
-    <span class="chip">single static binary · sovereign</span>
+    <span class="chip"><b>N-of-M</b> human gate</span>
+    <span class="chip"><b>cross-forge</b> · tamper-evident</span>
   </div>
 
   <div class="grid">
@@ -36,35 +32,57 @@
 
         <div class="selectrow" style="margin-top:14px">
           <div>
-            <label class="fld">Agent base <span id="basebadge"></span></label>
+            <label class="fld">Agent base <span class="muted">(the swarm)</span> <span id="basebadge"></span></label>
             <select id="base"></select>
             <div class="hint" id="basehint"></div>
           </div>
           <div>
-            <label class="fld">Forge <span id="forgebadge"></span></label>
-            <select id="forge"></select>
-            <div class="hint" id="forgehint"></div>
+            <label class="fld">Mode</label>
+            <select id="mode">
+              <option value="release" selected>Release — sign + gate + provenance</option>
+              <option value="draft">Draft — fast, un-attested</option>
+            </select>
+            <div class="hint" id="modehint"></div>
           </div>
         </div>
 
-        <label class="fld" style="margin-top:12px">Approval policy <span class="muted">(who must approve before it ships)</span></label>
-        <select id="gate">
-          <option value="solo">Solo — you approve your own release</option>
-          <option value="team">Team — 2 distinct maintainers (2-of-2)</option>
-          <option value="crowd">Crowd / untrusted agents — 2 maintainers gate contributions</option>
-          <option value="none">None — provenance only, no human gate</option>
-        </select>
-        <div class="hint" id="gatehint"></div>
+        <details class="adv" style="margin-top:12px">
+          <summary>Advanced — forge · models · approval policy</summary>
+          <div class="advbody">
+            <div class="selectrow">
+              <div>
+                <label class="fld">Forge <span id="forgebadge"></span></label>
+                <select id="forge"></select>
+                <div class="hint" id="forgehint"></div>
+              </div>
+              <div>
+                <label class="fld">Approval policy</label>
+                <select id="gate">
+                  <option value="solo">Solo — you approve your own release</option>
+                  <option value="team">Team — 2 distinct maintainers (2-of-2)</option>
+                  <option value="crowd">Crowd / untrusted agents — 2 maintainers gate</option>
+                  <option value="none">None — provenance only, no human gate</option>
+                </select>
+                <div class="hint" id="gatehint"></div>
+              </div>
+            </div>
+            <div class="selectrow" style="margin-top:12px">
+              <div>
+                <label class="fld">Spec-author model <span class="muted">(OpenFab)</span></label>
+                <select id="authormodel"><option value="">default</option></select>
+              </div>
+              <div>
+                <label class="fld">Base code-gen model <span class="muted">(the base)</span></label>
+                <select id="basemodel"><option value="">default</option></select>
+              </div>
+            </div>
+            <div class="hint" id="modelhint" style="margin-top:6px"></div>
+          </div>
+        </details>
 
-        <label class="fld" style="margin-top:12px">Mode <span class="muted">(how much trust ceremony runs)</span></label>
-        <select id="mode">
-          <option value="release" selected>Release — full ceremony: sign + N-of-M gate + provenance (the trusted checkpoint)</option>
-          <option value="draft">Draft — fast iterate: generate + run acceptance only, NO sign/gate (un-attested)</option>
-        </select>
-        <div class="hint" id="modehint"></div>
-
-        <button class="btn" id="run" style="margin-top:18px">⚙ Fabricate trusted software</button>
+        <button class="btn" id="run" style="margin-top:16px">⚙ Fabricate trusted software</button>
         <div class="hint" id="runhint" style="margin-top:8px">The LLM authors the spec (incl. the <b>acceptance criteria</b>) from your intent, then builds it — review the criteria in the <b>Spec</b> step of the live workflow.</div>
+        <div class="baseprompt hidden" id="baseprompt"></div>
       </div>
 
       <div class="card">
@@ -131,7 +149,7 @@
         </div>
         <div class="tabs" id="tabs">
           <span class="tab active" data-tab="code">Software</span>
-          <span class="tab" data-tab="prov">Provenance</span>
+          <span class="tab" data-tab="prov">AI-BOM</span>
           <span class="tab" data-tab="audit">Audit trail</span>
           <span class="tab" data-tab="sbom">SBOM</span>
           <span class="tab" data-tab="log">Decision log</span>

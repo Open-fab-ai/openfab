@@ -198,7 +198,8 @@ curl -s $H -XPOST "$OF/api/identity?project=openfab" -d '{"mxid":"@you:127.0.0.1
    (and the reg token in `.env` is often empty after the initial setup). Fix (already patched in
    this stack): bridge-matrix **skips** `MATRIX_BRIDGE_SKIP_AGENTS` (default `openfab-bridge`)
    and treats a single agent's account failure as non-fatal. The pre-existing `wf_*` agents log
-   in fine from their cached tokens in `data/matrix/bridge-state.json`.
+   in fine from their cached tokens in `data/matrix/bridge-state.json`. **The exact one-time
+   edit to apply to agent-chat is in [agent-chat-patch.md](agent-chat-patch.md).**
 
 7. **A manually-created Robrix room won't route** — it's not a registered agent-chat group and
    has no bot. Use a room that contains **`@agent-bridge` (the bot) + the `@ac_wf_*` agents**;

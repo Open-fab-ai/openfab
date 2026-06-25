@@ -80,6 +80,8 @@ class DispatchRequest(BaseModel):
     target_dir: str = Field(default=".")
     language: str = Field(default="")
     acceptance: list[str] = Field(default_factory=list)
+    # Optional per-run model override from OpenFab's picker (else the env default).
+    model: str = Field(default="")
 
 
 class DispatchResponse(BaseModel):
@@ -130,16 +132,17 @@ def _build_user_prompt(req: DispatchRequest) -> str:
     return "\n".join(lines)
 
 
-def _build_agent(workspace: Path) -> Agent:
+def _build_agent(workspace: Path, model_name: str = "") -> Agent:
     """Construct a real AgentScope ReAct agent wired to Ollama.
 
     This is the genuine AgentScope object the demo (demo/hello_agentscope.py)
     uses — same Agent + Toolkit + BYPASS permission context, swapping the
-    DashScope model for a local OllamaChatModel.
+    DashScope model for a local OllamaChatModel. `model_name` is OpenFab's
+    per-run override; empty → the env default (OPENFAB_AGENTSCOPE_MODEL).
     """
     model = OllamaChatModel(
         credential=OllamaCredential(host=OLLAMA_HOST),
-        model=OLLAMA_MODEL,
+        model=model_name or OLLAMA_MODEL,
         stream=True,
     )
     return Agent(
@@ -193,7 +196,7 @@ async def _run_agent(req: DispatchRequest) -> DispatchResponse:
         # the sandbox too. Restored in `finally`.
         os.chdir(workspace)
         try:
-            agent = _build_agent(workspace)
+            agent = _build_agent(workspace, req.model)
             final = await agent.reply(
                 UserMsg("user", _build_user_prompt(req)),
             )

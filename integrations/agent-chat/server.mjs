@@ -107,9 +107,9 @@ Rules:
 // ----- agent-chat's real LLM client wire format (replicated) -------------
 // Faithful to backend-v2.js callSubconsciousRuntimeLlm(): same body shape,
 // same Bearer header, same choices[0].message.content extraction.
-async function callAgentChatLlm(prompt) {
+async function callAgentChatLlm(prompt, model) {
   const body = {
-    model: LLM_MODEL,
+    model: model || LLM_MODEL,
     temperature: LLM_TEMPERATURE,
     max_tokens: LLM_MAX_TOKENS,
     messages: [
@@ -212,7 +212,8 @@ function validateFiles(files, target_dir) {
 // ----- mode: llm (default) -----------------------------------------------
 async function dispatchLlm(task) {
   const prompt = buildPrompt(task);
-  const raw = await callAgentChatLlm(prompt);
+  // task.model = OpenFab's per-run picker (else the adapter's AGENTCHAT_LLM_MODEL default).
+  const raw = await callAgentChatLlm(prompt, task.model);
   const manifest = extractManifest(raw);
   const files = validateFiles(manifest.files, task.target_dir);
   const notes =
@@ -310,7 +311,8 @@ async function dispatchOrchestrate(task) {
   const oneLine =
     `Build this and write ALL files under the absolute directory ${buildRoot}/ using absolute paths ` +
     `(for example ${buildRoot}/${task.target_dir}/<file>) — do NOT write anywhere else. The request: ${task.intent}. ` +
-    (checks ? `It MUST satisfy these shell checks — cd ${buildRoot} and run them yourself to confirm: ${checks}. ` : '') +
+    `Include EVERY file your code references: if your server reads index.html (or any static file), you MUST also create that file. ` +
+    (checks ? `It MUST satisfy these shell checks — cd ${buildRoot} and actually run EACH one yourself; do NOT reply DONE until every one exits 0: ${checks}. ` : '') +
     `Create the files now under ${buildRoot}/, run the checks, then reply DONE.`;
   const flat = oneLine.replace(/\s+/g, ' ').trim();
   spawnSync('tmux', ['send-keys', '-t', ORCH_AGENT_NAME, '-l', flat], { encoding: 'utf8' });

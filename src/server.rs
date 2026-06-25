@@ -220,6 +220,16 @@ fn route(
             ))
         }
         (Method::Post, ["api", "apps", id, "open"]) => open_app(id, state),
+        // Open ALL of a run's artifacts (source + provenance + run-state) in the file manager.
+        (Method::Post, ["api", "runs", id, "open"]) => {
+            let _g = state.lock.lock().unwrap();
+            let dir = ops::export_run_bundle(&state.repo, id)?;
+            let _ = Command::new("open").arg(&dir).status();
+            Ok(json_resp(
+                200,
+                &json!({ "path": dir.display().to_string() }),
+            ))
+        }
 
         // --- reputation ---
         (Method::Get, ["api", "reputation"]) => reputation_view(state),

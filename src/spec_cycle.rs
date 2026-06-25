@@ -251,6 +251,13 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         changed_files.extend(result.changed_files);
     }
 
+    // Persist the generation prompt as LOCAL run-state (not the signed BOM — the BOM keeps
+    // only its sha256 by design) so the UI can show the author the exact prompt on demand.
+    let _ = std::fs::write(
+        runstate::run_dir(&repo, &run_id).join("prompt.txt"),
+        &prompt,
+    );
+
     // 4. Dual verification — machine acceptance in the sandbox.
     set_status(
         &repo,

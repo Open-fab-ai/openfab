@@ -19,6 +19,8 @@ async function init() {
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
   $("#reprobtn").onclick = reproduce;
+  $("#openartifacts").onclick = openRunArtifacts;
+  $("#dopenartifacts").onclick = openRunArtifacts;
   $("#runapp").onclick = runApp;
   $("#tryrun").onclick = () => tryRun();
   $("#trycmd").addEventListener("keydown", (e) => { if (e.key === "Enter") tryRun(); });
@@ -221,6 +223,9 @@ async function showPhase(step) {
       <div class="kv"><div class="k">base · model</div><div class="v">${p ? p.agent.base + " · " + p.agent.model : a.run.base_name}</div>
       <div class="k">runtime</div><div class="v">${a.run.base_runtime}</div>` +
       (p ? `<div class="k">prompt sha256</div><div class="v">${p.prompt_sha256}</div></div>` : `</div>`) +
+      (a.prompt
+        ? `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ show the exact generation prompt</summary><pre class="code" style="margin-top:8px; white-space:pre-wrap; max-height:260px; overflow:auto">${escapeHtml(a.prompt)}</pre><div class="muted" style="margin-top:4px">Local run-state — the signed BOM stores only its sha256 (privacy/portability).</div></details>`
+        : "") +
       (a.files.length
         ? a.files.map((f) => `<div class="file-h">${f.path} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${f.author}">${f.author}</span></div>`).join("")
         : `<div class="muted">Files are committed to the draft branch <span class="mono">${a.run.branch}</span>. The signed file manifest (sha256 + author per file) is produced on release.</div>`) +
@@ -233,7 +238,7 @@ async function showPhase(step) {
   } else if (step === "sign") {
     if (!signed) { h = `<div class="ph-h">🔏 Sign — cryptographic provenance (in-toto/SLSA)</div>${draftNote}`; }
     else h = `<div class="ph-h">🔏 Sign — cryptographic provenance (in-toto/SLSA)</div>
-      <div class="kv"><div class="k">payload sha256</div><div class="v">${a.attestation.payload_sha256}</div></div>
+      <div class="kv"><div class="k">payload sha256</div><div class="v" title="${escapeHtml(JSON.stringify(a.attestation.statement, null, 2)).slice(0, 1400)}">${a.attestation.payload_sha256}</div></div>
       <table class="rep"><tr><th>role</th><th>signer (did:key)</th><th>algo</th></tr>` +
       (a.attestation.signatures || []).map((s) => `<tr><td>${s.role}</td><td class="mono">${shortDid(s.keyid)}</td><td>${s.algo}</td></tr>`).join("") + `</table>`;
   } else if (step === "gate") {
@@ -289,9 +294,10 @@ async function runDraftApp() {
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
     if (r.kind === "web") {
+      window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
       frame.innerHTML =
-        `<div class="hint">🌐 running at <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="dstopapp">stop</a></div>` +
-        `<iframe src="${r.url}?t=${Date.now()}" style="width:100%;height:420px;border:1px solid var(--line);border-radius:10px;background:#fff"></iframe>`;
+        `<div class="hint">🌐 running in a new tab → <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="dreopen">re-open</a> · <a href="#" id="dstopapp">stop</a></div>`;
+      $("#dreopen").onclick = (e) => { e.preventDefault(); window.open(r.url + "?t=" + Date.now(), "_blank", "noopener"); };
       $("#dstopapp").onclick = async (e) => { e.preventDefault(); await api("POST", `/api/runs/${STATE.runId}/stop`); frame.innerHTML = "stopped."; };
     } else if (r.kind === "web-failed") {
       frame.innerHTML = `<div class="hint">⚠ ${escapeHtml(r.error)}</div>`;
@@ -335,8 +341,11 @@ async function showApproval(run) {
   const card = $("#approvecard"); card.classList.remove("hidden");
   const mode = run.gate_mode || "team";
   const needed = approvalsNeeded(mode);
-  const signoffs = (STATE.artifacts && STATE.artifacts.attestation.statement.predicate.signoffs) || [];
-  const have = signoffs.length;
+  const att = STATE.artifacts && STATE.artifacts.attestation;
+  const signoffs = (att && att.statement && att.statement.predicate.signoffs) || [];
+  // Count DISTINCT signers (the gate counts distinct maintainer DIDs, not raw records) so
+  // a double sign-off can't read as "2 of 1".
+  const have = new Set(signoffs.map((s) => s.did)).size;
   const signedNames = new Set(signoffs.map((s) => s.name));
 
   // Plain-English framing — what you're approving and why.
@@ -353,7 +362,7 @@ async function showApproval(run) {
   else if (run.accepted) $("#nofm").innerHTML = `✅ <b style="color:var(--ok)">Approved.</b>`;
   else if (run.status === "rejected") $("#nofm").innerHTML = `⃠ <b style="color:var(--bad)">Rejected.</b> Refine it below, or start a new build.`;
   else if (needed === 0) $("#nofm").innerHTML = `Machine checks ✓ — no human approval required by policy.`;
-  else $("#nofm").innerHTML = `Machine checks ✓ passed. <b>${have} of ${needed}</b> human approval${needed > 1 ? "s" : ""} — ${needed - have} more needed. <span class="muted">(${mode} policy)</span>`;
+  else $("#nofm").innerHTML = `Machine checks ✓ passed. <b>${have} of ${needed}</b> human approval${needed > 1 ? "s" : ""} — ${Math.max(0, needed - have)} more needed. <span class="muted">(${mode} policy)</span>`;
 
   // Approve buttons (solo = one "you" button; team/crowd = per-maintainer).
   const box = $("#signbtns"); box.innerHTML = "";
@@ -437,13 +446,13 @@ async function runApp() {
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
     if (r.kind === "web") {
-      // Embed it live (no popup blocker), plus a link to open full-screen + a stop control.
-      msg.innerHTML = `🌐 current version running below at <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="openapp">open full tab</a> · <a href="#" id="stopapp">stop</a><br><span class="muted">(any earlier tab you opened is now stopped — use this one)</span>`;
-      // cache-bust so the iframe never shows a previously-cached version
-      $("#appframe").innerHTML = `<iframe src="${r.url}?t=${Date.now()}" style="width:100%;height:460px;border:1px solid var(--line);border-radius:10px;background:#fff"></iframe>`;
-      $("#appframe").scrollIntoView({ block: "nearest" });
-      $("#openapp").onclick = (e) => { e.preventDefault(); window.open(r.url, "_blank"); };
-      $("#stopapp").onclick = async (e) => { e.preventDefault(); await api("POST", `/api/runs/${STATE.runId}/stop`); $("#appframe").innerHTML = ""; msg.innerHTML = "stopped."; };
+      // Open the running app in a SEPARATE browser tab (keeps the OpenFab tab clean for
+      // the demo), with controls to re-open or stop it.
+      window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
+      $("#appframe").innerHTML = "";
+      msg.innerHTML = `🌐 running in a new tab → <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="openapp">re-open</a> · <a href="#" id="stopapp">stop</a>`;
+      $("#openapp").onclick = (e) => { e.preventDefault(); window.open(r.url + "?t=" + Date.now(), "_blank", "noopener"); };
+      $("#stopapp").onclick = async (e) => { e.preventDefault(); await api("POST", `/api/runs/${STATE.runId}/stop`); msg.innerHTML = "stopped."; };
     } else if (r.kind === "web-failed") {
       msg.innerHTML = `⚠ ${escapeHtml(r.error)}. Try “run a custom command” below, or refine: “serve on the PORT env var”.`;
     } else {
@@ -592,7 +601,10 @@ async function loadApps() {
       const row = el("div", "approw");
       const meta = el("div", "appmeta",
         `<div class="appname">${escapeHtml(a.intent.slice(0, 70))}</div>` +
-        `<div class="appsub muted">${escapeHtml(a.base)} · <span class="pill ${a.status}" style="padding:1px 7px; font-size:10px">${a.status}</span>${a.versions > 1 ? " · v" + a.versions : ""}</div>`);
+        `<div class="appsub muted">${escapeHtml(a.base)} · <span class="pill ${a.status}" style="padding:1px 7px; font-size:10px">${a.status}</span>${a.versions > 1 ? " · v" + a.versions : ""} · <span style="color:var(--accent)">open ↗</span></div>`);
+      meta.style.cursor = "pointer";
+      meta.title = "open this app — load its spec, code, provenance & continue (refine)";
+      meta.onclick = () => openApp(a.latest_run, a.intent);
       const btns = el("div", "appbtns");
       const launch = el("button", "btn ok sm", "▶"); launch.title = "launch the app"; launch.onclick = () => launchAppById(a.latest_run, launch);
       const open = el("button", "btn ghost sm", "📁"); open.title = "open the app's folder"; open.onclick = () => openAppFolder(a.id);
@@ -601,6 +613,34 @@ async function loadApps() {
       row.append(meta, btns); box.appendChild(row);
     });
   } catch (e) { /* server may be mid-write */ }
+}
+// Load an existing run back into the workflow view so the user can inspect it (spec,
+// generated code, provenance) and continue working on it (refine → v+1).
+async function openApp(rid, intent) {
+  if (!rid) return;
+  resetFlow();
+  STATE.runId = rid; STATE.lastSeq = 0;
+  if (intent) $("#intent").value = intent;   // surface the app's original intent
+  try {
+    const evs = await api("GET", `/api/runs/${rid}/events?since=0`);
+    evs.forEach(addEvent);
+    if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
+    const run = await api("GET", `/api/runs/${rid}`);
+    setStatus(run.status || "running");
+    if (["blocked", "accepted", "merged", "failed", "draft"].includes(run.status)) {
+      await onRunDone(run);          // shows draft / product+approval and loads artifacts
+    } else {
+      startPolling();                // still in-flight — resume live streaming
+    }
+    $("#flowcard").scrollIntoView({ behavior: "smooth", block: "start" });
+    toast("loaded — inspect it, or refine to continue (v→v+1)");
+  } catch (e) { toast(e.message, true); }
+}
+// Open every artifact this run produced (source + provenance + run-state) in Finder.
+async function openRunArtifacts() {
+  if (!STATE.runId) return toast("open or build an app first", true);
+  try { const r = await api("POST", `/api/runs/${STATE.runId}/open`); toast("opened " + r.path); }
+  catch (e) { toast(e.message, true); }
 }
 async function launchAppById(rid, btn) {
   const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';

@@ -333,14 +333,18 @@ pub fn signoff(repo: &Path, run: &str, as_name: &str, policy: &Policy) -> Result
         bail!("'{as_name}' is not a registered maintainer — register with maintainer-add first");
     }
 
+    // Check out the run's branch FIRST (branch() may reset the working tree to clear a
+    // stuck index), THEN read + modify + write the attestation, so the sign-off edit isn't
+    // discarded before it's committed.
+    let kind = effective_forge_kind(&rec);
+    let forge = registry::build_forge(&kind, Some(rec.forge_name.clone()), repo)?;
+    forge.branch(&rec.branch)?;
+
     let att_abs = rec.attestation_path(repo);
     let mut att = Attestation::from_json(&std::fs::read_to_string(&att_abs)?)?;
     att.add_signoff(&signer)?;
     std::fs::write(&att_abs, att.to_json()?)?;
 
-    let kind = effective_forge_kind(&rec);
-    let forge = registry::build_forge(&kind, Some(rec.forge_name.clone()), repo)?;
-    forge.branch(&rec.branch)?;
     forge.commit(
         std::slice::from_ref(&att_abs),
         &format!("chore: record sign-off by {as_name}"),
@@ -430,8 +434,9 @@ pub fn reject(repo: &Path, run: &str) -> Result<RunRecord> {
 
 /// Merge a branch into main on the local-git forge (the demo's "merge the PR").
 fn local_merge(repo: &Path, branch: &str) -> Result<()> {
+    let run = |args: &[&str]| Command::new("git").args(args).current_dir(repo).output();
     let git = |args: &[&str]| -> Result<()> {
-        let out = Command::new("git").args(args).current_dir(repo).output()?;
+        let out = run(args)?;
         if !out.status.success() {
             bail!(
                 "git {} failed: {}",
@@ -441,15 +446,32 @@ fn local_merge(repo: &Path, branch: &str) -> Result<()> {
         }
         Ok(())
     };
+    // Clear any half-finished merge/dirty index from a prior op so the checkout can't fail
+    // with "you need to resolve your current index first".
+    let _ = run(&["merge", "--abort"]);
+    let _ = run(&["reset", "-q", "--hard"]);
     git(&["checkout", "-q", "main"])?;
-    git(&[
+    // `-X theirs`: two apps can touch the same path (e.g. both create app/index.html). main
+    // is just an accumulation of released apps — each app's authoritative copy is its own
+    // branch + provenance — so on a path collision the newly-released app wins. Never leave
+    // a conflicted index: abort on any failure.
+    let out = run(&[
         "merge",
         "--no-ff",
+        "-X",
+        "theirs",
         "-q",
         branch,
         "-m",
         &format!("merge {branch} (OpenFab gate accepted)"),
     ])?;
+    if !out.status.success() {
+        let _ = run(&["merge", "--abort"]);
+        bail!(
+            "merging {branch} into main failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -544,15 +566,16 @@ pub struct ReproduceOutcome {
 /// the sandbox. This is the sovereign/air-gapped proof — "don't trust, verify".
 pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOutcome> {
     let rec = runstate::load_run(repo, run)?;
-    let att = Attestation::from_json(&std::fs::read_to_string(rec.attestation_path(repo))?)?;
-
-    // Check out the run's source so the working tree holds exactly what was attested.
+    // Check out the run's branch FIRST so the working tree holds exactly what was attested
+    // (its source + provenance) — then read the attestation. Reading before the checkout
+    // failed with "No such file or directory" when the tree was on another branch.
     let forge = registry::build_forge(
         &effective_forge_kind(&rec),
         Some(rec.forge_name.clone()),
         repo,
     )?;
     forge.branch(&rec.branch)?;
+    let att = Attestation::from_json(&std::fs::read_to_string(rec.attestation_path(repo))?)?;
     reproduce_from_attestation(repo, &att, policy)
 }
 
@@ -630,6 +653,9 @@ pub struct ArtifactBundle {
     pub sbom: serde_json::Value,
     pub files: Vec<ArtifactFile>,
     pub timeline: String,
+    /// The generation prompt (local run-state, NOT in the signed attestation — the BOM keeps
+    /// only its sha256). Shown in the UI so the author can inspect the exact prompt.
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -642,6 +668,16 @@ pub struct ArtifactFile {
 
 pub fn artifacts(repo: &Path, run: &str) -> Result<ArtifactBundle> {
     let rec = runstate::load_run(repo, run)?;
+    // Check out this run's branch so the working tree holds ITS source + provenance — not
+    // whatever run was last active. Without this, opening an older app reads another app's
+    // tree (or no attestation at all → a null-deref in the UI).
+    if let Ok(forge) = registry::build_forge(
+        &effective_forge_kind(&rec),
+        Some(rec.forge_name.clone()),
+        repo,
+    ) {
+        let _ = forge.branch(&rec.branch);
+    }
     // A draft has no attestation/SBOM yet (the ceremony only runs on release). Degrade
     // gracefully so the spec, acceptance and timeline are still inspectable — clicking a
     // workflow step on a draft should show what it produced, not an empty placeholder.
@@ -672,6 +708,8 @@ pub fn artifacts(repo: &Path, run: &str) -> Result<ArtifactBundle> {
         .unwrap_or_default();
     let spec: serde_json::Value = serde_yaml::from_str(&runstate::load_run_spec_yaml(repo, run)?)
         .unwrap_or(serde_json::Value::Null);
+    let prompt = std::fs::read_to_string(runstate::run_dir(repo, run).join("prompt.txt"))
+        .unwrap_or_default();
     Ok(ArtifactBundle {
         run: rec,
         spec,
@@ -679,6 +717,7 @@ pub fn artifacts(repo: &Path, run: &str) -> Result<ArtifactBundle> {
         sbom,
         files,
         timeline,
+        prompt,
     })
 }
 
@@ -922,6 +961,54 @@ pub fn export_app_dir(repo: &Path, run: &str) -> Result<std::path::PathBuf> {
     if !ok {
         bail!("could not export the app's source");
     }
+    Ok(dest)
+}
+
+/// Export EVERYTHING this run produced into one folder (for "open in Finder"): the source
+/// and committed provenance (attestation and SBOM) from the run's branch, plus the
+/// run-state (spec, acceptance log, timeline, events, generation prompt) under `_openfab_run/`.
+pub fn export_run_bundle(repo: &Path, run: &str) -> Result<std::path::PathBuf> {
+    let rec = runstate::load_run(repo, run)?;
+    let dest = repo.join(".openfab").join("exports").join(run);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest)?;
+    // 1. source + provenance, exactly as committed on the run's branch.
+    let ok = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "git -C '{}' archive '{}' | tar -x -C '{}'",
+            repo.display(),
+            rec.branch,
+            dest.display()
+        ))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        bail!("could not export the run's source");
+    }
+    // 2. run-state (spec.yaml, run.json, timeline.md, events.jsonl, status.json, prompt.txt).
+    let rs_dest = dest.join("_openfab_run");
+    let _ = std::fs::create_dir_all(&rs_dest);
+    if let Ok(entries) = std::fs::read_dir(runstate::run_dir(repo, run)) {
+        for e in entries.flatten() {
+            if e.path().is_file() {
+                let _ = std::fs::copy(e.path(), rs_dest.join(e.file_name()));
+            }
+        }
+    }
+    // Be explicit about what travels with the artifact vs. what is local-only.
+    let _ = std::fs::write(
+        dest.join("README_ARTIFACTS.txt"),
+        "OpenFab run artifacts\n\
+         =====================\n\n\
+         COMMITTED TO GIT (travels with the artifact, verifiable on any forge):\n\
+         \x20 app/            the generated source\n\
+         \x20 provenance/     the signed attestation (AI-BOM) + SBOM\n\n\
+         LOCAL RUN-STATE (OpenFab's own notes — NOT committed to the artifact repo):\n\
+         \x20 _openfab_run/   spec.yaml, prompt.txt, timeline.md, events.jsonl, run.json\n\n\
+         Verify the committed half from anywhere with:  openfab verify-file --att provenance/<spec>.att.json\n",
+    );
     Ok(dest)
 }
 

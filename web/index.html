@@ -7,6 +7,17 @@
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+<!-- doc viewer overlay (incoming spec + requirements) -->
+<div id="docview" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;padding:5vh 6vw" onclick="if(event.target===this)closeDocView()">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:980px;margin:0 auto;max-height:90vh;overflow:auto;padding:18px 20px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <h2 id="dv-title" style="margin:0;font-size:14px">Document</h2>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="closeDocView()">✕ close</button>
+    </div>
+    <div class="tabs" id="dv-tabs"></div>
+    <div class="docbody" id="dv-body" style="margin-top:10px;white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;line-height:1.5"></div>
+  </div>
+</div>
 <div class="wrap">
   <header class="top">
     <div class="logo">⚙</div>
@@ -101,7 +112,7 @@
       </div>
 
       <div class="card">
-        <h2>Recent runs <span class="muted">(persisted · click to reopen)</span></h2>
+        <h2>Run history <span class="muted">(all projects · persisted · click to reopen)</span></h2>
         <div id="recentruns"><div class="empty">No runs yet. Fabricate one above.</div></div>
         <div class="hint" style="margin-top:8px">Full board &amp; docs in the <a href="/console">▦ Console</a>.</div>
       </div>

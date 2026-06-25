@@ -5,7 +5,9 @@ const $ = (s) => document.querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
 // Escape untrusted values before interpolating into innerHTML (element + attribute contexts).
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"'`]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
-let PROJECT = "default";   // selected project (workspace); scopes all run/maintainer calls.
+// selected project (workspace); scopes all run/maintainer calls. Persisted so a page refresh
+// keeps the project you were on (otherwise it reset to "default" and hid that project's data).
+let PROJECT = (() => { try { return localStorage.getItem("openfab_project") || "default"; } catch { return "default"; } })();
 // append ?project= to project-scoped URLs (catalog/config/projects are global, skip them)
 function withProject(url) {
   if (!PROJECT || PROJECT === "default") return url;
@@ -76,11 +78,12 @@ async function loadProjects() {
     const sel = $("#project"); sel.innerHTML = "";
     projs.forEach((p) => { const o = el("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
     sel.value = PROJECT;
-    // list with repo paths
+    // list with repo paths (name on top, full path wraps below — never overflows the card)
     const box = $("#projectlist");
     if (box) box.innerHTML = projs.map((p) =>
-      `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)">
-        <b>${esc(p.name)}</b><span class="mono muted" style="font-size:11px">${esc(p.repo || "")}</span></div>`).join("");
+      `<div style="padding:5px 0;border-bottom:1px solid var(--line)">
+        <b>${esc(p.name)}</b>
+        <div class="mono muted" title="${esc(p.repo || "")}" style="font-size:11px;overflow-wrap:anywhere;word-break:break-all">${esc(p.repo || "")}</div></div>`).join("");
   } catch { /* registry optional */ }
 }
 // Register a project. An existing repo path enables self-hosting (dogfood OpenFab with
@@ -89,7 +92,8 @@ async function createProject() {
   const name = ($("#projname").value || "").trim();
   const repo = ($("#projpath").value || "").trim();
   const worktree = $("#projworktree").checked;
-  if (!name) { $("#projmsg").textContent = "name required"; return; }
+  if (!name) { $("#projmsg").textContent = "enter a project name first"; toast("enter a project name first", true); $("#projname").focus(); return; }
+  $("#projmsg").textContent = "creating…";
   try {
     const payload = repo ? { name, repo, worktree } : { name };
     if (repo && worktree) $("#projmsg").textContent = "creating git worktree…";
@@ -102,6 +106,7 @@ async function createProject() {
 }
 async function onProjectChange() {
   PROJECT = $("#project").value;
+  try { localStorage.setItem("openfab_project", PROJECT); } catch {}
   STATE.runId = null; clearInterval(STATE.poll); STATE.poll = null;
   resetFlow(); setStatus("idle");
   await Promise.all([loadMaintainers(), loadReputation(), loadRecentRuns(), loadIncoming()]);
@@ -124,37 +129,77 @@ async function loadIncoming() {
   box.innerHTML = "";
   pending.forEach((d) => {
     const row = el("div", "maintainers");
-    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)";
-    row.innerHTML = `<span class="mono" style="font-size:12px">${esc(d.id)}${d.has_requirements ? " 📄" : ""}</span>`;
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)";
+    const name = el("span", "mono", `${esc(d.id)}${d.has_requirements ? " 📄" : ""}`);
+    name.style.cssText = "font-size:12px;cursor:pointer;flex:1";
+    name.title = "view spec + requirements";
+    name.onclick = () => viewIncoming(d.id);
+    row.appendChild(name);
+    const v = el("button", "btn ghost sm", "View");
+    v.onclick = () => viewIncoming(d.id);
     const b = el("button", "btn ghost sm", "Build");
     b.onclick = () => { STATE.uploadedSpecId = d.id; $("#intent").value = `Build '${d.id}' (from Robrix).`; startRun(); };
-    row.appendChild(b); box.appendChild(row);
+    row.appendChild(v); row.appendChild(b); box.appendChild(row);
   });
 }
+
+// Open an incoming doc (spec contract + requirements) in the viewer overlay.
+async function viewIncoming(id) {
+  try {
+    const d = await api("GET", `/api/incoming/${encodeURIComponent(id)}`);
+    $("#dv-title").textContent = id;
+    window._dvDocs = [];
+    if (d.spec_md) window._dvDocs.push({ label: "spec contract (.spec.md)", body: d.spec_md });
+    if (d.requirements_md) window._dvDocs.push({ label: "requirements", body: d.requirements_md });
+    $("#dv-tabs").innerHTML = window._dvDocs.map((doc, i) =>
+      `<span class="tab ${i === 0 ? "active" : ""}" onclick="showDvDoc(${i},this)">${esc(doc.label)}</span>`).join("");
+    showDvDoc(0);
+    $("#docview").style.display = "";
+  } catch (e) { toast(e.message, true); }
+}
+function showDvDoc(i, el2) {
+  document.querySelectorAll("#dv-tabs .tab").forEach((x) => x.classList.remove("active"));
+  if (el2) el2.classList.add("active");
+  $("#dv-body").textContent = (window._dvDocs[i] || {}).body || "";
+}
+function closeDocView() { $("#docview").style.display = "none"; }
 
 // Runs are persisted server-side (`.openfab/runs/`). The live-workflow panel is per-session
 // client state, so on a page reload we restore it: re-open the most recent run that still
 // needs attention (running/blocked), and list recent runs so any can be reopened.
 async function loadRecentRuns() {
+  // Cross-project history: every run across all projects, newest first, each tagged with its
+  // project — so refreshing or switching projects never "hides" your history.
   let runs = [];
-  try { runs = await api("GET", "/api/runs"); } catch { /* none yet */ }
+  try { runs = await api("GET", "/api/history"); } catch { /* none yet */ }
   runs.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
   const box = $("#recentruns");
   if (!runs.length) { box.innerHTML = '<div class="empty">No runs yet. Fabricate one above.</div>'; return; }
   box.innerHTML = "";
-  runs.slice(0, 8).forEach((r) => {
+  runs.slice(0, 20).forEach((r) => {
+    const proj = r.project || "default";
     const row = el("div", "maintainers");
-    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--line)";
-    row.innerHTML = `<span class="mono" style="font-size:12px">${esc(r.spec_ref || r.run_id)}</span>` +
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--line)";
+    row.innerHTML =
+      `<span style="display:flex;flex-direction:column;min-width:0;flex:1">` +
+      `<span class="mono" style="font-size:12px;overflow-wrap:anywhere">${esc(r.spec_ref || r.run_id)}</span>` +
+      `<span class="muted" style="font-size:10.5px">${esc(proj)} · ${esc((r.created || "").replace("T", " ").replace("Z", ""))}</span></span>` +
       `<span class="pill ${esc(r.status)}">${esc(r.status)}</span>`;
-    row.onclick = () => attachRun(r.run_id);
+    row.onclick = () => openHistoryRun(proj, r.run_id);
     box.appendChild(row);
   });
-  // auto-restore the newest run that still needs attention
-  if (!STATE.runId) {
-    const active = runs.find((r) => ["running", "queued", "blocked"].includes(r.status));
-    if (active) attachRun(active.run_id);
+}
+
+// Open a run from the cross-project history: switch to its project (so scoped event/detail
+// calls resolve), then attach the live-workflow panel.
+async function openHistoryRun(project, runId) {
+  if (project && project !== PROJECT) {
+    PROJECT = project;
+    try { localStorage.setItem("openfab_project", PROJECT); } catch {}
+    const sel = $("#project"); if (sel) sel.value = PROJECT;
+    await onProjectChange();
   }
+  attachRun(runId);
 }
 
 // Re-attach the live-workflow panel to an existing run; polling replays its persisted
@@ -249,6 +294,7 @@ function resetFlow() {
 
 function startPolling() {
   clearInterval(STATE.poll);
+  STATE.lastStatus = null;
   STATE.poll = setInterval(tick, 650);
   tick();
 }
@@ -260,11 +306,20 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
-    if (["blocked", "accepted", "merged", "failed"].includes(run.status)) {
+    if (run.status === "blocked") {
+      // Awaiting human sign-off is NOT terminal — a sign-off (dashboard, console, or a Robrix
+      // relay) flips it to merged. Render the gate UI once, then KEEP polling (slower) so the
+      // panel updates live, with no manual refresh.
+      if (STATE.lastStatus !== "blocked") {
+        onRunDone(run); loadRecentRuns(); resetRunBtn();
+        clearInterval(STATE.poll); STATE.poll = setInterval(tick, 2500);
+      }
+    } else if (["accepted", "merged", "failed", "rejected"].includes(run.status)) {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       onRunDone(run);
       loadRecentRuns();
     }
+    STATE.lastStatus = run.status;
   } catch (e) { /* transient while files are written */ }
 }
 

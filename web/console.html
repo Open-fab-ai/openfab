@@ -94,7 +94,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let curRun = null;
-let PROJECT = "default";   // the selected project (workspace); scopes all data calls.
+let PROJECT = (()=>{ try { return localStorage.getItem("openfab_project") || "default"; } catch { return "default"; } })();   // selected project; persisted across refresh
 // append ?project= to project-scoped URLs (agent status is global, so skip it there)
 function P(u){ if (PROJECT && PROJECT!=="default" && u.startsWith("/api/") && !u.startsWith("/api/agents") && !u.startsWith("/api/projects"))
   return u + (u.includes("?")?"&":"?") + "project=" + encodeURIComponent(PROJECT); return u; }
@@ -113,7 +113,7 @@ async function loadProjects(){
     sel.innerHTML = projs.map(p=>`<option value="${esc(p.name)}" ${p.name===PROJECT?"selected":""}>${esc(p.name)}</option>`).join("");
   } catch(e){ /* registry optional */ }
 }
-function onProjectChange(){ PROJECT = $("project").value; curRun=null; $("pipe").innerHTML='<span class="muted">select a run →</span>'; $("signoff").innerHTML=""; $("detail").innerHTML=""; loadBoard(); }
+function onProjectChange(){ PROJECT = $("project").value; try { localStorage.setItem("openfab_project", PROJECT); } catch {} curRun=null; $("pipe").innerHTML='<span class="muted">select a run →</span>'; $("signoff").innerHTML=""; $("detail").innerHTML=""; loadBoard(); }
 // Project creation lives on the dashboard (the primary surface); the console only selects.
 
 async function loadBoard(){

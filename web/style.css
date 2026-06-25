@@ -203,3 +203,6 @@ table.rep td.mono { font-family: var(--mono); font-size: 11px; }
            padding: 6px 12px; border-radius: 999px; text-decoration: none; }
 .navlink:hover { border-color: var(--accent2); color: var(--ink); }
 .navlink.on { color: var(--accent); border-color: var(--accent2); }
+
+/* inline monospace (paths, hashes, ids) — always wrap, never overflow a card */
+.mono { font-family: var(--mono); overflow-wrap: anywhere; word-break: break-all; }

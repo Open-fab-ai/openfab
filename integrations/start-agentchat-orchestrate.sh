@@ -22,7 +22,10 @@ command -v claude >/dev/null || { echo "ERROR: the 'claude' CLI required (agents
 
 echo "== agent-chat backend + dashboard + push-relay (from $AC) =="
 ( cd "$AC"
-  set -a; source ./.env 2>/dev/null; set +a
+  set -a; source ./.env 2>/dev/null
+  # team-native mode runs the coder/reviewer team INSIDE agent-chat via its LLM client —
+  # give the backend the Ollama config (POST /api/team-build reads OPENFAB_OLLAMA_*).
+  source "$HOME/.config/openfab/cloud.env" 2>/dev/null; set +a
   mkdir -p logs
   kill_port 8090; nohup node backend-v2.js  >/tmp/agentchat-backend.log   2>&1 & sleep 2
   kill_port 8084; nohup node server.js       >/tmp/agentchat-dashboard.log 2>&1 & sleep 2
@@ -31,8 +34,9 @@ echo "== agent-chat backend + dashboard + push-relay (from $AC) =="
 sleep 2
 for p in 8090 8084; do echo "  :$p HTTP $(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://127.0.0.1:$p/ 2>/dev/null)"; done
 
-# MODE: orchestrate = one real agent builds it; team = coder + reviewer (critique→revise).
-MODE="${AGENTCHAT_NATIVE_MODE:-orchestrate}"
+# MODE: team-native = coder+reviewer team runs INSIDE agent-chat via its LLM client
+#       (fast, ~10-15s); team = real tmux CLI agents (slow); orchestrate = one tmux agent.
+MODE="${AGENTCHAT_NATIVE_MODE:-team-native}"
 echo "== OpenFab agent-chat adapter :8741 in ${MODE} mode =="
 source "$HOME/.config/openfab/cloud.env" 2>/dev/null || true
 export PATH="$HOME/.local/bin:$PATH"   # so the agents' CLIs (claude/codex) are found

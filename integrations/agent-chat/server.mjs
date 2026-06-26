@@ -225,6 +225,39 @@ async function dispatchLlm(task) {
   };
 }
 
+// ----- mode: team-native (the swarm runs INSIDE agent-chat) --------------
+// This is the architecturally-correct path: agent-chat coordinates the coder ->
+// reviewer -> revise team itself (POST /api/team-build, fast in-process LLM calls
+// on Ollama). The adapter is thin glue — it forwards the task and harvests {files}.
+const AGENTCHAT_BACKEND_URL =
+  process.env.AGENTCHAT_BACKEND_URL || 'http://127.0.0.1:8090';
+async function dispatchTeamNative(task) {
+  const resp = await fetch(`${AGENTCHAT_BACKEND_URL}/api/team-build`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      intent: task.intent,
+      target_dir: task.target_dir,
+      language: task.language,
+      acceptance: task.acceptance || [],
+      model: task.model,
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`agent-chat /api/team-build returned HTTP ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+  }
+  const out = await resp.json();
+  if (!out || !out.files) throw new Error('agent-chat team-build returned no files');
+  const files = validateFiles(out.files, task.target_dir);
+  const reviewed = out.review && out.review.ok === false
+    ? `reviewer found ${(out.review.issues || []).length} issue(s), coder revised`
+    : 'reviewer passed';
+  return {
+    files,
+    notes: `[agent-chat:team-native model=${out.model}] coder→reviewer→revise (${out.rounds} round${out.rounds === 1 ? '' : 's'}, ${reviewed})`,
+  };
+}
+
 // ----- mode: orchestrate (genuine agent-chat tmux loop) ------------------
 function haveCliAgent(type) {
   const r = spawnSync('which', [type], { encoding: 'utf8' });
@@ -525,11 +558,13 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const result =
-      MODE === 'team'
-        ? await dispatchOrchestrateTeam(task)
-        : MODE === 'orchestrate'
-          ? await dispatchOrchestrate(task)
-          : await dispatchLlm(task);
+      MODE === 'team-native'
+        ? await dispatchTeamNative(task)
+        : MODE === 'team'
+          ? await dispatchOrchestrateTeam(task)
+          : MODE === 'orchestrate'
+            ? await dispatchOrchestrate(task)
+            : await dispatchLlm(task);
     // Final contract guard (defense in depth; R14).
     if (!result.files || Object.keys(result.files).length === 0) {
       return send(502, {

@@ -147,6 +147,21 @@ textarea:focus, input:focus, select:focus { outline: none; border-color: var(--a
 /* draft = un-attested fast loop — must read as clearly NOT a certified release */
 .pill.draft { color: #ffb454; border-color: #6b4a1f; background: #241a0b; }
 .pill.draft::before { content: "⚡ "; }
+/* Collapsible wizard steps — only the active step stays expanded */
+.card.collapsible > h2 { cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.card.collapsible > h2::after {
+  content: "▾"; margin-left: auto; font-size: 11px; color: var(--muted);
+  transition: transform .15s ease;
+}
+.card.collapsed > h2::after { transform: rotate(-90deg); }
+.card.collapsed > *:not(h2):not(.cardsummary) { display: none !important; }
+.card:not(.collapsed) > .cardsummary { display: none; }
+.cardsummary {
+  color: var(--muted); font-size: 12.5px; margin-top: 8px; line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cardsummary b { color: var(--ink); font-weight: 600; }
+
 /* apps list — cap at ~5 rows, scroll the rest */
 #apps { max-height: 300px; overflow-y: auto; }
 .approw { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }

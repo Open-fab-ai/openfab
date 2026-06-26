@@ -33,6 +33,8 @@ async function init() {
   $("#rejectbtn").onclick = rejectRun;
   document.querySelectorAll(".step").forEach((s) => (s.onclick = () => showPhase(s.dataset.step)));
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
+  document.querySelectorAll(".card.collapsible > h2").forEach((h) =>
+    (h.onclick = () => h.parentElement.classList.toggle("collapsed")));
   $("#settingsbtn").onclick = () => toggleDrawer(true);
   $("#drawerclose").onclick = () => toggleDrawer(false);
   $("#drawerscrim").onclick = () => toggleDrawer(false);
@@ -125,6 +127,9 @@ async function startRun(allowBridged) {
   try {
     const { run_id } = await api("POST", "/api/run", { intent, base: $("#base").value, forge: $("#forge").value, gate: $("#gate").value, mode: $("#mode").value, allow_bridged: !!allowBridged, author_model: $("#authormodel").value, base_model: $("#basemodel").value });
     STATE.runId = run_id; STATE.lastSeq = 0;
+    // Wizard: fold the build step to a summary so the live workflow is the only thing in focus.
+    setCollapsed("#buildcard", `<b>${escapeHtml(intent.slice(0, 60))}</b> · ${escapeHtml($("#base").value)} · ${escapeHtml($("#mode").value)}`);
+    setCollapsed("#flowcard", null);
     setStatus("queued");
     startPolling();
   } catch (e) {
@@ -165,6 +170,7 @@ function resetFlow() {
   $("#appframe").innerHTML = ""; $("#runappmsg").innerHTML = "";
   document.querySelectorAll(".step").forEach((s) => s.classList.remove("done", "active"));
   STATE.artifacts = null; STATE.verify = null;
+  setCollapsed("#buildcard", null); setCollapsed("#flowcard", null);
 }
 
 function startPolling() {
@@ -265,6 +271,8 @@ function setStatus(st) {
 async function onRunDone(run) {
   loadApps();   // refresh the app list whenever a build finishes
   if (run.status === "failed") { toast("run failed — see the timeline", true); return; }
+  // Wizard: fold the finished workflow to a summary line so the product/approve step is the focus.
+  setCollapsed("#flowcard", `✓ <b>${escapeHtml(run.status)}</b> · spec · generate · verify · sign · gate <span class="muted">(click to inspect)</span>`);
   if (run.status === "draft") { await loadArtifacts(); showDraft(run); return; }   // un-attested fast loop — no provenance/gate, but spec/acceptance are inspectable
   await loadArtifacts();          // load first so approval can show the approval count
   await showApproval(run);
@@ -440,6 +448,16 @@ async function loadArtifacts() {
 function toggleDrawer(open) {
   $("#settingsdrawer").classList.toggle("hidden", !open);
   $("#drawerscrim").classList.toggle("hidden", !open);
+}
+
+// Wizard collapse: fold a finished step to a one-line summary; null summary expands it.
+function setCollapsed(cardId, summaryHtml) {
+  const c = $(cardId); if (!c) return;
+  if (summaryHtml == null) { c.classList.remove("collapsed"); return; }
+  let s = c.querySelector(".cardsummary");
+  if (!s) { s = document.createElement("div"); s.className = "cardsummary"; c.querySelector("h2").after(s); }
+  s.innerHTML = summaryHtml;
+  c.classList.add("collapsed");
 }
 
 // Build clickable "try it" commands from the run's acceptance checks (always runnable),

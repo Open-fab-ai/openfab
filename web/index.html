@@ -26,7 +26,7 @@
   <div class="grid">
     <!-- LEFT: input -->
     <div>
-      <div class="card">
+      <div class="card collapsible" id="buildcard">
         <h2><span class="n">1</span> What do you want to build?</h2>
         <label class="fld">Describe it in plain English — the Base (LLM) writes the spec &amp; acceptance</label>
         <textarea id="intent" placeholder="e.g. a command-line tool that converts temperatures between Celsius, Fahrenheit and Kelvin, with a --selftest flag that verifies all conversions"></textarea>
@@ -94,7 +94,7 @@
 
     <!-- RIGHT: workflow + product -->
     <div>
-      <div class="card" id="flowcard">
+      <div class="card collapsible" id="flowcard">
         <h2><span class="n">2</span> Live workflow</h2>
         <div class="statusbar">
           <span class="pill" id="statuspill">idle</span>

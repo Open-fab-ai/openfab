@@ -33,6 +33,10 @@ async function init() {
   $("#rejectbtn").onclick = rejectRun;
   document.querySelectorAll(".step").forEach((s) => (s.onclick = () => showPhase(s.dataset.step)));
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
+  $("#settingsbtn").onclick = () => toggleDrawer(true);
+  $("#drawerclose").onclick = () => toggleDrawer(false);
+  $("#drawerscrim").onclick = () => toggleDrawer(false);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") toggleDrawer(false); });
 
   await Promise.all([loadBases(), loadForges(), loadModels(), loadMaintainers(), loadReputation(), loadApps()]);
   await ensureDefaultMaintainers();
@@ -425,6 +429,17 @@ async function loadArtifacts() {
   buildTryPresets();
   $("#tryout").style.display = "none";
   selectTab("code");
+  // Bring the just-revealed product step into view and focus its primary action so
+  // the user doesn't have to scroll-hunt for it after generation completes.
+  requestAnimationFrame(() => {
+    $("#productcard").scrollIntoView({ behavior: "smooth", block: "start" });
+    const r = $("#runapp"); if (r) r.focus({ preventScroll: true });
+  });
+}
+
+function toggleDrawer(open) {
+  $("#settingsdrawer").classList.toggle("hidden", !open);
+  $("#drawerscrim").classList.toggle("hidden", !open);
 }
 
 // Build clickable "try it" commands from the run's acceptance checks (always runnable),

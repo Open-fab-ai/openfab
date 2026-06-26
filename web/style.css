@@ -36,6 +36,22 @@ a { color: var(--accent); }
 header.top {
   display: flex; align-items: center; gap: 16px; margin-bottom: 6px;
 }
+#settingsbtn { margin-left: auto; flex: 0 0 auto; }
+
+/* Settings drawer — config that isn't part of the build flow */
+.drawer {
+  position: fixed; top: 0; right: 0; height: 100vh; width: 380px; max-width: 92vw;
+  background: var(--bg2); border-left: 1px solid var(--line); z-index: 50;
+  padding: 18px; overflow-y: auto; box-shadow: -16px 0 40px rgba(0,0,0,.45);
+  transform: translateX(0); transition: transform .22s ease;
+}
+.drawer.hidden { transform: translateX(100%); display: block; pointer-events: none; }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.drawer-head h2 { margin: 0; font-size: 18px; }
+.drawer-scrim {
+  position: fixed; inset: 0; background: rgba(4,7,12,.55); z-index: 40; transition: opacity .22s ease;
+}
+.drawer-scrim.hidden { opacity: 0; pointer-events: none; }
 .logo {
   width: 44px; height: 44px; border-radius: 12px;
   background: conic-gradient(from 200deg, var(--accent), var(--accent2), var(--ai), var(--accent));

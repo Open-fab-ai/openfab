@@ -14,6 +14,7 @@
       <h1>OpenFab</h1>
       <p>natural language in · <b>trustworthy software</b> out — reproducible, signed, attributed, cross-forge</p>
     </div>
+    <button class="btn ghost sm" id="settingsbtn" type="button" title="Maintainers &amp; reputation">⚙ Settings</button>
   </header>
   <div class="chips" id="propchips">
     <span class="chip"><b>signed provenance</b> (in-toto / SLSA)</span>
@@ -81,27 +82,13 @@
         </details>
 
         <button class="btn" id="run" style="margin-top:16px">⚙ Fabricate trusted software</button>
-        <div class="hint" id="runhint" style="margin-top:8px">The LLM authors the spec (incl. the <b>acceptance criteria</b>) from your intent, then builds it — review the criteria in the <b>Spec</b> step of the live workflow.</div>
+        <div class="hint" id="runhint" style="margin-top:8px" title="The base (LLM) authors the spec and its acceptance criteria from your intent, then builds it. Review the criteria in the Spec step of the live workflow.">The base writes the spec + <b>acceptance criteria</b>, then builds it.</div>
         <div class="baseprompt hidden" id="baseprompt"></div>
       </div>
 
       <div class="card">
         <h2>Your apps <span class="muted">(each new intent = a new app)</span></h2>
         <div id="apps"><div class="empty">No apps yet — fabricate one above.</div></div>
-      </div>
-
-      <div class="card">
-        <h2>Maintainers <span class="muted">(N-of-M sign-off allowlist)</span></h2>
-        <div class="maintainers" id="maintainers"></div>
-        <div style="display:flex; gap:8px; margin-top:10px">
-          <input type="text" id="newmaint" placeholder="add maintainer (e.g. carol)" />
-          <button class="btn ghost sm" id="addmaint" type="button">add</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>Reputation <span class="muted">(from signed attestations)</span></h2>
-        <div id="reputation"><div class="empty">Run a fabrication to populate.</div></div>
       </div>
     </div>
 
@@ -119,7 +106,7 @@
             <span class="step" data-step="gate">Gate</span>
           </div>
         </div>
-        <div class="hint" style="margin:-4px 0 8px">↑ click any step to inspect exactly what it produced (the spec, the generated files, the checks, the signatures, the gate decision).</div>
+        <div class="hint" style="margin:-4px 0 8px" title="Inspect the spec, the generated files, the acceptance checks, the signatures, and the gate decision.">Click a step to inspect what it produced.</div>
         <div id="phasedetail" class="phasedetail hidden"></div>
         <div class="timeline" id="timeline"><div class="empty">The decision log streams here as the fab works.</div></div>
       </div>
@@ -128,7 +115,7 @@
         <h2><span class="n">3</span> Try the product &amp; inspect its provenance</h2>
 
         <div class="panel-h">▶ Run the software</div>
-        <div class="hint" style="margin:4px 0 10px">Web app → opens in your browser. CLI → runs in the policy-gated sandbox and shows the output. Try it before you approve.</div>
+        <div class="hint" style="margin:4px 0 10px" title="Web app → opens in your browser. CLI → runs in the policy-gated sandbox and shows its output.">Try it before you approve.</div>
         <button class="btn ok" id="runapp" type="button" style="width:auto">▶ Run the app</button>
         <div id="runappmsg" class="hint" style="margin-top:8px"></div>
         <div id="appframe" style="margin-top:10px"></div>
@@ -158,9 +145,8 @@
         <div id="tabbody"></div>
 
         <hr style="border:none; border-top:1px solid var(--line); margin:16px 0" />
-        <div class="panel-h">↻ Refine this app <span class="muted">— describe the change; OpenFab re-authors the spec &amp; rebuilds (v→v+1)</span></div>
-        <div class="hint" style="margin:4px 0">Your feedback is folded into the intent and the LLM <b>re-authors the acceptance criteria</b>, so the change is actually captured and tested — then the code is rebuilt.</div>
-        <input type="text" id="fbnote" placeholder='e.g. "also support Kelvin" or "print results to 2 decimals"' style="margin-top:8px" />
+        <div class="panel-h">↻ Refine this app <span class="muted">— re-authors the spec &amp; rebuilds (v→v+1)</span></div>
+        <input type="text" id="fbnote" placeholder='e.g. "also support Kelvin" or "print results to 2 decimals"' style="margin-top:8px" title="Your feedback folds into the intent; the LLM re-authors the acceptance criteria so the change is captured and tested, then rebuilds." />
         <button class="btn sm" id="refine" type="button" style="margin-top:10px; width:auto">↻ refine &amp; re-fabricate</button>
       </div>
 
@@ -173,7 +159,7 @@
           <button class="btn sm" id="promote" type="button" style="width:auto">✅ Promote to signed release →</button>
         </div>
         <div id="draftframe" style="margin-top:10px"></div>
-        <div class="hint" style="margin-top:10px">A draft is generated and acceptance-tested for fast feedback, but carries <b>no signature, no gate, and no provenance</b> — iterate here as much as you like, nothing heavy fires. <b>Promote</b> runs the full trust ceremony <b>once</b> on the accepted result and produces the signed, gated release.</div>
+        <div class="hint" style="margin-top:10px" title="A draft is generated and acceptance-tested for fast feedback but carries no signature, no gate, and no provenance — iterate freely, nothing heavy fires. Promote runs the full trust ceremony once on the accepted result and produces the signed, gated release.">Drafts are <b>un-attested</b> — iterate freely; <b>Promote</b> runs the full trust ceremony once.</div>
         <hr style="border:none; border-top:1px solid var(--line); margin:16px 0" />
         <div class="panel-h">↻ Refine this draft <span class="muted">— describe a change; re-authors the spec &amp; re-drafts</span></div>
         <input type="text" id="dfbnote" placeholder='e.g. "also handle negative numbers"' style="margin-top:8px" />
@@ -199,6 +185,27 @@
     </div>
   </div>
 </div>
+
+<!-- Settings drawer: config that isn't part of the build flow -->
+<div class="drawer-scrim hidden" id="drawerscrim"></div>
+<aside class="drawer hidden" id="settingsdrawer" aria-label="Settings">
+  <div class="drawer-head">
+    <h2>Settings</h2>
+    <button class="btn ghost sm" id="drawerclose" type="button">✕</button>
+  </div>
+  <div class="card">
+    <h2>Maintainers <span class="muted">(N-of-M sign-off allowlist)</span></h2>
+    <div class="maintainers" id="maintainers"></div>
+    <div style="display:flex; gap:8px; margin-top:10px">
+      <input type="text" id="newmaint" placeholder="add maintainer (e.g. carol)" />
+      <button class="btn ghost sm" id="addmaint" type="button">add</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Reputation <span class="muted">(from signed attestations)</span></h2>
+    <div id="reputation"><div class="empty">Run a fabrication to populate.</div></div>
+  </div>
+</aside>
 <script src="/app.js"></script>
 </body>
 </html>

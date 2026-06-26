@@ -266,6 +266,11 @@ function setStatus(st) {
   STATE.status = st;
   const p = $("#statuspill"); p.className = "pill " + st; p.textContent = st;
   if (st === "merged" || st === "accepted") document.querySelectorAll(".step").forEach((s) => s.classList.add("done"));
+  // Keep the collapsed Live-workflow summary in sync after approval changes the status
+  // (e.g. blocked → merged once the N-of-M gate is satisfied).
+  const sum = $("#flowcard") && $("#flowcard").querySelector(".cardsummary");
+  if (sum && $("#flowcard").classList.contains("collapsed"))
+    sum.innerHTML = `✓ <b>${escapeHtml(st)}</b> · spec · generate · verify · sign · gate <span class="muted">(click to inspect)</span>`;
 }
 
 async function onRunDone(run) {

@@ -426,9 +426,15 @@ Rules for `acceptance` (this is the contract the built software is verified agai
   blocking process in a check — it hangs the sandbox.
 - CLI app: run it with arguments and assert its output (it must exit on its own).
 - Web app OR server: verify it STRUCTURALLY only — the entry file exists; a server reads
-  the PORT env var; the key routes/handlers/functions/elements are present (use `grep -F`
-  fixed strings). Do NOT launch it. The human verifies the *running* app in a browser via
-  the "Run the app" button and approves — that is the behavioural check for UIs/servers.
+  the PORT env var; the key routes/handlers/functions are present. Do NOT launch it. The
+  human verifies the *running* app in a browser via the "Run the app" button and approves —
+  that is the behavioural check for UIs/servers.
+- HTML/element checks MUST be attribute-order independent. NEVER grep a whole tag with a
+  trailing `>` (e.g. `<textarea id="x">`) — real elements carry other attributes, so the
+  literal almost never matches. Match the SMALLEST stable token instead, e.g.
+  `grep -F 'id="entry-input"' app/index.html` or `grep -F '<textarea'`. Only assert ids,
+  classes, function names, or selectors that YOU require the builder to use — do not invent
+  a class/id the intent never mentioned and then demand it.
 - Paths are relative to the repo root and live under target_dir (e.g. "app/...").
 
 USER REQUEST:

@@ -131,7 +131,8 @@ textarea:focus, input:focus, select:focus { outline: none; border-color: var(--a
 /* draft = un-attested fast loop — must read as clearly NOT a certified release */
 .pill.draft { color: #ffb454; border-color: #6b4a1f; background: #241a0b; }
 .pill.draft::before { content: "⚡ "; }
-/* apps list */
+/* apps list — cap at ~5 rows, scroll the rest */
+#apps { max-height: 300px; overflow-y: auto; }
 .approw { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
 .approw:first-child { border-top: none; }
 .appmeta { min-width: 0; }

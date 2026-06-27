@@ -63,6 +63,7 @@ async function loadBases() {
   const bases = await api("GET", "/api/bases");
   const sel = $("#base"); sel.innerHTML = "";
   bases.forEach((b) => { const o = el("option"); o.value = b.id; o.textContent = b.display; o._b = b; sel.appendChild(o); });
+  if (bases.some((b) => b.id === "codex")) sel.value = "codex";   // default base
   sel.onchange = () => updateBaseBadge(bases);
   updateBaseBadge(bases);
 }

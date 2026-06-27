@@ -668,7 +668,10 @@ function renderProvenance(att) {
   const p = (att.statement && att.statement.predicate) || {};
   const kv = el("div", "kv");
   const add = (k, v) => { kv.appendChild(el("div", "k", k)); kv.appendChild(el("div", "v", v)); };
-  add("predicateType", att.statement?.predicateType || "");
+  const pt = att.statement?.predicateType || "";
+  add("predicateType", /^https?:\/\//.test(pt)
+    ? `<a href="${escapeHtml(pt)}" target="_blank" rel="noopener">${escapeHtml(pt)}</a>`
+    : escapeHtml(pt));
   add("agent DID", (p.agent?.did) || "");
   add("base · model", `${p.agent?.base || ""} · ${p.agent?.model || ""}`);
   add("prompt sha256", (p.prompt_sha256 || "").slice(0, 32) + "…");

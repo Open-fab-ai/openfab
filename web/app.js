@@ -63,9 +63,26 @@ async function loadBases() {
   const bases = await api("GET", "/api/bases");
   const sel = $("#base"); sel.innerHTML = "";
   bases.forEach((b) => { const o = el("option"); o.value = b.id; o.textContent = b.display; o._b = b; sel.appendChild(o); });
-  if (bases.some((b) => b.id === "codex")) sel.value = "codex";   // default base
+  // Default base: user preference (Settings) → codex → first available.
+  const pref = localStorage.getItem("openfab_default_base");
+  const def = (pref && bases.some((b) => b.id === pref)) ? pref
+    : (bases.some((b) => b.id === "codex") ? "codex" : (bases[0] && bases[0].id));
+  if (def) sel.value = def;
   sel.onchange = () => updateBaseBadge(bases);
   updateBaseBadge(bases);
+  renderDefaultBaseSetting(bases, def);
+}
+// Settings → Default base: persist to localStorage and apply to the main selector.
+function renderDefaultBaseSetting(bases, current) {
+  const ds = $("#defaultbase"); if (!ds) return;
+  ds.innerHTML = "";
+  bases.forEach((b) => { const o = el("option"); o.value = b.id; o.textContent = b.display; ds.appendChild(o); });
+  ds.value = current || "";
+  ds.onchange = () => {
+    localStorage.setItem("openfab_default_base", ds.value);
+    const sel = $("#base"); sel.value = ds.value; updateBaseBadge(bases);
+    toast(`default base set to ${ds.options[ds.selectedIndex].text}`);
+  };
 }
 function updateBaseBadge(bases) {
   const b = bases.find((x) => x.id === $("#base").value);

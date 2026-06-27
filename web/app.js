@@ -441,7 +441,7 @@ async function loadArtifacts() {
   $("#productcard").classList.remove("hidden");
   buildTryPresets();
   $("#tryout").style.display = "none";
-  selectTab("code");
+  renderExplorer();
   // Bring the just-revealed product step into view and focus its primary action so
   // the user doesn't have to scroll-hunt for it after generation completes.
   requestAnimationFrame(() => {
@@ -515,26 +515,113 @@ async function tryRun(cmd) {
     out.textContent = parts.join("\n");
   } catch (e) { out.textContent = "error: " + e.message; }
 }
-function selectTab(name) {
-  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+// ---------- artifact bundle explorer (tree + detail) ----------
+let ARTNODES = {};
+function fileIcon(p) {
+  const e = (p.split(".").pop() || "").toLowerCase();
+  return e === "md" ? "📝" : e === "json" ? "🔧" : e === "html" ? "🌐"
+    : e === "js" ? "📜" : e === "py" ? "🐍" : e === "css" ? "🎨" : "📄";
+}
+function artNode(tree, id, icon, label, tag, child, fn) {
+  const n = el("div", "tnode" + (child ? " child" : ""));
+  n.innerHTML = `<span class="ticon">${icon}</span><span class="tlabel">${escapeHtml(label)}</span>` + (tag ? `<span class="ttag">${tag}</span>` : "");
+  n.onclick = () => selectArt(id);
+  tree.appendChild(n); ARTNODES[id] = { el: n, fn };
+}
+function selectArt(id) {
+  Object.values(ARTNODES).forEach((o) => o.el.classList.remove("sel"));
+  const o = ARTNODES[id]; if (!o) return;
+  o.el.classList.add("sel"); o.fn();
+}
+function renderExplorer() {
   const a = STATE.artifacts; if (!a) return;
-  const body = $("#tabbody"); body.innerHTML = "";
-  if (name === "code") {
-    if (!a.files.length) { body.appendChild(el("div", "empty", "no files")); return; }
-    a.files.forEach((f) => {
-      body.appendChild(el("div", "file-h", `${f.path}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${f.author}">${f.author}</span>`));
-      body.appendChild(el("pre", "code", escapeHtml(f.contents)));
-    });
-  } else if (name === "prov") {
-    body.appendChild(renderProvenance(a.attestation));
-  } else if (name === "audit") {
-    body.appendChild(el("div", "empty", "loading audit trail…"));
-    loadAudit(body);
-  } else if (name === "sbom") {
-    body.appendChild(el("pre", "code", escapeHtml(JSON.stringify(a.sbom, null, 2))));
-  } else if (name === "log") {
-    body.appendChild(el("pre", "code", escapeHtml(a.timeline)));
+  const tree = $("#arttree"); tree.innerHTML = ""; ARTNODES = {};
+  const fl = el("div", "tfolder"); fl.textContent = `Software · ${a.files.length} file(s)`; tree.appendChild(fl);
+  a.files.forEach((f, i) => artNode(tree, "file" + i, fileIcon(f.path), f.path.split("/").pop(),
+    `<span class="tag-${f.author}">${f.author}</span>`, true, () => renderFile(f)));
+  if (a.attestation) artNode(tree, "aibom", "📄", "AI-BOM", "", false, () => renderAiBom(a.attestation));
+  if (a.sbom) artNode(tree, "sbom", "📄", "SBOM", "", false, () => renderSbom(a.sbom));
+  artNode(tree, "audit", "📜", "Audit trail", "", false, () => { const d = $("#artdetail"); d.innerHTML = '<div class="empty">loading audit trail…</div>'; loadAudit(d); });
+  artNode(tree, "log", "📋", "Decision log", "", false, () => renderLog(a.timeline));
+  selectArt(a.files.length ? "file0" : "aibom");
+}
+
+// Pretty | Raw toggle. `rawText` is the exact stored bytes — the signature covers these.
+function viewToggle(detail, prettyFn, rawText) {
+  const tg = el("div", "viewtoggle");
+  const bP = el("button", null, "Pretty"), bR = el("button", null, "Raw");
+  const view = el("div");
+  const show = (pretty) => {
+    bP.classList.toggle("on", pretty); bR.classList.toggle("on", !pretty); view.innerHTML = "";
+    view.appendChild(pretty ? prettyFn() : el("pre", "code", escapeHtml(rawText)));
+  };
+  bP.onclick = () => show(true); bR.onclick = () => show(false);
+  tg.append(bP, bR); detail.appendChild(tg); detail.appendChild(view); show(true);
+}
+
+function renderFile(f) {
+  const d = $("#artdetail"); d.innerHTML = "";
+  d.appendChild(el("div", "file-h", `${f.path}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${f.author}">${f.author}</span>`));
+  const ext = (f.path.split(".").pop() || "").toLowerCase();
+  if (ext === "md") {
+    viewToggle(d, () => { const m = el("div", "md"); m.innerHTML = mdToHtml(f.contents); return m; }, f.contents);
+  } else if (ext === "json") {
+    let pretty; try { pretty = JSON.stringify(JSON.parse(f.contents), null, 2); } catch { pretty = f.contents; }
+    viewToggle(d, () => el("pre", "code", escapeHtml(pretty)), f.contents);
+  } else {
+    d.appendChild(el("pre", "code", escapeHtml(f.contents)));
   }
+}
+function renderAiBom(att) {
+  const d = $("#artdetail"); d.innerHTML = "";
+  const p = (att.statement && att.statement.predicate) || {};
+  const gen = p.generated || []; const ai = gen.filter((g) => g.author === "ai").length;
+  const pct = gen.length ? Math.round((ai / gen.length) * 100) : 0;
+  d.appendChild(el("div", "artclaim",
+    `<b>${gen.length} file(s)</b> · ${pct}% AI-authored by <b>${escapeHtml(p.agent?.model || "?")}</b> · ` +
+    `acceptance ${p.acceptance_passed ? "✅ passed" : "❌ failed"} · ${(p.signoffs || []).length} human sign-off(s)`));
+  d.appendChild(renderProvenance(att));   // KV summary + raw attestation JSON (in <details>)
+}
+function renderSbom(sbom) {
+  const d = $("#artdetail"); d.innerHTML = "";
+  // Count components across formats: SPDX (files/packages) or CycloneDX (components).
+  const comps = sbom.files || sbom.components || sbom.packages || sbom.artifacts || [];
+  const cnt = Array.isArray(comps) ? comps.length : 0;
+  const fmt = sbom.spdxVersion || (sbom.bomFormat ? `${sbom.bomFormat} ${sbom.specVersion || ""}`.trim() : "");
+  d.appendChild(el("div", "artclaim", `Software Bill of Materials${fmt ? ` · ${escapeHtml(fmt)}` : ""} · <b>${cnt}</b> file(s)/component(s) recorded`));
+  const pretty = JSON.stringify(sbom, null, 2);
+  viewToggle(d, () => el("pre", "code", escapeHtml(pretty)), JSON.stringify(sbom));
+}
+function renderLog(text) {
+  const d = $("#artdetail"); d.innerHTML = "";
+  d.appendChild(el("pre", "code", escapeHtml(text || "(empty)")));
+}
+
+// Minimal, safe Markdown → HTML (escape first, then format). Handles headings, lists,
+// bold/italic/inline-code, fenced code, and links.
+function mdToHtml(src) {
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const blocks = [];
+  src = String(src).replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => {
+    blocks.push("<pre><code>" + esc(code) + "</code></pre>"); return " " + (blocks.length - 1) + " ";
+  });
+  const inline = (t) => t
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\*([^*]+)\*/g, "<i>$1</i>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  let html = "", list = null;
+  for (const ln of esc(src).split("\n")) {
+    let m;
+    if ((m = ln.match(/^(#{1,3})\s+(.*)/))) { if (list) { html += `</${list}>`; list = null; } html += `<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`; continue; }
+    if ((m = ln.match(/^\s*[-*]\s+(.*)/))) { if (list !== "ul") { if (list) html += `</${list}>`; html += "<ul>"; list = "ul"; } html += `<li>${inline(m[1])}</li>`; continue; }
+    if ((m = ln.match(/^\s*\d+\.\s+(.*)/))) { if (list !== "ol") { if (list) html += `</${list}>`; html += "<ol>"; list = "ol"; } html += `<li>${inline(m[1])}</li>`; continue; }
+    if (ln.trim() === "") { if (list) { html += `</${list}>`; list = null; } continue; }
+    if (list) { html += `</${list}>`; list = null; }
+    html += `<p>${inline(ln)}</p>`;
+  }
+  if (list) html += `</${list}>`;
+  return html.replace(/ (\d+) /g, (m, i) => blocks[i]);
 }
 
 async function loadAudit(body) {

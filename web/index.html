@@ -135,14 +135,11 @@
           <button class="btn ghost sm" id="openartifacts" type="button">📁 Open all artifacts</button>
           <span class="crit muted">re-run acceptance in the sandbox + re-verify signatures + hash the source — trust nothing, verify everything.</span>
         </div>
-        <div class="tabs" id="tabs">
-          <span class="tab active" data-tab="code">Software</span>
-          <span class="tab" data-tab="prov">AI-BOM</span>
-          <span class="tab" data-tab="audit">Audit trail</span>
-          <span class="tab" data-tab="sbom">SBOM</span>
-          <span class="tab" data-tab="log">Decision log</span>
+        <div class="panel-h" style="margin-top:4px">📦 Signed artifact bundle</div>
+        <div class="explorer">
+          <div class="arttree" id="arttree"></div>
+          <div class="artdetail" id="artdetail"></div>
         </div>
-        <div id="tabbody"></div>
 
         <hr style="border:none; border-top:1px solid var(--line); margin:16px 0" />
         <div class="panel-h">↻ Refine this app <span class="muted">— re-authors the spec &amp; rebuilds (v→v+1)</span></div>

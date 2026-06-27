@@ -170,7 +170,7 @@ function resetFlow() {
   $("#appframe").innerHTML = ""; $("#runappmsg").innerHTML = "";
   document.querySelectorAll(".step").forEach((s) => s.classList.remove("done", "active"));
   STATE.artifacts = null; STATE.verify = null;
-  setCollapsed("#buildcard", null); setCollapsed("#flowcard", null);
+  setCollapsed("#buildcard", null); setCollapsed("#flowcard", null); setCollapsed("#productcard", null);
 }
 
 function startPolling() {
@@ -422,6 +422,11 @@ async function signoff(name, btn) {
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     STATE.verify = null;
     setStatus(run.status); await loadArtifacts(); await showApproval(run); await loadReputation();
+    // Once the gate is satisfied, fold the product step to a summary for a cleaner finish.
+    if (run.status === "merged" || run.status === "accepted") {
+      const n = (STATE.artifacts && STATE.artifacts.files || []).length;
+      setCollapsed("#productcard", `✓ <b>${escapeHtml(run.status)}</b> · ${n} file(s) · provenance signed <span class="muted">(click to inspect)</span>`);
+    }
   } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = `✍ approve as ${name}`; }
 }
 async function refine() {

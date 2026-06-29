@@ -31,3 +31,4 @@ Cargo.lock.bak
 *.pptx
 *.ppt
 ~$*.pptx
+docs/OpenFab_Presentation*.pdf

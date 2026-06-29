@@ -56,6 +56,7 @@ impl Default for Policy {
                 "hiclaw".into(),
                 "agent-chat".into(),
                 "openhands".into(),
+                "attest".into(),
             ],
             sandbox: SandboxPolicy {
                 allow_command_prefixes: vec![

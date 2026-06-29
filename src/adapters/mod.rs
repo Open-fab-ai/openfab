@@ -7,6 +7,7 @@
 //!
 //! Adapters may depend on `core` and `ports`; `core` must never depend on adapters.
 
+pub mod base_attest;
 pub mod base_claude;
 pub mod base_framework;
 pub mod forge_github;

@@ -2,7 +2,7 @@
   "_comment": "v0.1 machine-read trust policy — the SINGLE source of the rule parameters (R3). policy/trust.rego is the illustrative production (OPA/regorus) policy and intentionally does NOT re-encode these literal values. Mirrors core::trust::Policy.",
   "require_human_signoff": true,
   "n_of_m": { "n": 2, "m": 2 },
-  "allowed_bases": ["claude-cli", "codex-cli", "agentscope", "hiclaw", "agent-chat", "openhands"],
+  "allowed_bases": ["claude-cli", "codex-cli", "agentscope", "hiclaw", "agent-chat", "openhands", "attest"],
   "sandbox": {
     "allow_command_prefixes": [
       "python3", "python", "node", "pytest", "cargo", "bash", "sh", "/bin/sh",

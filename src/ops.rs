@@ -238,6 +238,31 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
     })
 }
 
+/// Attest **pre-existing** files (Path B in docs/ENTERPRISE_QUICKSTART.md): the code was
+/// already produced — typically by the team's own AI agent factory — and they want the
+/// signed proof. This drives the normal spec-cycle with the `attest` base, which reads the
+/// files already on disk under the spec's `target_dir` instead of generating any. Acceptance,
+/// signing, and the N-of-M gate are identical to any other run (R3 — one ceremony path).
+pub fn attest(repo: &Path, spec: Spec, gate_mode: &str, policy: &Policy) -> Result<RunRecord> {
+    start_run(
+        repo,
+        RunRequest {
+            spec,
+            base: "attest".to_string(),
+            forge_kind: "local".to_string(),
+            forge_name: None,
+            parent_run: None,
+            run_id: None,
+            gate_mode: gate_mode.to_string(),
+            authored_by: Some("attested (pre-existing files)".to_string()),
+            mode: RunMode::Release,
+            allow_bridged: false,
+            base_model: None,
+        },
+        policy,
+    )
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PromoteOutcome {
     pub draft_run: String,
@@ -1050,6 +1075,50 @@ mod tests {
             created: "t".to_string(),
         };
         runstate::save_run(repo, &rec, "id: demo\nversion: 1\nintent: t\n", "tl").unwrap();
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn attest_signs_existing_files_and_verifies_offline() {
+        let repo = tmp_repo("attest");
+        // A factory has already produced committed files — attest does NOT generate.
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(repo.join("app/index.html"), "<div id=\"app\">hi</div>\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "factory output"]);
+
+        let spec = Spec::from_yaml(
+            "id: attest-demo\nversion: 1\nintent: existing app\ntarget_dir: app\nacceptance:\n  - id: a1\n    check: \"test -f app/index.html\"\n    must_pass: true\n",
+        )
+        .unwrap();
+
+        let rec = attest(&repo, spec, "solo", &Policy::default()).unwrap();
+        // Files were attested (not generated), the contract ran, and the gate awaits sign-off.
+        assert_eq!(rec.base_name, "attest");
+        assert!(
+            rec.acceptance_passed,
+            "acceptance should pass on existing file"
+        );
+        assert!(!rec.accepted, "solo gate must still require a sign-off");
+        let att = repo.join(&rec.attestation_repo_path);
+        assert!(att.exists(), "attestation file should be written");
+
+        // The signed proof verifies offline against the working tree (forge-agnostic).
+        let r = reproduce_from_file(&repo, &att, &Policy::default()).unwrap();
+        assert!(r.signature_valid && r.source_identical && r.all_acceptance_passed);
     }
 
     #[test]

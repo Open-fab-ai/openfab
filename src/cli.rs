@@ -148,6 +148,22 @@ enum Cmd {
         #[arg(long)]
         policy: Option<PathBuf>,
     },
+    /// Attest EXISTING files (no generation): sign + gate code your own AI factory already
+    /// produced. Reads the files under the spec's target_dir, runs the acceptance contract,
+    /// and writes a signed attestation — same proof as a full run (see ENTERPRISE_QUICKSTART).
+    Attest {
+        /// Spec YAML describing the software + acceptance checks the existing files must pass.
+        #[arg(long)]
+        spec: PathBuf,
+        /// Repo / working tree holding the existing (committed) files.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Human-approval gate: solo (self-approve) | team (2-of-2) | crowd | none.
+        #[arg(long, default_value = "solo")]
+        gate: String,
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
     /// Project reputation from the signed attestations in a repo.
     Reputation {
         #[arg(long)]
@@ -243,6 +259,12 @@ pub fn run() -> Result<()> {
         } => cmd_signoff(&repo, &run, &as_name, policy.as_deref()),
         Cmd::Verify { repo, run } => cmd_verify(&repo, &run),
         Cmd::VerifyFile { repo, att, policy } => cmd_verify_file(&repo, &att, policy.as_deref()),
+        Cmd::Attest {
+            spec,
+            repo,
+            gate,
+            policy,
+        } => cmd_attest(&spec, &repo, &gate, policy.as_deref()),
         Cmd::Reputation { repo } => cmd_reputation(&repo),
         Cmd::List { repo } => cmd_list(&repo),
         Cmd::Serve { repo, port, policy } => {
@@ -266,6 +288,42 @@ fn mode_of(draft: bool) -> RunMode {
     } else {
         RunMode::Release
     }
+}
+
+fn cmd_attest(spec_path: &Path, repo: &Path, gate: &str, policy_path: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let policy = load_policy(policy_path)?;
+    let spec = Spec::from_path(spec_path)?;
+
+    println!(
+        "== OpenFab attest: spec={} gate={} (signing pre-existing files, no generation) ==",
+        spec.spec_ref(),
+        gate
+    );
+    let rec = ops::attest(&repo, spec, gate, &policy)?;
+    let passed = rec.acceptance.iter().filter(|a| a.passed).count();
+    println!(
+        "  acceptance: {}/{} checks passed",
+        passed,
+        rec.acceptance.len()
+    );
+    println!("  run: {}  ({})", rec.run_id, rec.status);
+    println!("  attestation: {}", rec.attestation_repo_path);
+    if !rec.acceptance_passed {
+        eprintln!("\nNote: machine acceptance did not pass — the gate stays blocked. (Honest failure, not a vacuous pass.)");
+    } else if !rec.accepted {
+        println!(
+            "\nNext: collect sign-off(s) →  openfab signoff --repo {} --run {} --as <maintainer>",
+            repo.display(),
+            rec.run_id
+        );
+    }
+    println!(
+        "Verify anywhere:  openfab verify-file --repo {} --att {}",
+        repo.display(),
+        rec.attestation_repo_path
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+use crate::adapters::base_attest::AttestBase;
 use crate::adapters::base_claude::{ClaudeBase, CliKind};
 use crate::adapters::base_framework::{endpoint_reachable, Framework, FrameworkBase};
 use crate::adapters::forge_github::GitHubForge;
@@ -191,6 +192,7 @@ pub fn build_base(
     base_model: Option<String>,
 ) -> Result<Box<dyn BasePort>> {
     match id {
+        "attest" => Ok(Box::new(AttestBase::new(policy.clone()))),
         "claude" | "claude-cli" => Ok(Box::new(ClaudeBase::new(policy.clone()))),
         "codex" | "codex-cli" => Ok(Box::new(ClaudeBase::with_kind(
             CliKind::Codex,

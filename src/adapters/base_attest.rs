@@ -24,20 +24,47 @@ use crate::ports::base::{BasePort, Capabilities, ChangedFile, ExecResult, RunHan
 
 pub struct AttestBase {
     policy: Policy,
+    /// (repo-relative path, bytes) captured at construction — BEFORE the spec-cycle branches.
+    /// The forge branches a new run from the repo's root commit and `git clean`s the worktree
+    /// (so each generated app is self-contained); that would wipe the very files we attest if
+    /// we read them later. So we snapshot them up front and restore them in `dispatch`.
+    captured: Vec<(String, Vec<u8>)>,
     results: RefCell<HashMap<String, RunResult>>,
 }
 
 impl AttestBase {
-    pub fn new(policy: Policy) -> Self {
-        AttestBase {
-            policy,
-            results: RefCell::new(HashMap::new()),
+    /// Snapshot the existing files under `repo/target_dir` NOW (before the cycle branches).
+    /// Errors if there is nothing to attest — empty input must never become a vacuous pass (R14).
+    pub fn capture(repo: &Path, target_dir: &str, policy: Policy) -> Result<Self> {
+        let target = repo.join(target_dir);
+        let mut files = vec![];
+        collect_files(&target, &mut files)?;
+        files.sort();
+        let mut captured = vec![];
+        for abs in &files {
+            let bytes = std::fs::read(abs).with_context(|| format!("read {}", abs.display()))?;
+            let rel = abs
+                .strip_prefix(repo)
+                .unwrap_or(abs)
+                .to_string_lossy()
+                .replace('\\', "/");
+            captured.push((rel, bytes));
         }
+        if captured.is_empty() {
+            anyhow::bail!(
+                "attest: no files found under '{target_dir}/' — nothing to attest (did the factory write them, and are they committed?)"
+            );
+        }
+        Ok(AttestBase {
+            policy,
+            captured,
+            results: RefCell::new(HashMap::new()),
+        })
     }
 }
 
-/// Recursively collect files under `dir`, skipping dotfiles/dirs (e.g. `.openfab`, `.git`).
-/// Absolute paths; the caller derives the repo-relative path for the attestation.
+/// Recursively collect regular files under `dir`, skipping dotfiles/dirs (e.g. `.openfab`,
+/// `.git`) and symlinks (we must not read/sign bytes that live outside the repo — R14).
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -45,7 +72,7 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
         let path = entry?.path();
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with('.') {
+        if name.starts_with('.') || path.is_symlink() {
             continue;
         }
         if path.is_dir() {
@@ -79,30 +106,23 @@ impl BasePort for AttestBase {
         let handle = RunHandle {
             id: format!("{}-attest", task.id),
         };
-        let target = task.workdir.join(&task.target_dir);
-        let mut files = vec![];
-        collect_files(&target, &mut files)?;
-        files.sort();
-        if files.is_empty() {
-            anyhow::bail!(
-                "attest: no files found under '{}' — nothing to attest (did the factory write them, and are they committed?)",
-                task.target_dir
-            );
-        }
-
+        // The cycle branched from the root commit and cleaned the worktree before calling us,
+        // so restore the snapshot taken at construction. The spec-cycle then commits these on
+        // the run branch, runs the acceptance contract against them, and signs — exactly the
+        // path a generating base takes, except the "generated" bytes are the captured originals.
         let mut changed = vec![];
-        for abs in &files {
-            let bytes = std::fs::read(abs).with_context(|| format!("read {}", abs.display()))?;
-            let rel = abs
-                .strip_prefix(&task.workdir)
-                .unwrap_or(abs)
-                .to_string_lossy()
-                .replace('\\', "/");
+        for (rel, bytes) in &self.captured {
+            let abs = task.workdir.join(rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("mkdir {}", parent.display()))?;
+            }
+            std::fs::write(&abs, bytes).with_context(|| format!("restore {}", abs.display()))?;
             let lines = bytes.iter().filter(|&&b| b == b'\n').count().max(1);
             changed.push(ChangedFile {
-                path: rel,
+                path: rel.clone(),
                 lines,
-                sha256: sha256_hex(&bytes),
+                sha256: sha256_hex(bytes),
             });
         }
 

@@ -14,7 +14,7 @@ This guide shows the exact CLI flow to get that signed proof.
 
 ```bash
 # 1. Attest existing code your factory already produced → signed AI-BOM.
-openfab attest --repo ./checkout --spec feature.spec.yaml --author ai
+openfab attest --repo ./checkout --spec feature.spec.yaml
 
 # 2. Notarize human approval (N-of-M gate).
 openfab signoff --repo ./checkout --run <run-id> --as alice
@@ -78,14 +78,24 @@ Everything else — sandboxed acceptance, signing, the trust gate, the PR — is
 ### Path B — attest code your factory *already* produced
 
 If the code already exists on disk and you just want to stamp it, use `attest`.
-It skips generation entirely: it reads the existing files, computes their digests,
-records authorship, runs the acceptance contract in the sandbox, and writes the
-signed attestation — same `openfab/generation` predicate, same `verify-file`
-compatibility as Path A.
+It skips generation entirely: it reads the existing files under the spec's
+`target_dir`, computes their digests, runs the acceptance contract in the sandbox,
+and writes the signed attestation — same `openfab/generation` predicate, same
+`verify-file` compatibility as Path A.
 
 ```bash
-openfab attest --repo ./checkout --spec feature.spec.yaml --author ai
+openfab attest --repo ./checkout --spec feature.spec.yaml --gate solo
 ```
+
+**The files must be committed first.** Each run is branched from the repo's root
+commit into a self-contained worktree, so `attest` snapshots the files up front and
+re-commits them on the run branch; uncommitted/untracked files under `target_dir`
+are not what gets attested. Commit your factory's output, then attest.
+
+**Authorship is recorded as `ai`.** For attesting an AI factory's output that is the
+honest claim; the attestation also records `base = attest` and a runtime of
+`attested` (not `native`), so a verifier can see OpenFab notarized pre-existing files
+rather than observing the generation itself.
 
 Use Path B for retrofitting provenance onto an existing pipeline; use Path A when
 you want OpenFab in the loop at generation time.

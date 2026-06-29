@@ -214,7 +214,18 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
 
     let forge = registry::build_forge(&req.forge_kind, req.forge_name.clone(), repo)?;
     forge.clone_repo(repo)?;
-    let base = registry::build_base(&req.base, policy, req.allow_bridged, req.base_model.clone())?;
+    // The attest base snapshots the existing files NOW — before run_cycle branches from the
+    // root commit and cleans the worktree — then restores them on dispatch. Every other base
+    // generates files, so it is built by the registry.
+    let base: Box<dyn crate::ports::base::BasePort> = if req.base == "attest" {
+        Box::new(crate::adapters::base_attest::AttestBase::capture(
+            repo,
+            &req.spec.target_dir,
+            policy.clone(),
+        )?)
+    } else {
+        registry::build_base(&req.base, policy, req.allow_bridged, req.base_model.clone())?
+    };
 
     // The human-approval gate is a policy choice per run (solo / team / crowd / none).
     let gate_policy = policy.for_gate_mode(&req.gate_mode);
@@ -1091,14 +1102,22 @@ mod tests {
     #[test]
     fn attest_signs_existing_files_and_verifies_offline() {
         let repo = tmp_repo("attest");
-        // A factory has already produced committed files — attest does NOT generate.
-        std::fs::create_dir_all(repo.join("app")).unwrap();
-        std::fs::write(repo.join("app/index.html"), "<div id=\"app\">hi</div>\n").unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["config", "user.email", "t@t"]);
         git(&repo, &["config", "user.name", "t"]);
+        // Realistic repo shape: the root commit is just a README; the factory's output lands
+        // in a LATER commit (regression for the branch-from-root wipe — files in the root
+        // commit would mask it). attest must still find + attest them.
+        std::fs::write(repo.join("README.md"), "# project\n").unwrap();
         git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-qm", "factory output"]);
+        git(&repo, &["commit", "-qm", "root: readme"]);
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(repo.join("app/index.html"), "<div id=\"app\">hi</div>\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(
+            &repo,
+            &["commit", "-qm", "factory output (non-root commit)"],
+        );
 
         let spec = Spec::from_yaml(
             "id: attest-demo\nversion: 1\nintent: existing app\ntarget_dir: app\nacceptance:\n  - id: a1\n    check: \"test -f app/index.html\"\n    must_pass: true\n",

@@ -26,3 +26,8 @@ Cargo.lock.bak
 # Stray generated-app / python artifacts at repo root
 /app/
 **/__pycache__/
+
+# Presentation binaries are generated locally (docs/build_todo_wg_deck.py); not for the repo.
+*.pptx
+*.ppt
+~$*.pptx

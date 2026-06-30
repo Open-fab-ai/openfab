@@ -1,7 +1,7 @@
 # HANDOFF — OpenFab v0.2 (web UI + full base/forge matrix)
 
 **For review.** v0.1 was the CLI engine + provenance/trust moat. v0.2 adds the three
-things requested: a **web UI**, the **whole base/forge matrix** (5 bases, 4 forges), and
+things requested: a **web UI**, the **whole base/forge matrix** (6 bases, 4 forges), and
 a **full visual UX** (NL → live workflow → approve/refine → product + provenance →
 reproduce). Every artifact (spec, acceptance, code) is authored by the LLM base — the
 v0.1 `mock` base was removed. Everything below is real and runs.

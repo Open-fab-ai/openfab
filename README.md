@@ -11,12 +11,14 @@ Sigstore · DID); the novel, durable thing is the **integrated fab** and the
 
 This repo is the **Phase-0 hand-built MVP (v0.1)**, in Rust. New here? Start with the
 [**OpenFab Overview**](docs/OpenFab_Overview.md) (the problem, the gap, and how OpenFab
-fills it). Then see [`OpenFab_MVP_Design_and_PRD.md`](docs/OpenFab_MVP_Design_and_PRD.md)
+fills it). Skeptical? Read [**OpenFab vs. existing tools — the honest delta**](docs/VALUE_PROPOSITION.md)
+(what exactly GitHub can't do, and what OpenFab does *not* solve). Then see
+[`OpenFab_MVP_Design_and_PRD.md`](docs/OpenFab_MVP_Design_and_PRD.md)
 (source of truth) and [`AGENTS.md`](AGENTS.md) (how to work here).
 
 > **Status (v0.2, this build):** Core spec-cycle engine, `openfab/generation` in-toto
 > predicate, did:key signing + verification, N-of-M trust gate, conformance, reputation,
-> **a web UI** (`openfab serve`) for the full end-to-end visual flow, **5 swappable bases**
+> **a web UI** (`openfab serve`) for the full end-to-end visual flow, **6 swappable bases**
 > (claude · AgentScope · HiClaw · agent-chat · OpenHands) and the **4-forge matrix**
 > (GitHub · Forgejo · Gitea · GitCode), plus a one-click **reproduce/verify**. Every
 > artifact — the spec, the acceptance criteria, and the code — is authored by the Base
@@ -88,7 +90,7 @@ NL intent  →  spec (contract)  →  dispatch to base  →  app written
 | **Reproducible (verify)** | `openfab verify` re-runs the contract: signatures + recorded acceptance + sign-off |
 | **Human-in-the-loop** | the trust gate **blocks merge** until N-of-M maintainers sign off |
 | **Neutral / cross-forge** | identical flow on two independent forges; provenance is plain JSON committed in-repo |
-| **Swappable base** | `--base claude` or any framework base (`agentscope`/`hiclaw`/`agent-chat`/`openhands`) — same Core pipeline |
+| **Swappable base** | `--base claude` or `codex` (local CLIs) or any framework base (`agentscope`/`hiclaw`/`agent-chat`/`openhands`) — same Core pipeline |
 | **Spec cycle / iterative** | `openfab feedback` folds human NL into spec v→v+1 and re-runs |
 | **Decision memory** | per-run human-readable timeline/audit trail (`.openfab/runs/<id>/timeline.md`) |
 
@@ -189,7 +191,7 @@ Two orthogonal pluggable axes around a stable Core (PRD §3):
   (gate) · `reputation` · `conformance`.
 - **Ports (the seams):** `src/ports/` — `BasePort` (swappable agent base) and
   `ForgePort` (swappable git host). Core only ever talks to these traits.
-- **Adapters:** `src/adapters/` — bases: `base_claude` (live LLM via the `claude` CLI) ·
+- **Adapters:** `src/adapters/` — bases: `base_claude` (live LLM via the `claude` or `codex` CLI) ·
   `base_framework` (AgentScope · HiClaw · agent-chat · OpenHands, native-if-configured
   else **bridged** through `llm_backend`). forges:
   `forge_local_git` · `forge_github` (gated) · `forge_rest` (Forgejo/Gitea/GitCode,
@@ -198,7 +200,7 @@ Two orthogonal pluggable axes around a stable Core (PRD §3):
 - **Engine, ops, fronts:** `src/spec_cycle.rs` (PRD's `loop.rs`) → `src/ops.rs` (shared
   actions) → `src/cli.rs` + `src/server.rs` (web UI/API). One orchestration code path.
 
-**Bases (5):** `claude` (native), `agentscope`, `hiclaw`, `agent-chat`, `openhands`
+**Bases (6):** `claude` (native CLI), `codex` (native CLI), `agentscope`, `hiclaw`, `agent-chat`, `openhands`
 (native if their `OPENFAB_*_URL` is set, else **bridged** via the LLM backend — the run
 badges itself honestly). **Forges (4):** `github`, `forgejo`,
 `gitea`, `gitcode` (live if `OPENFAB_*` creds are set, else an offline **local instance**
@@ -242,4 +244,4 @@ CLIs. Each lighter choice names its production-grade swap so nothing is overstat
 See [`docs/adr/0001-mvp-architecture-decisions.md`](docs/adr/0001-mvp-architecture-decisions.md)
 for why, and [`HANDOFF.md`](docs/HANDOFF.md) for done / next / open questions.
 
-License: Apache-2.0 · Governance: AOSF (aosf.ai) · Implements: SLSA · in-toto · Sigstore · DID.
+License: Apache-2.0 · vendor-neutral & community-governed · Implements: SLSA · in-toto · Sigstore · DID.

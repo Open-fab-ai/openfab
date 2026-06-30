@@ -63,10 +63,16 @@ impl RestForge {
 
     fn authed_remote(&self) -> String {
         // Embed the token in the push URL (read from env, never logged/committed).
-        let host = self.base_url.replace("https://", "").replace("http://", "");
+        // Preserve base_url's scheme so plain-http forges aren't forced onto TLS
+        // (forcing https here breaks `git push` against http Gitea/Forgejo while
+        // the scheme-honoring REST calls succeed). Default to https when absent.
+        let (scheme, host) = self
+            .base_url
+            .split_once("://")
+            .unwrap_or(("https", self.base_url.as_str()));
         format!(
-            "https://oauth2:{}@{}/{}.git",
-            self.token, host, self.repo_slug
+            "{}://oauth2:{}@{}/{}.git",
+            scheme, self.token, host, self.repo_slug
         )
     }
 }
@@ -180,5 +186,34 @@ mod tests {
         // With no env set, none of the gitea-lineage forges report configured.
         assert!(!RestForge::is_configured("forgejo"));
         assert!(RestForge::from_env("gitea", PathBuf::from("/tmp/x")).is_err());
+    }
+
+    fn fixture(base_url: &str) -> RestForge {
+        RestForge {
+            kind: "gitea".to_string(),
+            base_url: base_url.to_string(),
+            token: "tok".to_string(),
+            repo_slug: "owner/repo".to_string(),
+            workdir: PathBuf::from("/tmp/x"),
+        }
+    }
+
+    #[test]
+    fn authed_remote_preserves_base_url_scheme() {
+        // Regression: forcing https broke `git push` to plain-http forges with a
+        // TLS error while REST calls (which honor the scheme) still worked.
+        assert_eq!(
+            fixture("http://localhost:3000").authed_remote(),
+            "http://oauth2:tok@localhost:3000/owner/repo.git"
+        );
+        assert_eq!(
+            fixture("https://example.com").authed_remote(),
+            "https://oauth2:tok@example.com/owner/repo.git"
+        );
+        // No scheme present → default to https.
+        assert_eq!(
+            fixture("git.example.com").authed_remote(),
+            "https://oauth2:tok@git.example.com/owner/repo.git"
+        );
     }
 }

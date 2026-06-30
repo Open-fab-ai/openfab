@@ -20,6 +20,7 @@ use crate::core::spec::Spec;
 use crate::core::trust::Policy;
 use crate::ops;
 use crate::runstate;
+use crate::spec_cycle::RunMode;
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +51,12 @@ enum Cmd {
         /// Human-approval gate: solo (self-approve) | team (2-of-2) | crowd | none.
         #[arg(long, default_value = "team")]
         gate: String,
+        /// Fast iterate: generate + run acceptance only, NO sign/gate/PR (un-attested draft).
+        #[arg(long)]
+        draft: bool,
+        /// If the chosen base's native runtime is down, allow OpenFab's LLM bridge to stand in.
+        #[arg(long)]
+        allow_bridged: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -67,6 +74,12 @@ enum Cmd {
         forge_name: Option<String>,
         #[arg(long, default_value = "solo")]
         gate: String,
+        /// Fast iterate: generate + run acceptance only, NO sign/gate/PR (un-attested draft).
+        #[arg(long)]
+        draft: bool,
+        /// If the chosen base's native runtime is down, allow OpenFab's LLM bridge to stand in.
+        #[arg(long)]
+        allow_bridged: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -83,6 +96,9 @@ enum Cmd {
         add_check: Option<String>,
         #[arg(long, default_value = "claude")]
         base: String,
+        /// If the chosen base's native runtime is down, allow OpenFab's LLM bridge to stand in.
+        #[arg(long)]
+        allow_bridged: bool,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
@@ -104,12 +120,49 @@ enum Cmd {
         #[arg(long)]
         policy: Option<PathBuf>,
     },
+    /// Promote a passing draft to a signed, gated release (the explicit trust checkpoint).
+    Promote {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
     /// Verify an artifact against the OpenFab profile (signatures + acceptance + sign-off).
     Verify {
         #[arg(long)]
         repo: PathBuf,
         #[arg(long)]
         run: String,
+    },
+    /// Forge-agnostic verify: reproduce straight from a committed attestation file against
+    /// the working tree — no `.openfab/` run-state needed (clone from any forge, verify offline).
+    VerifyFile {
+        /// Repo / working tree holding the generated source (default: current dir).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Path to the committed attestation, e.g. provenance/<spec>-vN.att.json
+        #[arg(long)]
+        att: PathBuf,
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
+    /// Attest EXISTING files (no generation): sign + gate code your own AI factory already
+    /// produced. Reads the files under the spec's target_dir, runs the acceptance contract,
+    /// and writes a signed attestation — same proof as a full run (see ENTERPRISE_QUICKSTART).
+    Attest {
+        /// Spec YAML describing the software + acceptance checks the existing files must pass.
+        #[arg(long)]
+        spec: PathBuf,
+        /// Repo / working tree holding the existing (committed) files.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Human-approval gate: solo (self-approve) | team (2-of-2) | crowd | none.
+        #[arg(long, default_value = "solo")]
+        gate: String,
+        #[arg(long)]
+        policy: Option<PathBuf>,
     },
     /// Project reputation from the signed attestations in a repo.
     Reputation {
@@ -143,6 +196,8 @@ pub fn run() -> Result<()> {
             forge,
             forge_name,
             gate,
+            draft,
+            allow_bridged,
             policy,
         } => cmd_run(
             &spec,
@@ -151,6 +206,8 @@ pub fn run() -> Result<()> {
             &forge,
             forge_name,
             &gate,
+            mode_of(draft),
+            allow_bridged,
             policy.as_deref(),
             None,
         ),
@@ -161,6 +218,8 @@ pub fn run() -> Result<()> {
             forge,
             forge_name,
             gate,
+            draft,
+            allow_bridged,
             policy,
         } => cmd_build(
             &intent,
@@ -169,14 +228,18 @@ pub fn run() -> Result<()> {
             &forge,
             forge_name,
             &gate,
+            mode_of(draft),
+            allow_bridged,
             policy.as_deref(),
         ),
+        Cmd::Promote { repo, run, policy } => cmd_promote(&repo, &run, policy.as_deref()),
         Cmd::Feedback {
             repo,
             run,
             note,
             add_check,
             base,
+            allow_bridged,
             policy,
         } => cmd_feedback(
             &repo,
@@ -184,6 +247,7 @@ pub fn run() -> Result<()> {
             &note,
             add_check.as_deref(),
             &base,
+            allow_bridged,
             policy.as_deref(),
         ),
         Cmd::MaintainerAdd { repo, name } => cmd_maintainer_add(&repo, &name),
@@ -194,6 +258,13 @@ pub fn run() -> Result<()> {
             policy,
         } => cmd_signoff(&repo, &run, &as_name, policy.as_deref()),
         Cmd::Verify { repo, run } => cmd_verify(&repo, &run),
+        Cmd::VerifyFile { repo, att, policy } => cmd_verify_file(&repo, &att, policy.as_deref()),
+        Cmd::Attest {
+            spec,
+            repo,
+            gate,
+            policy,
+        } => cmd_attest(&spec, &repo, &gate, policy.as_deref()),
         Cmd::Reputation { repo } => cmd_reputation(&repo),
         Cmd::List { repo } => cmd_list(&repo),
         Cmd::Serve { repo, port, policy } => {
@@ -211,6 +282,50 @@ fn load_policy(path: Option<&Path>) -> Result<Policy> {
     }
 }
 
+fn mode_of(draft: bool) -> RunMode {
+    if draft {
+        RunMode::Draft
+    } else {
+        RunMode::Release
+    }
+}
+
+fn cmd_attest(spec_path: &Path, repo: &Path, gate: &str, policy_path: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let policy = load_policy(policy_path)?;
+    let spec = Spec::from_path(spec_path)?;
+
+    println!(
+        "== OpenFab attest: spec={} gate={} (signing pre-existing files, no generation) ==",
+        spec.spec_ref(),
+        gate
+    );
+    let rec = ops::attest(&repo, spec, gate, &policy)?;
+    let passed = rec.acceptance.iter().filter(|a| a.passed).count();
+    println!(
+        "  acceptance: {}/{} checks passed",
+        passed,
+        rec.acceptance.len()
+    );
+    println!("  run: {}  ({})", rec.run_id, rec.status);
+    println!("  attestation: {}", rec.attestation_repo_path);
+    if !rec.acceptance_passed {
+        eprintln!("\nNote: machine acceptance did not pass — the gate stays blocked. (Honest failure, not a vacuous pass.)");
+    } else if !rec.accepted {
+        println!(
+            "\nNext: collect sign-off(s) →  openfab signoff --repo {} --run {} --as <maintainer>",
+            repo.display(),
+            rec.run_id
+        );
+    }
+    println!(
+        "Verify anywhere:  openfab verify-file --repo {} --att {}",
+        repo.display(),
+        rec.attestation_repo_path
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     spec_path: &Path,
@@ -219,6 +334,8 @@ fn cmd_run(
     forge_kind: &str,
     forge_name: Option<String>,
     gate: &str,
+    mode: RunMode,
+    allow_bridged: bool,
     policy_path: Option<&Path>,
     parent_run: Option<String>,
 ) -> Result<()> {
@@ -227,11 +344,12 @@ fn cmd_run(
     let spec = Spec::from_path(spec_path)?;
 
     println!(
-        "== OpenFab run: spec={} base={} forge={} gate={} ==",
+        "== OpenFab run: spec={} base={} forge={} gate={}{} ==",
         spec.spec_ref(),
         base_name,
         forge_kind,
-        gate
+        gate,
+        if mode.is_draft() { " mode=draft" } else { "" }
     );
     let rec = ops::start_run(
         &repo,
@@ -244,6 +362,9 @@ fn cmd_run(
             run_id: None,
             gate_mode: gate.to_string(),
             authored_by: None,
+            mode,
+            allow_bridged,
+            base_model: None,
         },
         &policy,
     )?;
@@ -261,15 +382,57 @@ fn cmd_build(
     forge_kind: &str,
     forge_name: Option<String>,
     gate: &str,
+    mode: RunMode,
+    allow_bridged: bool,
     policy_path: Option<&Path>,
 ) -> Result<()> {
     let repo = abs(repo)?;
     let policy = load_policy(policy_path)?;
-    println!("== OpenFab build: the LLM authors the spec from your intent, then builds ==");
+    println!(
+        "== OpenFab build: the LLM authors the spec from your intent, then builds{} ==",
+        if mode.is_draft() {
+            " (draft · un-attested)"
+        } else {
+            ""
+        }
+    );
     let run_id = ops::reserve_intent_run_id(intent);
     ops::build(
-        &repo, intent, run_id, base_name, forge_kind, forge_name, gate, &policy,
+        &repo,
+        intent,
+        run_id,
+        base_name,
+        forge_kind,
+        forge_name,
+        gate,
+        mode,
+        allow_bridged,
+        None,
+        None,
+        &policy,
     )?;
+    Ok(())
+}
+
+fn cmd_promote(repo: &Path, run: &str, policy_path: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let policy = load_policy(policy_path)?;
+    println!("== OpenFab promote: running the full trust ceremony on draft {run} ==");
+    let release_run_id = ops::reserve_promote_run_id(&repo, run)?;
+    let out = ops::promote(&repo, run, release_run_id, &policy)?;
+    println!(
+        "✅ promoted draft {} → release {} (status: {}, accepted: {})",
+        out.draft_run,
+        out.release_run,
+        out.status,
+        yn(out.accepted)
+    );
+    if !out.accepted {
+        println!(
+            "Next: openfab signoff --repo <repo> --run {} --as <maintainer>",
+            out.release_run
+        );
+    }
     Ok(())
 }
 
@@ -279,13 +442,25 @@ fn cmd_feedback(
     note: &str,
     _add_check: Option<&str>,
     base_name: &str,
+    allow_bridged: bool,
     policy_path: Option<&Path>,
 ) -> Result<()> {
     let repo = abs(repo)?;
     let policy = load_policy(policy_path)?;
     println!("== OpenFab refine: re-authoring the spec from your feedback → v+1 ==");
     let run_id = ops::reserve_refine_run_id(&repo, run)?;
-    ops::refine(&repo, run, note, run_id, base_name, &policy)?;
+    ops::refine(
+        &repo,
+        run,
+        note,
+        run_id,
+        base_name,
+        RunMode::Release,
+        allow_bridged,
+        None,
+        None,
+        &policy,
+    )?;
     Ok(())
 }
 
@@ -322,6 +497,37 @@ fn cmd_signoff(repo: &Path, run: &str, as_name: &str, policy_path: Option<&Path>
     } else {
         println!("🛡️  gate still BLOCKED — needs more sign-off.");
     }
+    Ok(())
+}
+
+fn cmd_verify_file(repo: &Path, att: &Path, policy_path: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let policy = load_policy(policy_path)?;
+    let out = ops::reproduce_from_file(&repo, att, &policy)?;
+    println!("== openfab verify-file: {} ==", out.run_id);
+    println!(
+        "  signatures valid: {}    source bit-identical: {} ({} files)",
+        yn(out.signature_valid),
+        yn(out.source_identical),
+        out.files_checked
+    );
+    for c in &out.checks {
+        println!(
+            "  [{}] {} — `{}`",
+            if c.passed { "PASS" } else { "FAIL" },
+            c.id,
+            c.check
+        );
+    }
+    if out.checks.is_empty() {
+        println!(
+            "  (no acceptance checks embedded — pre-v0.2 attestation; integrity+authenticity only)"
+        );
+    }
+    if !out.reproducible {
+        bail!("NOT reproducible (signature / digest / acceptance mismatch)");
+    }
+    println!("✅ reproducible: signature valid, source bit-identical, contract re-passed — verified offline, no run-state.");
     Ok(())
 }
 

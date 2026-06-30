@@ -17,7 +17,7 @@ use crate::core::trust::{self, Policy, TrustInput};
 use crate::core::{conformance, sha256_hex};
 use crate::ports::forge::Trailers;
 use crate::runstate::{self, RunRecord};
-use crate::spec_cycle::{self, CycleConfig};
+use crate::spec_cycle::{self, CycleConfig, RunMode};
 
 /// Inputs to start a run (from the CLI or the web form).
 pub struct RunRequest {
@@ -31,17 +31,25 @@ pub struct RunRequest {
     pub gate_mode: String,
     /// "provider · model" when the spec was LLM-authored (shown in the timeline).
     pub authored_by: Option<String>,
+    /// Draft (fast, un-attested) vs Release (full ceremony). Defaults to Release.
+    pub mode: RunMode,
+    /// When a framework base's native runtime is unreachable, permit OpenFab's LLM bridge
+    /// to stand in (explicit opt-in only — otherwise the run refuses, R14).
+    pub allow_bridged: bool,
+    /// Optional per-run model override for the BASE's code generation (native dispatch
+    /// payload + the bridged path). `None` → the base's own default.
+    pub base_model: Option<String>,
 }
 
 /// Author a spec from a natural-language intent using the LLM (the Base). The user only
 /// supplies the intent; the model derives the acceptance criteria, language, assumptions,
 /// and open questions. The human then reviews/edits before building (the spec-time intent
 /// check). Returns the drafted Spec plus (model, provider) for the record.
-pub fn author_spec(intent: &str) -> Result<(Spec, String, String)> {
+pub fn author_spec(intent: &str, author_model: Option<&str>) -> Result<(Spec, String, String)> {
     if intent.trim().len() < 4 {
         bail!("describe what you want to build");
     }
-    let (a, model, provider) = crate::adapters::llm_backend::author_spec(intent)?;
+    let (a, model, provider) = crate::adapters::llm_backend::author_spec(intent, author_model)?;
     let spec = Spec {
         id: slug(intent),
         version: 1,
@@ -78,9 +86,13 @@ pub fn build(
     forge_kind: &str,
     forge_name: Option<String>,
     gate_mode: &str,
+    mode: RunMode,
+    allow_bridged: bool,
+    author_model: Option<&str>,
+    base_model: Option<String>,
     policy: &Policy,
 ) -> Result<RunRecord> {
-    let (spec, model, provider) = author_spec(intent)?;
+    let (spec, model, provider) = author_spec(intent, author_model)?;
     start_run(
         repo,
         RunRequest {
@@ -92,6 +104,9 @@ pub fn build(
             run_id: Some(run_id),
             gate_mode: gate_mode.to_string(),
             authored_by: Some(format!("{provider} · {model}")),
+            mode,
+            allow_bridged,
+            base_model,
         },
         policy,
     )
@@ -101,12 +116,17 @@ pub fn build(
 /// acceptance criteria)** so the new requirement is actually captured + tested, and
 /// rebuild as v→v+1. This is why a refine genuinely changes the software (issue: a refine
 /// that kept the old acceptance just rebuilt to the same contract).
+#[allow(clippy::too_many_arguments)]
 pub fn refine(
     repo: &Path,
     prior_run: &str,
     note: &str,
     run_id: String,
     base: &str,
+    mode: RunMode,
+    allow_bridged: bool,
+    author_model: Option<&str>,
+    base_model: Option<String>,
     policy: &Policy,
 ) -> Result<RunRecord> {
     let prior = runstate::load_run(repo, prior_run)?;
@@ -116,7 +136,7 @@ pub fn refine(
         prior_spec.intent.trim(),
         note.trim()
     );
-    let (mut spec, model, provider) = author_spec(&combined)?;
+    let (mut spec, model, provider) = author_spec(&combined, author_model)?;
     spec.id = prior_spec.id.clone();
     spec.version = prior_spec.version + 1;
     spec.intent = combined;
@@ -133,6 +153,9 @@ pub fn refine(
             authored_by: Some(format!(
                 "{provider} · {model} (re-authored from your feedback)"
             )),
+            mode,
+            allow_bridged,
+            base_model,
         },
         policy,
     )
@@ -191,7 +214,18 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
 
     let forge = registry::build_forge(&req.forge_kind, req.forge_name.clone(), repo)?;
     forge.clone_repo(repo)?;
-    let base = registry::build_base(&req.base, policy)?;
+    // The attest base snapshots the existing files NOW — before run_cycle branches from the
+    // root commit and cleans the worktree — then restores them on dispatch. Every other base
+    // generates files, so it is built by the registry.
+    let base: Box<dyn crate::ports::base::BasePort> = if req.base == "attest" {
+        Box::new(crate::adapters::base_attest::AttestBase::capture(
+            repo,
+            &req.spec.target_dir,
+            policy.clone(),
+        )?)
+    } else {
+        registry::build_base(&req.base, policy, req.allow_bridged, req.base_model.clone())?
+    };
 
     // The human-approval gate is a policy choice per run (solo / team / crowd / none).
     let gate_policy = policy.for_gate_mode(&req.gate_mode);
@@ -211,6 +245,96 @@ pub fn start_run(repo: &Path, req: RunRequest, policy: &Policy) -> Result<RunRec
         run_id: req.run_id,
         gate_mode: req.gate_mode.clone(),
         authored_by: req.authored_by.clone(),
+        mode: req.mode,
+    })
+}
+
+/// Attest **pre-existing** files (Path B in docs/ENTERPRISE_QUICKSTART.md): the code was
+/// already produced — typically by the team's own AI agent factory — and they want the
+/// signed proof. This drives the normal spec-cycle with the `attest` base, which reads the
+/// files already on disk under the spec's `target_dir` instead of generating any. Acceptance,
+/// signing, and the N-of-M gate are identical to any other run (R3 — one ceremony path).
+pub fn attest(repo: &Path, spec: Spec, gate_mode: &str, policy: &Policy) -> Result<RunRecord> {
+    start_run(
+        repo,
+        RunRequest {
+            spec,
+            base: "attest".to_string(),
+            forge_kind: "local".to_string(),
+            forge_name: None,
+            parent_run: None,
+            run_id: None,
+            gate_mode: gate_mode.to_string(),
+            authored_by: Some("attested (pre-existing files)".to_string()),
+            mode: RunMode::Release,
+            allow_bridged: false,
+            base_model: None,
+        },
+        policy,
+    )
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromoteOutcome {
+    pub draft_run: String,
+    pub release_run: String,
+    pub status: String,
+    pub accepted: bool,
+}
+
+/// Reserve the release run id for promoting `draft_run` (so the web API can return it and
+/// poll while the full ceremony runs in the background).
+pub fn reserve_promote_run_id(repo: &Path, draft_run: &str) -> Result<String> {
+    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, draft_run)?)?;
+    Ok(reserve_run_id(&spec))
+}
+
+/// Promote a passing **draft** to a signed, gated **release** — the explicit trust
+/// checkpoint. The full ceremony runs ONCE here (re-generate under Release mode, sign
+/// in-toto/SLSA + SBOM, open the gated PR), so the attestation covers exactly what ships.
+/// Refuses a non-draft run or a draft whose acceptance failed — no vacuous promotion (R14).
+pub fn promote(
+    repo: &Path,
+    draft_run: &str,
+    release_run_id: String,
+    policy: &Policy,
+) -> Result<PromoteOutcome> {
+    let draft = runstate::load_run(repo, draft_run)?;
+    if draft.status != spec_cycle::DRAFT_STATUS {
+        bail!(
+            "run '{draft_run}' is not a draft (status: {}) — only drafts can be promoted",
+            draft.status
+        );
+    }
+    if !draft.acceptance_passed {
+        bail!("draft '{draft_run}' did not pass acceptance — fix it and re-draft before promoting");
+    }
+    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, draft_run)?)?;
+    let rec = start_run(
+        repo,
+        RunRequest {
+            spec,
+            base: draft.base_name.clone(),
+            forge_kind: effective_forge_kind(&draft),
+            forge_name: Some(draft.forge_name.clone()),
+            parent_run: Some(draft.run_id.clone()),
+            run_id: Some(release_run_id),
+            gate_mode: draft.gate_mode.clone(),
+            authored_by: Some(format!("promoted from draft {}", draft.run_id)),
+            mode: RunMode::Release,
+            // A signed release must be built by the real base — never a bridged stand-in.
+            allow_bridged: false,
+            // Release uses the base's configured default model (the draft's per-run override
+            // isn't persisted in the run record).
+            base_model: None,
+        },
+        policy,
+    )?;
+    Ok(PromoteOutcome {
+        draft_run: draft.run_id,
+        release_run: rec.run_id,
+        status: rec.status,
+        accepted: rec.accepted,
     })
 }
 
@@ -245,14 +369,18 @@ pub fn signoff(repo: &Path, run: &str, as_name: &str, policy: &Policy) -> Result
         bail!("'{as_name}' is not a registered maintainer — register with maintainer-add first");
     }
 
+    // Check out the run's branch FIRST (branch() may reset the working tree to clear a
+    // stuck index), THEN read + modify + write the attestation, so the sign-off edit isn't
+    // discarded before it's committed.
+    let kind = effective_forge_kind(&rec);
+    let forge = registry::build_forge(&kind, Some(rec.forge_name.clone()), repo)?;
+    forge.branch(&rec.branch)?;
+
     let att_abs = rec.attestation_path(repo);
     let mut att = Attestation::from_json(&std::fs::read_to_string(&att_abs)?)?;
     att.add_signoff(&signer)?;
     std::fs::write(&att_abs, att.to_json()?)?;
 
-    let kind = effective_forge_kind(&rec);
-    let forge = registry::build_forge(&kind, Some(rec.forge_name.clone()), repo)?;
-    forge.branch(&rec.branch)?;
     forge.commit(
         std::slice::from_ref(&att_abs),
         &format!("chore: record sign-off by {as_name}"),
@@ -342,8 +470,9 @@ pub fn reject(repo: &Path, run: &str) -> Result<RunRecord> {
 
 /// Merge a branch into main on the local-git forge (the demo's "merge the PR").
 fn local_merge(repo: &Path, branch: &str) -> Result<()> {
+    let run = |args: &[&str]| Command::new("git").args(args).current_dir(repo).output();
     let git = |args: &[&str]| -> Result<()> {
-        let out = Command::new("git").args(args).current_dir(repo).output()?;
+        let out = run(args)?;
         if !out.status.success() {
             bail!(
                 "git {} failed: {}",
@@ -353,15 +482,32 @@ fn local_merge(repo: &Path, branch: &str) -> Result<()> {
         }
         Ok(())
     };
+    // Clear any half-finished merge/dirty index from a prior op so the checkout can't fail
+    // with "you need to resolve your current index first".
+    let _ = run(&["merge", "--abort"]);
+    let _ = run(&["reset", "-q", "--hard"]);
     git(&["checkout", "-q", "main"])?;
-    git(&[
+    // `-X theirs`: two apps can touch the same path (e.g. both create app/index.html). main
+    // is just an accumulation of released apps — each app's authoritative copy is its own
+    // branch + provenance — so on a path collision the newly-released app wins. Never leave
+    // a conflicted index: abort on any failure.
+    let out = run(&[
         "merge",
         "--no-ff",
+        "-X",
+        "theirs",
         "-q",
         branch,
         "-m",
         &format!("merge {branch} (OpenFab gate accepted)"),
     ])?;
+    if !out.status.success() {
+        let _ = run(&["merge", "--abort"]);
+        bail!(
+            "merging {branch} into main failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -456,17 +602,44 @@ pub struct ReproduceOutcome {
 /// the sandbox. This is the sovereign/air-gapped proof — "don't trust, verify".
 pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOutcome> {
     let rec = runstate::load_run(repo, run)?;
-    let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, run)?)?;
-    let att = Attestation::from_json(&std::fs::read_to_string(rec.attestation_path(repo))?)?;
-    let signature_valid = att.verify_signatures().is_ok();
-
-    // Check out the run's source so the working tree holds exactly what was attested.
+    // Check out the run's branch FIRST so the working tree holds exactly what was attested
+    // (its source + provenance) — then read the attestation. Reading before the checkout
+    // failed with "No such file or directory" when the tree was on another branch.
     let forge = registry::build_forge(
         &effective_forge_kind(&rec),
         Some(rec.forge_name.clone()),
         repo,
     )?;
     forge.branch(&rec.branch)?;
+    let att = Attestation::from_json(&std::fs::read_to_string(rec.attestation_path(repo))?)?;
+    reproduce_from_attestation(repo, &att, policy)
+}
+
+/// Forge-agnostic verification: reproduce **directly from a committed attestation file**,
+/// against the current working tree — no `.openfab/` run-state required. This is the
+/// "clone from any forge (or a tarball) and verify offline" path: signatures, file
+/// digests, and the **embedded acceptance contract** all travel inside the attestation.
+pub fn reproduce_from_file(
+    repo: &Path,
+    att_path: &Path,
+    policy: &Policy,
+) -> Result<ReproduceOutcome> {
+    let att = Attestation::from_json(&std::fs::read_to_string(att_path)?)
+        .with_context(|| format!("reading attestation {}", att_path.display()))?;
+    reproduce_from_attestation(repo, &att, policy)
+}
+
+/// The self-contained verification core. Everything it needs is inside `att`:
+/// signatures (authenticity), generated digests (integrity), and the embedded acceptance
+/// checks (conformance). Pre-v0.2 attestations without embedded checks verify
+/// integrity+authenticity but report zero checks (conformance unverifiable from the file
+/// alone — fall back to `reproduce(run)` which has the local spec).
+pub fn reproduce_from_attestation(
+    repo: &Path,
+    att: &Attestation,
+    policy: &Policy,
+) -> Result<ReproduceOutcome> {
+    let signature_valid = att.verify_signatures().is_ok();
 
     // Each generated file must hash-match its recorded digest (bit-identical source).
     let mut source_identical = true;
@@ -479,10 +652,10 @@ pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOut
         }
     }
 
-    // Re-run the contract in the sandbox.
+    // Re-run the frozen contract embedded in the attestation.
     let mut checks = vec![];
     let mut all_passed = true;
-    for a in &spec.acceptance {
+    for a in &att.statement.predicate.acceptance {
         let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
         let exec = sandbox::exec_gated(policy, &cmd, repo)?;
         if a.must_pass && !exec.passed() {
@@ -497,7 +670,7 @@ pub fn reproduce(repo: &Path, run: &str, policy: &Policy) -> Result<ReproduceOut
     }
 
     Ok(ReproduceOutcome {
-        run_id: rec.run_id,
+        run_id: att.statement.predicate.spec_ref.clone(),
         signature_valid,
         source_identical,
         all_acceptance_passed: all_passed,
@@ -516,6 +689,9 @@ pub struct ArtifactBundle {
     pub sbom: serde_json::Value,
     pub files: Vec<ArtifactFile>,
     pub timeline: String,
+    /// The generation prompt (local run-state, NOT in the signed attestation — the BOM keeps
+    /// only its sha256). Shown in the UI so the author can inspect the exact prompt.
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -528,27 +704,48 @@ pub struct ArtifactFile {
 
 pub fn artifacts(repo: &Path, run: &str) -> Result<ArtifactBundle> {
     let rec = runstate::load_run(repo, run)?;
-    let att_text = std::fs::read_to_string(rec.attestation_path(repo))?;
-    let attestation: serde_json::Value = serde_json::from_str(&att_text)?;
+    // Check out this run's branch so the working tree holds ITS source + provenance — not
+    // whatever run was last active. Without this, opening an older app reads another app's
+    // tree (or no attestation at all → a null-deref in the UI).
+    if let Ok(forge) = registry::build_forge(
+        &effective_forge_kind(&rec),
+        Some(rec.forge_name.clone()),
+        repo,
+    ) {
+        let _ = forge.branch(&rec.branch);
+    }
+    // A draft has no attestation/SBOM yet (the ceremony only runs on release). Degrade
+    // gracefully so the spec, acceptance and timeline are still inspectable — clicking a
+    // workflow step on a draft should show what it produced, not an empty placeholder.
+    let att_text = std::fs::read_to_string(rec.attestation_path(repo)).ok();
+    let (attestation, files) = match att_text.as_deref() {
+        Some(text) => {
+            let attestation: serde_json::Value = serde_json::from_str(text)?;
+            let att = Attestation::from_json(text)?;
+            let mut files = vec![];
+            for g in &att.statement.predicate.generated {
+                let contents = std::fs::read_to_string(repo.join(&g.path)).unwrap_or_default();
+                files.push(ArtifactFile {
+                    path: g.path.clone(),
+                    contents,
+                    sha256: g.sha256.clone(),
+                    author: g.author.clone(),
+                });
+            }
+            (attestation, files)
+        }
+        None => (serde_json::Value::Null, vec![]),
+    };
     let sbom: serde_json::Value = std::fs::read_to_string(repo.join(&rec.sbom_repo_path))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
-    let att = Attestation::from_json(&att_text)?;
-    let mut files = vec![];
-    for g in &att.statement.predicate.generated {
-        let contents = std::fs::read_to_string(repo.join(&g.path)).unwrap_or_default();
-        files.push(ArtifactFile {
-            path: g.path.clone(),
-            contents,
-            sha256: g.sha256.clone(),
-            author: g.author.clone(),
-        });
-    }
     let timeline = std::fs::read_to_string(runstate::run_dir(repo, run).join("timeline.md"))
         .unwrap_or_default();
     let spec: serde_json::Value = serde_yaml::from_str(&runstate::load_run_spec_yaml(repo, run)?)
         .unwrap_or(serde_json::Value::Null);
+    let prompt = std::fs::read_to_string(runstate::run_dir(repo, run).join("prompt.txt"))
+        .unwrap_or_default();
     Ok(ArtifactBundle {
         run: rec,
         spec,
@@ -556,6 +753,7 @@ pub fn artifacts(repo: &Path, run: &str) -> Result<ArtifactBundle> {
         sbom,
         files,
         timeline,
+        prompt,
     })
 }
 
@@ -700,4 +898,261 @@ pub fn audit(repo: &Path, run: &str) -> Result<AuditTrail> {
             attributable provenance the EU Cyber Resilience Act (CRA) and SLSA expect."
             .into(),
     })
+}
+
+// --- app management (an "app" = a top-level spec + its refine versions) ---
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppInfo {
+    /// The app id = the spec id (shared across a build and all its refines).
+    pub id: String,
+    pub intent: String,
+    pub latest_run: String,
+    pub status: String,
+    pub versions: usize,
+    pub base: String,
+    pub forge: String,
+    pub created: String,
+}
+
+/// List apps in a workspace, grouping a build and its refine versions (which share the
+/// spec id) into one app. Newest first.
+pub fn apps(repo: &Path) -> Result<Vec<AppInfo>> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<RunRecord>> = BTreeMap::new();
+    for r in runstate::list_runs(repo)? {
+        let id = r
+            .spec_ref
+            .split('#')
+            .next()
+            .unwrap_or(&r.spec_ref)
+            .to_string();
+        groups.entry(id).or_default().push(r);
+    }
+    let mut out = vec![];
+    for (id, mut rs) in groups {
+        rs.sort_by(|a, b| a.created.cmp(&b.created));
+        let latest = rs.last().cloned().expect("group is non-empty");
+        let intent = runstate::load_run_spec_yaml(repo, &latest.run_id)
+            .ok()
+            .and_then(|y| Spec::from_yaml(&y).ok())
+            .map(|s| s.intent)
+            .unwrap_or_else(|| id.replace('-', " "));
+        out.push(AppInfo {
+            id,
+            intent,
+            latest_run: latest.run_id.clone(),
+            status: latest.status.clone(),
+            versions: rs.len(),
+            base: latest.base_name.clone(),
+            forge: latest.forge_name.clone(),
+            created: latest.created.clone(),
+        });
+    }
+    out.sort_by(|a, b| b.created.cmp(&a.created));
+    Ok(out)
+}
+
+/// Delete an app: every run version, its branch, and its committed provenance.
+pub fn delete_app(repo: &Path, id: &str) -> Result<usize> {
+    let mut n = 0;
+    for r in runstate::list_runs(repo)? {
+        if r.spec_ref.split('#').next() != Some(id) {
+            continue;
+        }
+        let _ = Command::new("git")
+            .args(["branch", "-D", &r.branch])
+            .current_dir(repo)
+            .output();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(repo, &r.run_id));
+        if !r.attestation_repo_path.is_empty() {
+            let _ = std::fs::remove_file(repo.join(&r.attestation_repo_path));
+        }
+        if !r.sbom_repo_path.is_empty() {
+            let _ = std::fs::remove_file(repo.join(&r.sbom_repo_path));
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Export a run's committed source into a stable per-app directory (for "open folder").
+pub fn export_app_dir(repo: &Path, run: &str) -> Result<std::path::PathBuf> {
+    let rec = runstate::load_run(repo, run)?;
+    let app_id = rec.spec_ref.split('#').next().unwrap_or(run);
+    let dest = repo.join(".openfab").join("apps").join(app_id);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest)?;
+    let ok = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "git -C '{}' archive '{}' | tar -x -C '{}'",
+            repo.display(),
+            rec.branch,
+            dest.display()
+        ))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        bail!("could not export the app's source");
+    }
+    Ok(dest)
+}
+
+/// Export EVERYTHING this run produced into one folder (for "open in Finder"): the source
+/// and committed provenance (attestation and SBOM) from the run's branch, plus the
+/// run-state (spec, acceptance log, timeline, events, generation prompt) under `_openfab_run/`.
+pub fn export_run_bundle(repo: &Path, run: &str) -> Result<std::path::PathBuf> {
+    let rec = runstate::load_run(repo, run)?;
+    let dest = repo.join(".openfab").join("exports").join(run);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest)?;
+    // 1. source + provenance, exactly as committed on the run's branch.
+    let ok = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "git -C '{}' archive '{}' | tar -x -C '{}'",
+            repo.display(),
+            rec.branch,
+            dest.display()
+        ))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        bail!("could not export the run's source");
+    }
+    // 2. run-state (spec.yaml, run.json, timeline.md, events.jsonl, status.json, prompt.txt).
+    let rs_dest = dest.join("_openfab_run");
+    let _ = std::fs::create_dir_all(&rs_dest);
+    if let Ok(entries) = std::fs::read_dir(runstate::run_dir(repo, run)) {
+        for e in entries.flatten() {
+            if e.path().is_file() {
+                let _ = std::fs::copy(e.path(), rs_dest.join(e.file_name()));
+            }
+        }
+    }
+    // Be explicit about what travels with the artifact vs. what is local-only.
+    let _ = std::fs::write(
+        dest.join("README_ARTIFACTS.txt"),
+        "OpenFab run artifacts\n\
+         =====================\n\n\
+         COMMITTED TO GIT (travels with the artifact, verifiable on any forge):\n\
+         \x20 app/            the generated source\n\
+         \x20 provenance/     the signed attestation (AI-BOM) + SBOM\n\n\
+         LOCAL RUN-STATE (OpenFab's own notes — NOT committed to the artifact repo):\n\
+         \x20 _openfab_run/   spec.yaml, prompt.txt, timeline.md, events.jsonl, run.json\n\n\
+         Verify the committed half from anywhere with:  openfab verify-file --att provenance/<spec>.att.json\n",
+    );
+    Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runstate::RunRecord;
+
+    fn tmp_repo(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "openfab-promote-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn save_fake(repo: &Path, run_id: &str, status: &str, acceptance_passed: bool) {
+        let rec = RunRecord {
+            run_id: run_id.to_string(),
+            spec_ref: "demo#v1".to_string(),
+            base_name: "claude-cli".to_string(),
+            forge_kind: "local".to_string(),
+            forge_name: "github-local".to_string(),
+            base_runtime: "native".to_string(),
+            status: status.to_string(),
+            gate_mode: "solo".to_string(),
+            branch: format!("openfab/draft/{run_id}"),
+            pr_url: String::new(),
+            attestation_repo_path: String::new(),
+            sbom_repo_path: String::new(),
+            acceptance: vec![],
+            acceptance_passed,
+            accepted: false,
+            merged: false,
+            parent_run: None,
+            created: "t".to_string(),
+        };
+        runstate::save_run(repo, &rec, "id: demo\nversion: 1\nintent: t\n", "tl").unwrap();
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn attest_signs_existing_files_and_verifies_offline() {
+        let repo = tmp_repo("attest");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        // Realistic repo shape: the root commit is just a README; the factory's output lands
+        // in a LATER commit (regression for the branch-from-root wipe — files in the root
+        // commit would mask it). attest must still find + attest them.
+        std::fs::write(repo.join("README.md"), "# project\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "root: readme"]);
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(repo.join("app/index.html"), "<div id=\"app\">hi</div>\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(
+            &repo,
+            &["commit", "-qm", "factory output (non-root commit)"],
+        );
+
+        let spec = Spec::from_yaml(
+            "id: attest-demo\nversion: 1\nintent: existing app\ntarget_dir: app\nacceptance:\n  - id: a1\n    check: \"test -f app/index.html\"\n    must_pass: true\n",
+        )
+        .unwrap();
+
+        let rec = attest(&repo, spec, "solo", &Policy::default()).unwrap();
+        // Files were attested (not generated), the contract ran, and the gate awaits sign-off.
+        assert_eq!(rec.base_name, "attest");
+        assert!(
+            rec.acceptance_passed,
+            "acceptance should pass on existing file"
+        );
+        assert!(!rec.accepted, "solo gate must still require a sign-off");
+        let att = repo.join(&rec.attestation_repo_path);
+        assert!(att.exists(), "attestation file should be written");
+
+        // The signed proof verifies offline against the working tree (forge-agnostic).
+        let r = reproduce_from_file(&repo, &att, &Policy::default()).unwrap();
+        assert!(r.signature_valid && r.source_identical && r.all_acceptance_passed);
+    }
+
+    #[test]
+    fn promote_refuses_non_draft_run() {
+        let repo = tmp_repo("nondraft");
+        save_fake(&repo, "r1", "blocked", true);
+        // A blocked/release run is not a draft → must not be promotable.
+        assert!(promote(&repo, "r1", "demo-v1-9".to_string(), &Policy::default()).is_err());
+    }
+
+    #[test]
+    fn promote_refuses_failed_draft() {
+        let repo = tmp_repo("faileddraft");
+        save_fake(&repo, "r2", spec_cycle::DRAFT_STATUS, false);
+        // A draft whose acceptance failed must not be promotable (no vacuous promotion, R14).
+        assert!(promote(&repo, "r2", "demo-v1-9".to_string(), &Policy::default()).is_err());
+    }
 }

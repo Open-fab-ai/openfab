@@ -1,7 +1,7 @@
 # OpenFab — Trustworthy Software, Fabricated from Natural Language
 
 *An open, neutral fab for the age of AI-authored software.*
-**open-fab.ai · Apache-2.0 · Governance: AOSF**
+**open-fab.ai · Apache-2.0 · vendor-neutral**
 
 ---
 
@@ -139,7 +139,7 @@ trusted Core.
 
 ## Governance
 
-OpenFab is stewarded by the **AOSF (aosf.ai)** as a **neutral foundation**, and licensed
+OpenFab is intended to be **community-governed** as a **vendor-neutral standard**, and licensed
 **Apache-2.0**. Neutrality is a feature, not an afterthought: because the base and the forge
 are swappable, **no single vendor's agent, forge, or license can capture the project** — the
 guarantee OpenFab makes about trustworthy software is the same regardless of whose

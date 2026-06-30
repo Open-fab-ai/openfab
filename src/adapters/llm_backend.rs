@@ -1,10 +1,13 @@
 //! Shared LLM backend used by the agent bases to turn a task into a file manifest.
 //!
-//! Two providers, selected by `OPENFAB_LLM` (default `claude`):
+//! Providers, selected by `OPENFAB_LLM` (default `claude`):
 //!   • `claude`    — the local `claude` CLI (native to the claude base).
 //!   • `dashscope` — Qwen via the DashScope OpenAI-compatible API (needs
 //!                   `DASHSCOPE_API_KEY`), reached by shelling to `curl` (dependency
 //!                   budget: no HTTP-client crate).
+//!   • `ollama`    — a LOCAL model served by Ollama's OpenAI-compatible API (no API key,
+//!                   no network). `OPENFAB_OLLAMA_URL` (default http://localhost:11434),
+//!                   `OPENFAB_OLLAMA_MODEL` (default llama3.1). Same `curl` path as above.
 //!
 //! The agent never touches the filesystem directly — it returns a JSON `{files:{…}}`
 //! manifest that the adapter writes. That keeps the prompt hashable into provenance and
@@ -80,6 +83,9 @@ fences, exactly this shape:
 
 Rules:
 - Include every file needed to pass the acceptance checks.
+- SELF-CONSISTENCY: include EVERY file your own code references. If your server reads
+  `index.html` (or any static asset), you MUST also emit that file — never ship a server
+  that loads a file you didn't create.
 - Use only the standard library; assume nothing is pip/npm-installed.
 - Paths must start with "{target_dir}/".
 - If this is a web app/server, bind to 127.0.0.1 and read the port from the PORT
@@ -132,13 +138,73 @@ pub fn generate_claude(prompt: &str) -> Result<GenOutput> {
     })
 }
 
+/// Run the codex CLI non-interactively (`codex exec`) and return its final message + model.
+/// Uses `--output-last-message <file>` so we capture ONLY the agent's final reply (the JSON
+/// manifest), not the event log. `OPENFAB_CODEX_BIN` overrides the binary, `OPENFAB_CODEX_MODEL`
+/// the model. Faster than the claude CLI in practice.
+fn codex_text(prompt: &str) -> Result<(String, String)> {
+    let bin = std::env::var("OPENFAB_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    let model_override = std::env::var("OPENFAB_CODEX_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out_path =
+        std::env::temp_dir().join(format!("openfab-codex-{}-{nanos}.txt", std::process::id()));
+    let mut args = vec![
+        "exec".to_string(),
+        "--skip-git-repo-check".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
+        "-o".to_string(),
+        out_path.display().to_string(),
+    ];
+    if let Some(m) = &model_override {
+        args.push("-m".to_string());
+        args.push(m.clone());
+    }
+    args.push(prompt.to_string());
+    run_capture(&bin, &args, timeout_secs()).with_context(|| {
+        format!("invoking '{bin} exec' — is the codex CLI installed + logged in?")
+    })?;
+    let text = std::fs::read_to_string(&out_path)
+        .context("reading codex --output-last-message file (no final message produced?)")?;
+    let _ = std::fs::remove_file(&out_path);
+    Ok((
+        text,
+        model_override.unwrap_or_else(|| "codex-cli".to_string()),
+    ))
+}
+
+/// Generate with the codex CLI (the codex base's native path).
+pub fn generate_codex(prompt: &str) -> Result<GenOutput> {
+    let (text, model) = codex_text(prompt)?;
+    Ok(GenOutput {
+        manifest: parse_manifest(&text)?,
+        model,
+        provider: "codex-cli".to_string(),
+    })
+}
+
 /// One LLM completion → raw text, respecting OPENFAB_LLM (claude default, or dashscope).
 /// Returns (text, model, provider). Used for spec authoring (not file generation).
 pub fn complete(prompt: &str) -> Result<(String, String, String)> {
+    complete_with(prompt, None)
+}
+
+/// Like `complete`, but with an optional per-call model override (else the env default).
+/// The override only applies to the OpenAI-compatible providers (ollama/dashscope); the
+/// claude CLI keeps its own `OPENFAB_CLAUDE_MODEL`.
+pub fn complete_with(prompt: &str, model: Option<&str>) -> Result<(String, String, String)> {
     match std::env::var("OPENFAB_LLM").unwrap_or_default().as_str() {
         "dashscope" | "qwen" => {
-            let (t, m) = dashscope_text(prompt)?;
+            let (t, m) = dashscope_text(prompt, model)?;
             Ok((t, m, "dashscope".to_string()))
+        }
+        "ollama" => {
+            let (t, m) = ollama_text(prompt, model)?;
+            Ok((t, m, "ollama".to_string()))
         }
         _ => {
             let (t, m) = claude_text(prompt)?;
@@ -149,19 +215,72 @@ pub fn complete(prompt: &str) -> Result<(String, String, String)> {
 
 /// Generate via the env-selected bridge backend (used by framework bases when their
 /// native runtime isn't connected). Honest: the caller labels the run "bridged".
-pub fn generate_bridge(prompt: &str) -> Result<GenOutput> {
+/// `model` is an optional per-run override for the ollama/dashscope providers.
+pub fn generate_bridge(prompt: &str, model: Option<&str>) -> Result<GenOutput> {
     match std::env::var("OPENFAB_LLM").unwrap_or_default().as_str() {
-        "dashscope" | "qwen" => generate_dashscope(prompt),
+        "dashscope" | "qwen" => generate_dashscope(prompt, model),
+        "ollama" => generate_ollama(prompt, model),
         _ => generate_claude(prompt),
     }
 }
 
+/// Resolve the Ollama model: explicit per-run override → `OPENFAB_OLLAMA_MODEL` → default.
+fn ollama_model(override_: Option<&str>) -> String {
+    override_
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("OPENFAB_OLLAMA_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "llama3.1".to_string())
+}
+
+/// List the models available on the configured Ollama endpoint (OpenAI-compatible
+/// `/v1/models`). Uses `OPENFAB_OLLAMA_KEY` if set (cloud). Returns ids, sorted. The key
+/// stays server-side — this is what the UI's model picker is populated from.
+pub fn list_ollama_models() -> Result<Vec<String>> {
+    let base = std::env::var("OPENFAB_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let url = format!("{}/v1/models", base.trim_end_matches('/'));
+    let mut args = vec!["-sS".to_string(), url.clone()];
+    if let Ok(key) = std::env::var("OPENFAB_OLLAMA_KEY") {
+        if !key.is_empty() {
+            args.push("-H".to_string());
+            args.push(format!("Authorization: Bearer {key}"));
+        }
+    }
+    let stdout = run_capture("curl", &args, timeout_secs())
+        .with_context(|| format!("listing models from {url}"))?;
+    #[derive(Deserialize)]
+    struct ModelList {
+        data: Vec<ModelId>,
+    }
+    #[derive(Deserialize)]
+    struct ModelId {
+        id: String,
+    }
+    let list: ModelList = serde_json::from_str(&stdout)
+        .with_context(|| format!("model list was not JSON:\n{stdout}"))?;
+    let mut ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
+    ids.sort();
+    Ok(ids)
+}
+
 /// Call Qwen via the DashScope OpenAI-compatible API and return raw text + model.
-fn dashscope_text(prompt: &str) -> Result<(String, String)> {
+fn dashscope_text(prompt: &str, model_override: Option<&str>) -> Result<(String, String)> {
     let key = std::env::var("DASHSCOPE_API_KEY")
         .map_err(|_| anyhow::anyhow!("OPENFAB_LLM=dashscope but DASHSCOPE_API_KEY is not set"))?;
-    let model =
-        std::env::var("OPENFAB_DASHSCOPE_MODEL").unwrap_or_else(|_| "qwen-plus".to_string());
+    let model = model_override
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("OPENFAB_DASHSCOPE_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "qwen-plus".to_string());
     let url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
     let body = serde_json::json!({
         "model": model,
@@ -194,12 +313,69 @@ fn dashscope_text(prompt: &str) -> Result<(String, String)> {
 }
 
 /// Generate with Qwen via DashScope.
-pub fn generate_dashscope(prompt: &str) -> Result<GenOutput> {
-    let (text, model) = dashscope_text(prompt)?;
+pub fn generate_dashscope(prompt: &str, model: Option<&str>) -> Result<GenOutput> {
+    let (text, model) = dashscope_text(prompt, model)?;
     Ok(GenOutput {
         manifest: parse_manifest(&text)?,
         model,
         provider: "dashscope".to_string(),
+    })
+}
+
+/// Call a LOCAL model via Ollama's OpenAI-compatible API (no API key, no network egress).
+/// Endpoint `OPENFAB_OLLAMA_URL` (default http://localhost:11434), model
+/// `OPENFAB_OLLAMA_MODEL` (default llama3.1). The same OpenAI envelope as DashScope, so a
+/// hosted Ollama Cloud endpoint works too — point `OPENFAB_OLLAMA_URL` at it and pass a key
+/// via `OPENFAB_OLLAMA_KEY`.
+fn ollama_text(prompt: &str, model_override: Option<&str>) -> Result<(String, String)> {
+    let base = std::env::var("OPENFAB_OLLAMA_URL")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+    let model = ollama_model(model_override);
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": false,
+        "response_format": {"type": "json_object"}
+    })
+    .to_string();
+    let mut args = vec![
+        "-sS".to_string(),
+        "-X".to_string(),
+        "POST".to_string(),
+        url.clone(),
+        "-H".to_string(),
+        "Content-Type: application/json".to_string(),
+    ];
+    // Optional bearer key (only needed for a hosted/cloud Ollama endpoint).
+    if let Ok(key) = std::env::var("OPENFAB_OLLAMA_KEY") {
+        if !key.is_empty() {
+            args.push("-H".to_string());
+            args.push(format!("Authorization: Bearer {key}"));
+        }
+    }
+    args.push("-d".to_string());
+    args.push(body);
+    let stdout = run_capture("curl", &args, timeout_secs())
+        .with_context(|| format!("calling Ollama at {url} — is `ollama serve` running?"))?;
+    let env: OpenAiEnvelope = serde_json::from_str(&stdout)
+        .with_context(|| format!("Ollama reply was not JSON:\n{stdout}"))?;
+    let content = env
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .context("Ollama returned no choices (model not pulled? try `ollama pull <model>`)")?;
+    Ok((content, model))
+}
+
+/// Generate a file manifest with an Ollama model (local or cloud).
+pub fn generate_ollama(prompt: &str, model: Option<&str>) -> Result<GenOutput> {
+    let (text, model) = ollama_text(prompt, model)?;
+    Ok(GenOutput {
+        manifest: parse_manifest(&text)?,
+        model,
+        provider: "ollama".to_string(),
     })
 }
 
@@ -229,7 +405,7 @@ fn default_app_dir() -> String {
 
 /// Ask the LLM to author a build spec (incl. acceptance criteria) from an NL intent.
 /// Returns (spec, model, provider).
-pub fn author_spec(intent: &str) -> Result<(AuthoredSpec, String, String)> {
+pub fn author_spec(intent: &str, model: Option<&str>) -> Result<(AuthoredSpec, String, String)> {
     let prompt = format!(
         r#"You are OpenFab's SPEC AUTHOR. Turn the user's natural-language request into a
 machine-checkable build spec. Respond with ONLY a JSON object (no prose, no code fences):
@@ -250,16 +426,22 @@ Rules for `acceptance` (this is the contract the built software is verified agai
   blocking process in a check — it hangs the sandbox.
 - CLI app: run it with arguments and assert its output (it must exit on its own).
 - Web app OR server: verify it STRUCTURALLY only — the entry file exists; a server reads
-  the PORT env var; the key routes/handlers/functions/elements are present (use `grep -F`
-  fixed strings). Do NOT launch it. The human verifies the *running* app in a browser via
-  the "Run the app" button and approves — that is the behavioural check for UIs/servers.
+  the PORT env var; the key routes/handlers/functions are present. Do NOT launch it. The
+  human verifies the *running* app in a browser via the "Run the app" button and approves —
+  that is the behavioural check for UIs/servers.
+- HTML/element checks MUST be attribute-order independent. NEVER grep a whole tag with a
+  trailing `>` (e.g. `<textarea id="x">`) — real elements carry other attributes, so the
+  literal almost never matches. Match the SMALLEST stable token instead, e.g.
+  `grep -F 'id="entry-input"' app/index.html` or `grep -F '<textarea'`. Only assert ids,
+  classes, function names, or selectors that YOU require the builder to use — do not invent
+  a class/id the intent never mentioned and then demand it.
 - Paths are relative to the repo root and live under target_dir (e.g. "app/...").
 
 USER REQUEST:
 {intent}"#,
         intent = intent
     );
-    let (text, model, provider) = complete(&prompt)?;
+    let (text, model, provider) = complete_with(&prompt, model)?;
     let spec = parse_authored_spec(&text)?;
     Ok((spec, model, provider))
 }

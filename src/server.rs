@@ -28,6 +28,7 @@ use crate::core::spec::Spec;
 use crate::core::trust::Policy;
 use crate::ops;
 use crate::runstate;
+use crate::spec_cycle::RunMode;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -105,6 +106,11 @@ fn route(
 
         // --- catalog ---
         (Method::Get, ["api", "bases"]) => Ok(json_resp(200, &json!(registry::list_bases()))),
+        // Bring a base's native runtime up (so the user can run it for real, not bridged).
+        (Method::Post, ["api", "base", id, "launch"]) => match registry::launch_base(id) {
+            Ok(outcome) => Ok(json_resp(200, &json!(outcome))),
+            Err(e) => Ok(json_resp(400, &json!({ "error": e.to_string() }))),
+        },
         (Method::Get, ["api", "forges"]) => Ok(json_resp(200, &json!(registry::list_forges()))),
         (Method::Get, ["api", "maintainers"]) => Ok(json_resp(
             200,
@@ -127,11 +133,22 @@ fn route(
         (Method::Post, ["api", "author"]) => {
             let body = body_json(req)?;
             let intent = body["intent"].as_str().unwrap_or("").to_string();
-            let (spec, model, provider) = ops::author_spec(&intent)?;
+            let author_model = body["author_model"].as_str().filter(|s| !s.is_empty());
+            let (spec, model, provider) = ops::author_spec(&intent, author_model)?;
             Ok(json_resp(
                 200,
                 &json!({ "spec": spec, "model": model, "provider": provider }),
             ))
+        }
+        // Models available on the configured Ollama endpoint (key stays server-side).
+        (Method::Get, ["api", "models"]) => {
+            match crate::adapters::llm_backend::list_ollama_models() {
+                Ok(models) => Ok(json_resp(200, &json!({ "models": models }))),
+                Err(e) => Ok(json_resp(
+                    200,
+                    &json!({ "models": [], "error": e.to_string() }),
+                )),
+            }
         }
 
         // --- runs ---
@@ -191,6 +208,28 @@ fn route(
             Ok(json_resp(200, &json!({ "stopped": true })))
         }
         (Method::Post, ["api", "runs", id, "feedback"]) => feedback(id, req, state),
+        (Method::Post, ["api", "runs", id, "promote"]) => promote_run(id, state),
+
+        // --- apps (each intent = a new app; refines are versions of it) ---
+        (Method::Get, ["api", "apps"]) => Ok(json_resp(200, &json!(ops::apps(&state.repo)?))),
+        (Method::Delete, ["api", "apps", id]) => {
+            let _g = state.lock.lock().unwrap();
+            Ok(json_resp(
+                200,
+                &json!({ "deleted": ops::delete_app(&state.repo, id)? }),
+            ))
+        }
+        (Method::Post, ["api", "apps", id, "open"]) => open_app(id, state),
+        // Open ALL of a run's artifacts (source + provenance + run-state) in the file manager.
+        (Method::Post, ["api", "runs", id, "open"]) => {
+            let _g = state.lock.lock().unwrap();
+            let dir = ops::export_run_bundle(&state.repo, id)?;
+            let _ = Command::new("open").arg(&dir).status();
+            Ok(json_resp(
+                200,
+                &json!({ "path": dir.display().to_string() }),
+            ))
+        }
 
         // --- reputation ---
         (Method::Get, ["api", "reputation"]) => reputation_view(state),
@@ -211,6 +250,27 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
     let forge = body["forge"].as_str().unwrap_or("github").to_string();
     let forge_name = body["forge_name"].as_str().map(String::from);
     let gate = body["gate"].as_str().unwrap_or("solo").to_string();
+    let mode = if body["mode"].as_str() == Some("draft") {
+        RunMode::Draft
+    } else {
+        RunMode::Release
+    };
+    let allow_bridged = body["allow_bridged"].as_bool().unwrap_or(false);
+    let author_model = body["author_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let base_model = body["base_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    // Pre-flight: if the chosen base's native runtime isn't running and the user hasn't
+    // opted into the bridged stand-in, refuse up-front with a structured response so the UI
+    // can offer to launch it (or run bridged) — never a silent substitution (R14).
+    if let Some(resp) = base_unavailable_response(&base, allow_bridged) {
+        return Ok(resp);
+    }
 
     // Natural-language path: author + build in the background.
     if let Some(intent) = body["intent"]
@@ -222,6 +282,7 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
         seed_status(state, &run_id, "authoring spec…", "authoring");
         let st = state.clone();
         let (rid, b, f, fname, g) = (run_id.clone(), base, forge, forge_name, gate);
+        let (am, bm) = (author_model, base_model);
         thread::spawn(move || {
             let _guard = st.lock.lock().unwrap();
             if let Err(e) = ops::build(
@@ -232,6 +293,10 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
                 &f,
                 fname,
                 &g,
+                mode,
+                allow_bridged,
+                am.as_deref(),
+                bm,
                 &st.policy,
             ) {
                 fail_run(&st, &rid, "authoring", &e);
@@ -255,9 +320,44 @@ fn start_run(req: &mut Request, state: &Arc<State>) -> Result<Response<std::io::
             run_id: Some(run_id.clone()),
             gate_mode: gate,
             authored_by: None,
+            mode,
+            allow_bridged,
+            base_model,
         },
     );
     Ok(json_resp(200, &json!({ "run_id": run_id })))
+}
+
+/// If `base` is a framework whose native runtime is unreachable and the user did not opt
+/// into bridging, return a 409 with everything the UI needs to offer Launch / bridged.
+/// Returns `None` when the run may proceed (base reachable, bridging allowed, or claude).
+fn base_unavailable_response(
+    base: &str,
+    allow_bridged: bool,
+) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+    if allow_bridged {
+        return None;
+    }
+    let st = registry::base_status(base);
+    if !st.is_framework || st.reachable {
+        return None;
+    }
+    let display = base; // id doubles as a fine label here
+    Some(json_resp(
+        409,
+        &json!({
+            "error_kind": "base_unavailable",
+            "base": st.id,
+            "display": display,
+            "launchable": st.launchable,
+            "endpoint": st.endpoint,
+            "hint": if st.launchable {
+                format!("{display} is not running. Launch it, or run with the bridged stand-in.")
+            } else {
+                format!("{display} is not running and has no bundled launcher. Start its adapter, or run bridged.")
+            },
+        }),
+    ))
 }
 
 /// Refine: re-author the spec from the human's feedback and rebuild (v→v+1).
@@ -269,18 +369,83 @@ fn feedback(
     let body = body_json(req)?;
     let note = body["note"].as_str().unwrap_or("").to_string();
     let base = body["base"].as_str().unwrap_or("claude").to_string();
+    let mode = if body["mode"].as_str() == Some("draft") {
+        RunMode::Draft
+    } else {
+        RunMode::Release
+    };
+    let allow_bridged = body["allow_bridged"].as_bool().unwrap_or(false);
+    let author_model = body["author_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let base_model = body["base_model"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(resp) = base_unavailable_response(&base, allow_bridged) {
+        return Ok(resp);
+    }
     let run_id = ops::reserve_refine_run_id(&state.repo, id)?;
 
     seed_status(state, &run_id, "re-authoring spec…", "authoring");
     let st = state.clone();
     let (rid, prior, n, b) = (run_id.clone(), id.to_string(), note, base);
+    let (am, bm) = (author_model, base_model);
     thread::spawn(move || {
         let _guard = st.lock.lock().unwrap();
-        if let Err(e) = ops::refine(&st.repo, &prior, &n, rid.clone(), &b, &st.policy) {
+        if let Err(e) = ops::refine(
+            &st.repo,
+            &prior,
+            &n,
+            rid.clone(),
+            &b,
+            mode,
+            allow_bridged,
+            am.as_deref(),
+            bm,
+            &st.policy,
+        ) {
             fail_run(&st, &rid, "re-authoring", &e);
         }
     });
     Ok(json_resp(200, &json!({ "run_id": run_id })))
+}
+
+/// Promote a draft to a signed release — the full ceremony, run in the background so the
+/// UI streams it (the new release run id is returned for polling).
+fn promote_run(id: &str, state: &Arc<State>) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
+    let run_id = ops::reserve_promote_run_id(&state.repo, id)?;
+    seed_status(
+        state,
+        &run_id,
+        "promoting draft → signed release…",
+        "queued",
+    );
+    let st = state.clone();
+    let (rid, draft) = (run_id.clone(), id.to_string());
+    thread::spawn(move || {
+        let _g = st.lock.lock().unwrap();
+        if let Err(e) = ops::promote(&st.repo, &draft, rid.clone(), &st.policy) {
+            fail_run(&st, &rid, "promote", &e);
+        }
+    });
+    Ok(json_resp(200, &json!({ "run_id": run_id })))
+}
+
+/// Open an app's source folder in the OS file manager (macOS Finder via `open`).
+fn open_app(id: &str, state: &Arc<State>) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
+    let _g = state.lock.lock().unwrap();
+    let app = ops::apps(&state.repo)?
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| anyhow::anyhow!("no such app"))?;
+    let dir = ops::export_app_dir(&state.repo, &app.latest_run)?;
+    let _ = Command::new("open").arg(&dir).status();
+    Ok(json_resp(
+        200,
+        &json!({ "path": dir.display().to_string() }),
+    ))
 }
 
 fn spawn_run(state: Arc<State>, req: ops::RunRequest) {
@@ -401,14 +566,11 @@ fn plan_launch(repo: &Path, port: u16) -> Option<(Vec<String>, PathBuf, String)>
         ("app/index.js", "node"),
         ("index.js", "node"),
     ];
-    for (f, runner) in candidates {
-        let p = repo.join(f);
-        if p.exists() && looks_like_server(&p) {
-            return Some((vec![runner.into(), f.into()], repo.to_path_buf(), f.into()));
-        }
-    }
-    // Static site: serve the directory that holds index.html (client-side SPAs).
-    for dir in ["app", "."] {
+    // Static site FIRST: most generated web apps are client-side SPAs (index.html + js +
+    // css). Serving the dir that holds index.html is robust and avoids running a stray /
+    // broken generated server file when a perfectly good static entry exists (the cause of
+    // a "Run the app" 404 when the model emitted both an index.html and a server.js).
+    for dir in ["app", "app/public", "public", "."] {
         if repo.join(dir).join("index.html").exists() {
             let label = if dir == "." {
                 "index.html".into()
@@ -427,6 +589,13 @@ fn plan_launch(repo: &Path, port: u16) -> Option<(Vec<String>, PathBuf, String)>
                 repo.join(dir),
                 label,
             ));
+        }
+    }
+    // No static entry — fall back to an actual server file (reads PORT), e.g. an API app.
+    for (f, runner) in candidates {
+        let p = repo.join(f);
+        if p.exists() && looks_like_server(&p) {
+            return Some((vec![runner.into(), f.into()], repo.to_path_buf(), f.into()));
         }
     }
     None

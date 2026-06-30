@@ -51,11 +51,12 @@ impl Default for Policy {
             n_of_m: NofM { n: 2, m: 2 },
             allowed_bases: vec![
                 "claude-cli".into(),
-                "mock".into(),
+                "codex-cli".into(),
                 "agentscope".into(),
                 "hiclaw".into(),
                 "agent-chat".into(),
                 "openhands".into(),
+                "attest".into(),
             ],
             sandbox: SandboxPolicy {
                 allow_command_prefixes: vec![
@@ -282,7 +283,7 @@ mod tests {
                 app_name: "demo".into(),
                 source_bundle_sha256: "abc".into(),
                 agent_did: fab.did(),
-                base_name: "mock".into(),
+                base_name: "codex-cli".into(),
                 model: "mock-1".into(),
                 prompt: "p".into(),
                 params: serde_json::json!({}),
@@ -294,6 +295,7 @@ mod tests {
                 }],
                 materials: vec![],
                 acceptance_passed: true,
+                acceptance: vec![],
             },
             fab,
         )
@@ -311,7 +313,7 @@ mod tests {
                 att: &att,
                 fab_allowlist: &[fab.did()],
                 maintainer_allowlist: &[],
-                base_name: "mock",
+                base_name: "codex-cli",
                 acceptance_passed: true,
             },
         );
@@ -334,7 +336,7 @@ mod tests {
                 att: &att,
                 fab_allowlist: &[fab.did()],
                 maintainer_allowlist: &[alice.did(), bob.did()],
-                base_name: "mock",
+                base_name: "codex-cli",
                 acceptance_passed: true,
             },
         );
@@ -355,7 +357,7 @@ mod tests {
                 att: &att,
                 fab_allowlist: &[fab.did()],
                 maintainer_allowlist: &[alice.did()],
-                base_name: "mock",
+                base_name: "codex-cli",
                 acceptance_passed: true,
             },
         );
@@ -373,7 +375,7 @@ mod tests {
                 att: &att,
                 fab_allowlist: &[], // not allowlisted
                 maintainer_allowlist: &[],
-                base_name: "mock",
+                base_name: "codex-cli",
                 acceptance_passed: true,
             },
         );

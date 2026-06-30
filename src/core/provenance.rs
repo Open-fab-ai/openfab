@@ -19,7 +19,7 @@ use crate::core::sha256_hex;
 use crate::core::timeutil;
 
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
-pub const PREDICATE_TYPE: &str = "https://openfab.ai/attestation/generation/v0.1";
+pub const PREDICATE_TYPE: &str = "https://open-fab.ai/attestation/generation/v0.1";
 
 /// in-toto subject: the thing the attestation is about (here: the generated app's
 /// frozen source bundle).
@@ -68,6 +68,20 @@ pub struct Material {
     pub sha256: Option<String>,
 }
 
+/// One acceptance check, embedded in the signed predicate so the **frozen contract**
+/// travels with the artifact (any clone, any forge, offline) — not just the pass/fail
+/// verdict. This is what makes `reproduce` forge-agnostic: the verifier re-runs these
+/// exact commands, no local run-state needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptanceCheck {
+    pub id: String,
+    /// The shell command (exit 0 = pass).
+    pub check: String,
+    pub must_pass: bool,
+    /// The result recorded at build time (the verifier re-derives this independently).
+    pub passed: bool,
+}
+
 /// Recorded human sign-off (folded into the predicate at acceptance time).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignoffRecord {
@@ -87,6 +101,10 @@ pub struct OpenfabGeneration {
     pub generated: Vec<GeneratedRange>,
     pub materials: Vec<Material>,
     pub acceptance_passed: bool,
+    /// The frozen acceptance contract (the actual check commands), embedded so the
+    /// artifact is self-verifying off any forge. Empty on pre-v0.2 attestations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<AcceptanceCheck>,
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signoffs: Vec<SignoffRecord>,
@@ -136,6 +154,7 @@ pub struct GenerationInput {
     pub generated: Vec<GeneratedRange>,
     pub materials: Vec<Material>,
     pub acceptance_passed: bool,
+    pub acceptance: Vec<AcceptanceCheck>,
 }
 
 impl Attestation {
@@ -157,6 +176,7 @@ impl Attestation {
             generated: input.generated,
             materials: input.materials,
             acceptance_passed: input.acceptance_passed,
+            acceptance: input.acceptance,
             timestamp: timeutil::iso_now(),
             signoffs: vec![],
         };
@@ -332,6 +352,7 @@ mod tests {
             }],
             materials: vec![],
             acceptance_passed: true,
+            acceptance: vec![],
         }
     }
 

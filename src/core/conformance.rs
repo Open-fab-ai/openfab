@@ -150,6 +150,7 @@ mod tests {
                 }],
                 materials: vec![],
                 acceptance_passed: true,
+                acceptance: vec![],
             },
             fab,
         )

@@ -78,6 +78,7 @@ mod tests {
                 }],
                 materials: vec![],
                 acceptance_passed: passed,
+                acceptance: vec![],
             },
             fab,
         )

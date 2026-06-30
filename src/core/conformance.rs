@@ -175,6 +175,37 @@ pub fn check(att: &Attestation, require_signoff: bool) -> ConformanceReport {
         );
     }
 
+    // C14 — cross-model adversarial gate. Applies only when a panel ran (verdicts present).
+    // Adversarial-strict: any non-pass verdict from any model family fails it.
+    if let Some(cm) = &pred.cross_model_verdicts {
+        let objections: Vec<String> = cm
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|v| v.get("verdict").and_then(|s| s.as_str()) != Some("pass"))
+                    .map(|v| {
+                        format!(
+                            "{}:{}",
+                            v.get("model_family")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("?"),
+                            v.get("scenario").and_then(|s| s.as_str()).unwrap_or("?")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        r.push(
+            "C14.cross-model-adversarial",
+            objections.is_empty(),
+            if objections.is_empty() {
+                "all model families pass (no cross-model objections)".into()
+            } else {
+                format!("model-family objection(s): {}", objections.join(", "))
+            },
+        );
+    }
+
     r
 }
 
@@ -216,6 +247,7 @@ mod tests {
                 run_log_ref: None,
                 requirements_sha256: None,
                 qa_report: None,
+                cross_model_verdicts: None,
             },
             fab,
         )
@@ -313,6 +345,7 @@ mod tests {
                 run_log_ref: None,
                 requirements_sha256: None,
                 qa_report: None,
+                cross_model_verdicts: None,
             },
             &fab,
         )

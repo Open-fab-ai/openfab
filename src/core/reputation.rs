@@ -83,6 +83,7 @@ mod tests {
                 run_log_ref: None,
                 requirements_sha256: None,
                 qa_report: None,
+                cross_model_verdicts: None,
             },
             fab,
         )

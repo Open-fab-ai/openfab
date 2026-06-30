@@ -490,6 +490,37 @@ pub fn parse_review_decisions(json: &serde_json::Value) -> Vec<ReviewDecision> {
         .unwrap_or_default()
 }
 
+/// One model family's verdict on one scenario (cross-model adversarial panel, PPT S14 pillar 2).
+#[derive(Debug, Clone)]
+pub struct CrossModelVerdict {
+    pub model_family: String,
+    pub scenario: String,
+    pub verdict: String, // "pass" | "fail"
+}
+
+/// Adversarial-strict merge: blocked if ANY family returns a non-pass verdict for ANY scenario
+/// (two model families don't share blind spots — one's bug is caught by the other). An empty set
+/// is not blocking (nothing to object).
+pub fn cross_model_blocked(verdicts: &[CrossModelVerdict]) -> bool {
+    verdicts.iter().any(|v| v.verdict != "pass")
+}
+
+/// Serialize per-family verdicts for the signed provenance predicate.
+pub fn cross_model_verdicts_json(verdicts: &[CrossModelVerdict]) -> serde_json::Value {
+    serde_json::Value::Array(
+        verdicts
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "model_family": v.model_family,
+                    "scenario": v.scenario,
+                    "verdict": v.verdict,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Extract per-scenario verdicts from an `agent-spec lifecycle --format json` report, for
 /// recording in the signed provenance predicate.
 pub fn verdicts_from_lifecycle(json: &serde_json::Value) -> Vec<ScenarioVerdict> {
@@ -1031,6 +1062,55 @@ mod tests {
         assert_eq!(items[0].scenario_name, "code is clean");
         assert_eq!(items[0].intent, "well-structured and idiomatic");
         assert_eq!(items[1].scenario_name, "handles edge");
+    }
+
+    #[test]
+    fn test_cross_model_any_block() {
+        let v = vec![
+            CrossModelVerdict {
+                model_family: "claude".into(),
+                scenario: "s1".into(),
+                verdict: "pass".into(),
+            },
+            CrossModelVerdict {
+                model_family: "codex".into(),
+                scenario: "s1".into(),
+                verdict: "fail".into(),
+            },
+        ];
+        assert!(cross_model_blocked(&v)); // codex objected → blocked
+    }
+
+    #[test]
+    fn test_cross_model_all_pass() {
+        let v = vec![
+            CrossModelVerdict {
+                model_family: "claude".into(),
+                scenario: "s1".into(),
+                verdict: "pass".into(),
+            },
+            CrossModelVerdict {
+                model_family: "codex".into(),
+                scenario: "s1".into(),
+                verdict: "pass".into(),
+            },
+        ];
+        assert!(!cross_model_blocked(&v));
+        assert!(!cross_model_blocked(&[])); // nothing to object
+    }
+
+    #[test]
+    fn test_cross_model_verdicts_json() {
+        let v = vec![CrossModelVerdict {
+            model_family: "claude".into(),
+            scenario: "adds correctly".into(),
+            verdict: "pass".into(),
+        }];
+        let j = cross_model_verdicts_json(&v);
+        let arr = j.as_array().unwrap();
+        assert_eq!(arr[0]["model_family"], "claude");
+        assert_eq!(arr[0]["scenario"], "adds correctly");
+        assert_eq!(arr[0]["verdict"], "pass");
     }
 
     #[test]

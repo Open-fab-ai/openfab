@@ -115,6 +115,9 @@ pub struct OpenfabGeneration {
     /// Layered-QA report (coverage/mutation/fuzz) as signed evidence; None for Fast tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qa_report: Option<serde_json::Value>,
+    /// Per-model-family adversarial verdicts (cross-model panel); None when not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_model_verdicts: Option<serde_json::Value>,
 }
 
 /// An in-toto Statement v1 with the OpenFab generation predicate.
@@ -167,6 +170,7 @@ pub struct GenerationInput {
     pub run_log_ref: Option<String>,
     pub requirements_sha256: Option<String>,
     pub qa_report: Option<serde_json::Value>,
+    pub cross_model_verdicts: Option<serde_json::Value>,
 }
 
 impl Attestation {
@@ -195,6 +199,7 @@ impl Attestation {
             run_log_ref: input.run_log_ref,
             requirements_sha256: input.requirements_sha256,
             qa_report: input.qa_report,
+            cross_model_verdicts: input.cross_model_verdicts,
         };
         let statement = Statement {
             _type: STATEMENT_TYPE.to_string(),
@@ -373,6 +378,7 @@ mod tests {
             run_log_ref: None,
             requirements_sha256: None,
             qa_report: None,
+            cross_model_verdicts: None,
         }
     }
 

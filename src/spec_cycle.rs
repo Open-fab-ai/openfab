@@ -392,6 +392,7 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             run_log_ref: None,
             requirements_sha256,
             qa_report: qa_report_json,
+            cross_model_verdicts: None,
         },
         cfg.fab,
     )?;

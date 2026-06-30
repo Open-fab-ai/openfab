@@ -49,6 +49,30 @@ const PORT = Number(process.env.BRIDGE_PORT || 8077);
 const AC = (process.env.AGENTCHAT_URL || 'http://127.0.0.1:8090').replace(/\/$/, '');
 const TOKEN = process.env.AGENTCHAT_API_TOKEN || '';
 const ASSIGNEE = process.env.BRIDGE_ASSIGNEE || 'wf_implementer';
+// Phase 6: capability-aware dispatch. When a role is set (env or per-task), ask the matrix-Agent
+// scheduler (POST /api/dispatch) to pick the agent by (role, capability) instead of the fixed
+// assignee. Falls back to ASSIGNEE if the scheduler is unavailable or queues.
+const BRIDGE_ROLE = process.env.BRIDGE_ROLE || null;
+const BRIDGE_CAPABILITY = process.env.BRIDGE_CAPABILITY || null;
+
+async function resolveAssignee(body) {
+  const role = body.role || BRIDGE_ROLE;
+  if (!role) return { assignee: ASSIGNEE, scheduled: false };
+  try {
+    const r = await acFetch('/api/dispatch', {
+      method: 'POST',
+      body: JSON.stringify({ role, capability: body.capability || BRIDGE_CAPABILITY || undefined }),
+    });
+    if (r?.status === 'routed' && r.agent) {
+      log(`scheduler routed ${role}/${r.tier} → ${r.agent}`);
+      return { assignee: r.agent, scheduled: true };
+    }
+    log(`scheduler queued ${role} (${r?.status}); falling back to ${ASSIGNEE}`);
+  } catch (e) {
+    log(`scheduler unavailable (${e.message}); using ${ASSIGNEE}`);
+  }
+  return { assignee: ASSIGNEE, scheduled: false };
+}
 const OPERATOR = process.env.BRIDGE_OPERATOR || 'operator';
 // The implementer replies with a `task_result` message addressed to SELF. The HTTP
 // `/api/dm/:name/history` endpoint doesn't surface messages to a service agent, so we read
@@ -150,6 +174,10 @@ function instruction(body) {
 }
 
 async function createTask(body) {
+  // 0. resolve the assignee — the capability scheduler picks one by (role, capability), or the
+  //    fixed assignee (graceful fallback).
+  const { assignee, scheduled } = await resolveAssignee(body);
+
   // 1. create the agent-chat task
   const created = await acFetch('/api/tasks', {
     method: 'POST',
@@ -158,7 +186,7 @@ async function createTask(body) {
       description: body.intent,
       priority: 'p1',
       granularity: 'task',
-      assignee: ASSIGNEE,
+      assignee,
       created_by: SELF,
       labels: ['openfab'],
     }),
@@ -172,7 +200,7 @@ async function createTask(body) {
     method: 'POST',
     body: JSON.stringify({
       from: SELF,
-      to: ASSIGNEE,
+      to: assignee,
       type: 'request',
       summary: `Implement ${body.spec_ref}`,
       full: prompt,
@@ -187,7 +215,7 @@ async function createTask(body) {
   });
 
   const id = `of-${acTaskId}`;
-  tasks.set(id, { acTaskId, room: body.room, prompt });
+  tasks.set(id, { acTaskId, room: body.room, prompt, assignee, scheduled, released: false });
   return id;
 }
 
@@ -219,19 +247,33 @@ function harvestResult(acTaskId) {
   return null;
 }
 
+// Release a scheduler-reserved agent once its task is done (frees it + drains the queue).
+async function releaseIfScheduled(id) {
+  const t = tasks.get(id);
+  if (!t || !t.scheduled || t.released) return;
+  t.released = true;
+  try {
+    await acFetch('/api/dispatch/release', { method: 'POST', body: JSON.stringify({ agent: t.assignee }) });
+    log(`released scheduled agent ${t.assignee}`);
+  } catch (e) {
+    log(`release failed for ${t.assignee}: ${e.message}`);
+  }
+}
+
 async function getTask(id) {
   const acTaskId = id.startsWith('of-') ? id.slice(3) : id;
   // The implementer reports via a `task_result` message, not by transitioning the task —
   // so harvest the message FIRST, regardless of the agent-chat task status.
   const harvested = harvestResult(acTaskId);
   if (harvested && (Object.keys(harvested.files).length || (harvested.changed_paths || []).length)) {
+    await releaseIfScheduled(id);
     return { status: 'done', ...harvested };
   }
   // No result yet: surface failed only if the task itself failed; else keep running.
   try {
     const acTask = await acFetch(`/api/tasks/${encodeURIComponent(acTaskId)}`);
     const status = acTask?.status || acTask?.task?.status || 'running';
-    if (status === 'failed') return { status: 'failed', error: 'agent-chat task failed' };
+    if (status === 'failed') { await releaseIfScheduled(id); return { status: 'failed', error: 'agent-chat task failed' }; }
   } catch {
     /* transient: keep running */
   }

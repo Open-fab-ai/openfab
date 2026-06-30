@@ -188,6 +188,10 @@ pub fn build_task_payload(task: &TaskCard, room: &str) -> serde_json::Value {
         "room": room,
         "allow": allow,
         "requirements": requirements,
+        // Phase 6: ask the matrix-Agent scheduler for a "coding" agent at this capability (the
+        // Bridge falls back to the fixed assignee if the scheduler isn't available).
+        "role": "coding",
+        "capability": std::env::var("OPENFAB_TASK_CAPABILITY").ok(),
     });
     if workspace_shared() {
         base["mode"] = serde_json::json!("workspace");

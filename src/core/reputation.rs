@@ -82,6 +82,7 @@ mod tests {
                 agent_spec_verdicts: vec![],
                 run_log_ref: None,
                 requirements_sha256: None,
+                qa_report: None,
             },
             fab,
         )

@@ -319,6 +319,36 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             .unwrap_or(false)
     });
 
+    // 4b. Layered QA (PPT S11/S14 pillar 1): beyond the bound tests, run the configured tier's
+    // checks (coverage now; mutation/fuzz honest-skip). A QA failure blocks like a failed test;
+    // the report is signed into the provenance and gated by conformance C13.
+    let qa_tier = crate::adapters::qa::QaTier::from_env();
+    let qa_min_cov = std::env::var("OPENFAB_QA_MIN_COVERAGE")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let qa = crate::adapters::qa::run(&repo, qa_tier, qa_min_cov);
+    let qa_passed = qa.passed();
+    let qa_report_json = if matches!(qa_tier, crate::adapters::qa::QaTier::Fast) {
+        None
+    } else {
+        for o in &qa.outcomes {
+            let icon = match o.status {
+                crate::adapters::qa::QaStatus::Passed => "✅",
+                crate::adapters::qa::QaStatus::Failed => "❌",
+                crate::adapters::qa::QaStatus::Skipped => "⏭️",
+            };
+            tl.step(
+                base,
+                icon,
+                &format!("qa[{:?}] {} — {}", qa_tier, o.check, o.detail),
+            );
+        }
+        serde_json::to_value(&qa).ok()
+    };
+    // QA folds into machine acceptance: the build only passes verify if both hold.
+    let acceptance_passed = acceptance_passed && qa_passed;
+
     // 5. Build + sign provenance (in-toto/SLSA + openfab/generation predicate).
     let generated: Vec<GeneratedRange> = changed_files
         .iter()
@@ -361,6 +391,7 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             agent_spec_verdicts,
             run_log_ref: None,
             requirements_sha256,
+            qa_report: qa_report_json,
         },
         cfg.fab,
     )?;

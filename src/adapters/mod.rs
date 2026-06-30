@@ -16,5 +16,6 @@ pub mod forge_github;
 pub mod forge_local_git;
 pub mod forge_rest;
 pub mod llm_backend;
+pub mod qa;
 pub mod registry;
 pub mod sandbox;

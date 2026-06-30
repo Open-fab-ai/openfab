@@ -112,6 +112,9 @@ pub struct OpenfabGeneration {
     /// `wf_coordinator` requirements conversation). Makes requirements→spec→code traceable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements_sha256: Option<String>,
+    /// Layered-QA report (coverage/mutation/fuzz) as signed evidence; None for Fast tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qa_report: Option<serde_json::Value>,
 }
 
 /// An in-toto Statement v1 with the OpenFab generation predicate.
@@ -163,6 +166,7 @@ pub struct GenerationInput {
     pub agent_spec_verdicts: Vec<ScenarioVerdict>,
     pub run_log_ref: Option<String>,
     pub requirements_sha256: Option<String>,
+    pub qa_report: Option<serde_json::Value>,
 }
 
 impl Attestation {
@@ -190,6 +194,7 @@ impl Attestation {
             agent_spec_verdicts: input.agent_spec_verdicts,
             run_log_ref: input.run_log_ref,
             requirements_sha256: input.requirements_sha256,
+            qa_report: input.qa_report,
         };
         let statement = Statement {
             _type: STATEMENT_TYPE.to_string(),
@@ -367,6 +372,7 @@ mod tests {
             agent_spec_verdicts: vec![],
             run_log_ref: None,
             requirements_sha256: None,
+            qa_report: None,
         }
     }
 

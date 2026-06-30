@@ -151,6 +151,30 @@ pub fn check(att: &Attestation, require_signoff: bool) -> ConformanceReport {
         );
     }
 
+    // C13 — layered-QA gate. Applies only when a QA report is present (Full+ tier). The build
+    // fails C13 if any QA check Failed; Skipped (tool absent) does not fail it (honest absence).
+    if let Some(qa) = &pred.qa_report {
+        let failed: Vec<String> = qa
+            .get("outcomes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|o| o.get("status").and_then(|s| s.as_str()) == Some("failed"))
+                    .filter_map(|o| o.get("check").and_then(|c| c.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        r.push(
+            "C13.layered-qa",
+            failed.is_empty(),
+            if failed.is_empty() {
+                "layered QA checks pass (no failures)".into()
+            } else {
+                format!("QA check(s) failed: {}", failed.join(", "))
+            },
+        );
+    }
+
     r
 }
 
@@ -191,6 +215,7 @@ mod tests {
                 agent_spec_verdicts: verdicts,
                 run_log_ref: None,
                 requirements_sha256: None,
+                qa_report: None,
             },
             fab,
         )
@@ -287,6 +312,7 @@ mod tests {
                 agent_spec_verdicts: vec![],                // …but verdicts stripped
                 run_log_ref: None,
                 requirements_sha256: None,
+                qa_report: None,
             },
             &fab,
         )

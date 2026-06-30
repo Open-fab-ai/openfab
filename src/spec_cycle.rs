@@ -327,7 +327,11 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
-    let qa = crate::adapters::qa::run(&repo, qa_tier, qa_min_cov);
+    let qa_min_mut = std::env::var("OPENFAB_QA_MIN_MUTATION")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let qa = crate::adapters::qa::run(&repo, qa_tier, qa_min_cov, qa_min_mut);
     let qa_passed = qa.passed();
     let qa_report_json = if matches!(qa_tier, crate::adapters::qa::QaTier::Fast) {
         None

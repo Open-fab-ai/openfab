@@ -3,18 +3,51 @@
 
 const $ = (s) => document.querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
-const api = async (m, url, body) => {
+// The ops port: the JSON API is the contract. Two backends — the Rust server (fetch)
+// or OpsBrowser (the same routes implemented in-page). detectMode() picks one at boot.
+let MODE = "server";
+const serverBackend = async (m, url, body) => {
   const r = await fetch(url, { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { const e = new Error(j.error || j.hint || `${r.status}`); e.status = r.status; e.body = j; throw e; }
   return j;
 };
+const browserBackend = async (m, url, body) => {
+  try { return await OpsBrowser.dispatch(m, url, body); }
+  catch (e) { if (!e.status) e.status = 500; if (!e.body) e.body = { error: e.message }; throw e; }
+};
+let BACKEND = serverBackend;
+const api = (m, url, body) => BACKEND(m, url, body);
+
+async function detectMode() {
+  const forced = localStorage.getItem("openfab_mode"); // "server" | "browser" | null=auto
+  if (forced === "browser" || forced === "server") MODE = forced;
+  else {
+    try {
+      const c = new AbortController(); const t = setTimeout(() => c.abort(), 1500);
+      const r = await fetch("/api/bases", { signal: c.signal }); clearTimeout(t);
+      MODE = r.ok ? "server" : "browser";
+    } catch { MODE = "browser"; }
+  }
+  BACKEND = MODE === "server" ? serverBackend : browserBackend;
+  const b = $("#modebadge");
+  if (b) {
+    b.textContent = MODE === "server" ? "⚙ server fab" : "🌐 browser fab";
+    b.className = "modebadge " + MODE;
+    b.title = MODE === "server"
+      ? "Running against the local OpenFab server — full sandbox, git forge, all bases"
+      : "Running entirely in this browser — generation, js: checks, signing and verify are real; shell sandbox + git audit need the server";
+  }
+}
 function toast(msg, err) { const t = el("div", "toast" + (err ? " err" : ""), msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
 
 let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null, verify: null, draft: null };
 
 // ---------- init ----------
 async function init() {
+  await detectMode();
+  wireLlmCard();
+  wirePublish();
   $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
@@ -139,6 +172,7 @@ async function addMaintainer() {
 async function startRun(allowBridged) {
   const intent = $("#intent").value.trim();
   if (intent.length < 4) return toast("describe what you want to build first", true);
+  if (MODE === "browser" && !FabEngine.llmConfig()) { toggleDrawer(true); return toast("configure an LLM provider first (⚙ Settings)", true); }
   resetFlow();
   $("#baseprompt").classList.add("hidden");
   $("#run").disabled = true; $("#run").innerHTML = '<span class="spin"></span> the LLM is authoring the spec & building…';
@@ -465,6 +499,8 @@ async function loadArtifacts() {
   buildTryPresets();
   $("#tryout").style.display = "none";
   renderExplorer();
+  // Browser mode: publishing (download / forge push) is how a run becomes durable.
+  $("#publishrow").classList.toggle("hidden", MODE !== "browser");
   // Bring the just-revealed product step into view and focus its primary action so
   // the user doesn't have to scroll-hunt for it after generation completes.
   requestAnimationFrame(() => {
@@ -476,6 +512,50 @@ async function loadArtifacts() {
 function toggleDrawer(open) {
   $("#settingsdrawer").classList.toggle("hidden", !open);
   $("#drawerscrim").classList.toggle("hidden", !open);
+}
+
+// ---------- browser mode: LLM provider card + publish exits ----------
+function wireLlmCard() {
+  const sel = $("#llmprovider"); if (!sel || typeof FabEngine === "undefined") return;
+  sel.innerHTML = "";
+  FabEngine.PROVIDERS.forEach((p) => { const o = el("option"); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
+  const cur = FabEngine.llmConfig();
+  const fill = (p) => {
+    $("#llmbaseurl").value = (cur && cur.providerId === p.id ? cur.baseUrl : p.baseUrl) || "";
+    $("#llmproviderhint").textContent = p.browser
+      ? "browser-callable (CORS OK)"
+      : "⚠ this provider does not answer browser CORS today — calls from a page will be blocked; use OpenRouter or a proxy";
+  };
+  sel.onchange = () => fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value));
+  if (cur) { sel.value = cur.providerId || "custom"; $("#llmkey").value = cur.apiKey || ""; $("#llmmodel").value = cur.model || ""; }
+  fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value) || FabEngine.PROVIDERS[0]);
+  $("#llmsave").onclick = () => {
+    FabEngine.saveLlmConfig({ providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim() });
+    $("#llmstatus").textContent = "saved — stored only in this browser";
+    toast("LLM provider saved");
+    if (MODE === "browser") { loadBases(); loadModels(); }
+  };
+  if (MODE === "server") $("#llmstatus").textContent = "server mode uses the server's OPENFAB_LLM config — this card applies when running as a static page (browser mode).";
+}
+
+function wirePublish() {
+  const dl = $("#dlbundle"); if (!dl) return;
+  dl.onclick = () => { if (STATE.artifacts) ForgePush.download(STATE.artifacts); };
+  $("#ghpushbtn").onclick = () => $("#ghpushform").classList.toggle("hidden");
+  const saved = JSON.parse(localStorage.getItem("openfab_gh_target") || "{}");
+  $("#ghowner").value = saved.owner || ""; $("#ghrepo").value = saved.repo || ""; $("#ghbranch").value = saved.branch || "";
+  $("#ghpushgo").onclick = async () => {
+    const t = { owner: $("#ghowner").value.trim(), repo: $("#ghrepo").value.trim(), branch: $("#ghbranch").value.trim() || "openfab", token: $("#ghtoken").value.trim() };
+    if (!t.owner || !t.repo || !t.token) return toast("owner, repo and a PAT are required", true);
+    localStorage.setItem("openfab_gh_target", JSON.stringify({ owner: t.owner, repo: t.repo, branch: t.branch })); // never the token
+    const btn = $("#ghpushgo"); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+    try {
+      const out = await ForgePush.pushGitHub({ ...t, message: `openfab: ${STATE.artifacts.run.spec_ref} — code + signed attestation` }, STATE.artifacts);
+      $("#publishmsg").innerHTML = `✅ pushed in one commit → <a href="${out.url}" target="_blank" rel="noopener">${out.sha.slice(0, 10)}</a> (code + attestation + SBOM)`;
+      toast("pushed to GitHub ✓");
+    } catch (e) { toast(e.message, true); $("#publishmsg").textContent = "✖ " + e.message; }
+    finally { btn.disabled = false; btn.textContent = "Push"; }
+  };
 }
 
 // Wizard collapse: fold a finished step to a one-line summary; null summary expands it.

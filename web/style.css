@@ -36,7 +36,14 @@ a { color: var(--accent); }
 header.top {
   display: flex; align-items: center; gap: 16px; margin-bottom: 6px;
 }
-#settingsbtn { margin-left: auto; flex: 0 0 auto; }
+#settingsbtn { flex: 0 0 auto; }
+.modebadge {
+  margin-left: auto; flex: 0 0 auto; font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--panel); margin-right: 8px;
+}
+.modebadge.browser { color: var(--accent); border-color: rgba(76,201,240,.4); }
+.publishrow { margin: 14px 0 2px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); }
+.publishrow input { background: #0d111a; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 12.5px; }
 
 /* Settings drawer — config that isn't part of the build flow */
 .drawer {

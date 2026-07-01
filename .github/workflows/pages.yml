@@ -1,0 +1,34 @@
+# OpenFab Web — publish web/ (the same files include_str!'d into the binary) to GitHub
+# Pages as the browser-mode fab. One source, two delivery paths (docs/TODO.md P1).
+name: Deploy OpenFab Web to Pages
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add custom-domain CNAME
+        run: echo "app.open-fab.ai" > web/CNAME
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

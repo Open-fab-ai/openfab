@@ -12,7 +12,12 @@ review (R13).
 
 ## Priorities
 
-### P1 — Web / serverless demo (OpenFab as a GitHub Page)
+### P1 — OpenFab Web: the browser fab (serverless, as a GitHub Page)
+
+Naming note: this is deliberately NOT called a "demo" — the first milestone is
+demo-grade in scope, but the same artifact evolves into the real browser client
+(forge push, then a swarm participant). Name: **OpenFab Web**; deploy target:
+`app.open-fab.ai` (a Pages CNAME; no separate repo — the app is `web/` in this repo).
 
 **Goal:** a browser-only OpenFab that runs as a static GitHub Page — no server. The user
 configures an LLM provider on the page (OpenAI-compatible key/URL, incl. Ollama Cloud),
@@ -21,7 +26,7 @@ and OpenFab generates a small app that runs **entirely in the browser**, then pr
 anywhere, with nothing to install.
 
 **Why browser-only matters:** the whole trust story (sign → tamper → verify) can be shown
-client-side, and the demo travels (a link, a conference kiosk, a plane).
+client-side, and it travels (a link, a conference kiosk, a plane).
 
 **What can be genuine in the browser (honest breakdown, R14 — never fake a check):**
 

@@ -14,7 +14,8 @@ This repo is the **Phase-0 hand-built MVP (v0.1)**, in Rust. New here? Start wit
 fills it). Skeptical? Read [**OpenFab vs. existing tools — the honest delta**](docs/VALUE_PROPOSITION.md)
 (what exactly GitHub can't do, and what OpenFab does *not* solve). Then see
 [`OpenFab_MVP_Design_and_PRD.md`](docs/OpenFab_MVP_Design_and_PRD.md)
-(source of truth) and [`AGENTS.md`](AGENTS.md) (how to work here).
+(source of truth) and [`AGENTS.md`](AGENTS.md) (how to work here). **Talks &
+presentations:** [Open-fab-ai/community](https://github.com/Open-fab-ai/community).
 
 > **Status (v0.3, this build):** Core spec-cycle engine, `openfab/generation` in-toto
 > predicate ([spec v0.1](https://open-fab.ai/attestation/generation/v0.1)), did:key

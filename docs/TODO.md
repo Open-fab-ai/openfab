@@ -81,6 +81,15 @@ reuse the existing UI and swap `/api/*` calls for client-side LLM + WebCrypto.
   (2) **GitHub** — REST API with a fine-grained PAT, code + attestation in ONE commit,
   optional PR; (3) **Gitea/Forgejo** — token API when the instance enables CORS. The
   local-git forge does not exist in a browser.
+**Shipped (first milestone, commit 0aa5793):** ops port + mode detection + badge,
+  fabcrypto/fabengine/ops_browser/forgepush, LLM provider Settings card, publish row
+  (Download zip / GitHub one-commit push), Pages workflow. Verified end-to-end in a real
+  static-page browser mode incl. a one-byte tamper -> reproducible:false.
+  **Remaining:** (a) cross-verify a browser attestation with the Rust `openfab
+  verify-file` (canonicalization is designed byte-compatible; not yet proven); (b) real
+  browser-LLM run with an OpenRouter key (pipeline proven with a mocked LLM; crypto/
+  checks/gate were real); (c) Gitea/Forgejo push; (d) enable Pages in repo settings +
+  DNS CNAME for app.open-fab.ai; (e) R4: app.js still over budget — split session.
 - **Sequencing (R8/R4):** `app.js` is already over the 300-line budget, so this lands as
   (1) a pure refactor session extracting the ops port (zero behavior change), then
   (2) a feature session adding `ops_browser.js` + the Pages deploy workflow.

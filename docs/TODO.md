@@ -39,10 +39,41 @@ client-side, and the demo travels (a link, a conference kiosk, a plane).
 did:key signing; real in-browser tamper/verify. ~a few hours of frontend, no Rust —
 reuse the existing UI and swap `/api/*` calls for client-side LLM + WebCrypto.
 
+**Architecture decision (maximize code sharing — one SPA, two backends behind a port):**
+- The browser app is NOT a separate codebase or repo. `web/` in this repo stays the
+  single UI source (same look & feel by construction); the GitHub Page is only a
+  **deploy target** (an Action publishes `web/` + the browser adapter to Pages) while
+  the Rust binary keeps `include_str!`-ing the same files. One change → both reflect it.
+- The seam already exists: all ~36 server calls funnel through the single `api()` in
+  `web/app.js`. Extract it into an **ops port** with two adapters — `ops_server.js`
+  (today's `fetch /api/*`) and `ops_browser.js` (client-side LLM + WebCrypto signing +
+  in-browser acceptance for web targets + forge-API push).
+- **Mode selection:** probe `/api/ping` at boot → server mode; else browser mode; plus a
+  manual switch in the Settings drawer. A header **mode badge** ("server fab" /
+  "browser fab") reuses the native/bridged honesty-badge pattern.
+- **Capability matrix, not if-scattering:** adapters declare capabilities
+  (`shellSandbox`, `forgePush`, `launchApp`, …); features unsupported in a mode render
+  honestly disabled with a tooltip — never silently stubbed (R14).
+- **Sequencing (R8/R4):** `app.js` is already over the 300-line budget, so this lands as
+  (1) a pure refactor session extracting the ops port (zero behavior change), then
+  (2) a feature session adding `ops_browser.js` + the Pages deploy workflow.
+
+**Forge push from the browser (genuine, serverless):** GitHub's REST API supports
+commits/branches/PRs from browser JS; auth via a fine-grained PAT the user pastes
+(full OAuth needs a token-exchange micro-service — defer). Gitea/Forgejo work the same
+with CORS enabled. Push the code and the `att.json` **in the same commit** so artifact
+and attestation are born bound together.
+
 **Later evolution:** grow it into a **web agent swarm that resolves a GitHub issue** —
 point the page at an issue URL, the in-browser swarm proposes a fix, and OpenFab attaches
-a signed AI-BOM to the resulting change. (Needs the GitHub API + a token; keep the
-acceptance-check honesty constraint.)
+a signed AI-BOM to the resulting change. For `web-target` tasks **the browser is the
+complete fab** — generate → run → verify → sign → deliver, all client-side — so anyone
+with an LLM API key can participate. Peers are untrusted by design: a requester
+**re-verifies** any contribution locally (re-run checks, re-hash, check signatures)
+before it counts, each peer signs with its own did:key, and reputation-from-attestations
+provides the sybil resistance ("untrusted compute, verified results"). Coordination
+transport (WebRTC signaling, a relay, or forge-issues-as-message-bus) is the open
+question; prototype with two cooperating tabs on one machine first.
 
 ### P2 — OpenFab develops itself (interactive self-improvement)
 

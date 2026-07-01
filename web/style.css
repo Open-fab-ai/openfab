@@ -206,3 +206,14 @@ table.rep td.mono { font-family: var(--mono); font-size: 11px; }
 
 /* inline monospace (paths, hashes, ids) — always wrap, never overflow a card */
 .mono { font-family: var(--mono); overflow-wrap: anywhere; word-break: break-all; }
+
+/* GitHub-style git diff (Software tab) */
+pre.diff { font-family: var(--mono); font-size: 12px; line-height: 1.5; overflow: auto;
+  max-height: 460px; margin: 0; background: #0a0d14; border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 0; white-space: pre; }
+pre.diff span { display: block; padding: 0 10px; }
+pre.diff .d-add { background: rgba(46,160,67,0.18); color: #7ee787; }
+pre.diff .d-del { background: rgba(248,81,73,0.16); color: #ffa198; }
+pre.diff .d-hunk { color: #6dc1ff; background: rgba(56,139,253,0.10); }
+pre.diff .d-file { color: var(--muted); font-weight: 600; }
+pre.diff .d-ctx { color: var(--text); }

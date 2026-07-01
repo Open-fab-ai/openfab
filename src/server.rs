@@ -34,6 +34,8 @@ const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 /// Phase 2 collaborative console (self-contained page: board, docs, stages, agents, identity).
 const CONSOLE_HTML: &str = include_str!("../web/console.html");
+/// Shown when OPENFAB_ACCESS_TOKEN is set and a request lacks the token (public exposure).
+const ACCESS_DENIED_HTML: &str = "<!DOCTYPE html><html><head><meta charset=utf-8><title>OpenFab — access token required</title><style>body{font-family:system-ui;background:#0a0d14;color:#c8d6e5;display:flex;min-height:100vh;align-items:center;justify-content:center}div{max-width:420px}code{color:#6dc1ff}</style></head><body><div><h3>🔒 OpenFab — access token required</h3><p>This dashboard is exposed with an access token. Open it as <code>https://&lt;host&gt;/?token=YOUR_TOKEN</code> — the token is then remembered for this browser.</p></div></body></html>";
 
 struct State {
     repo: PathBuf,
@@ -126,9 +128,18 @@ fn route(
             &json!({"error":"cross-origin request blocked"}),
         ));
     }
+    // Access-token gate: when OPENFAB_ACCESS_TOKEN is set (public exposure), every request must
+    // present it (?token= / X-OpenFab-Token / of_token cookie). Unset → open (localhost default).
+    let token_cfg = std::env::var("OPENFAB_ACCESS_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let token_via_query = query_param(query, "token");
+    if !access_authorized(token_cfg.as_deref(), request_token(req, query).as_deref()) {
+        return Ok(html(ACCESS_DENIED_HTML).with_status_code(401));
+    }
     // The repo a request targets — the `?project=<name>` workspace, or the default repo.
     let repo = state.repo_for(query)?;
-    match (method, segs.as_slice()) {
+    let dispatched: Result<Response<std::io::Cursor<Vec<u8>>>> = match (method, segs.as_slice()) {
         // --- static UI ---
         (Method::Get, [""]) | (Method::Get, ["index.html"]) => Ok(html(INDEX_HTML)),
         (Method::Get, ["app.js"]) => Ok(asset(APP_JS, "application/javascript")),
@@ -448,6 +459,52 @@ fn route(
         (Method::Get, ["api", "runs", id, "docs"]) => {
             Ok(json_resp(200, &json!(ops::docs(&repo, id)?)))
         }
+        // GitHub-style git diff of the run's implementation commit (for the Software tab).
+        (Method::Get, ["api", "runs", id, "diff"]) => Ok(json_resp(
+            200,
+            &json!({ "diff": ops::run_diff(&repo, id)? }),
+        )),
+        // Which local editors are installed (for "Open source").
+        (Method::Get, ["api", "editors"]) => Ok(json_resp(
+            200,
+            &json!({ "editors": detect_editors(), "repo": repo.to_string_lossy() }),
+        )),
+        // Open the project's repo (the worktree) in a local editor. The path is server-resolved
+        // (the project workspace), never client-supplied — only the editor choice is.
+        (Method::Post, ["api", "open-editor"]) => {
+            // Launching a local editor is a host-process action — keep it OFF unless explicitly
+            // enabled (so a publicly-exposed dashboard can't spawn processes on the host).
+            if !std::env::var("OPENFAB_ALLOW_OPEN_EDITOR").is_ok_and(|v| v == "1" || v == "true") {
+                return Ok(json_resp(
+                    403,
+                    &json!({"error":"open-editor disabled (set OPENFAB_ALLOW_OPEN_EDITOR=1 on a trusted local host)"}),
+                ));
+            }
+            let body = body_json(req)?;
+            let editor = body["editor"].as_str().unwrap_or("");
+            if !detect_editors().contains(&editor) {
+                return Ok(json_resp(
+                    400,
+                    &json!({"error":"editor not installed/allowed"}),
+                ));
+            }
+            match Command::new(editor)
+                .arg(&repo)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(_) => Ok(json_resp(
+                    200,
+                    &json!({"ok":true,"editor":editor,"repo":repo.to_string_lossy()}),
+                )),
+                Err(e) => Ok(json_resp(
+                    500,
+                    &json!({"error":format!("failed to launch {editor}: {e}")}),
+                )),
+            }
+        }
         (Method::Get, ["api", "runs", id, "stages"]) => {
             Ok(json_resp(200, &json!(ops::stages(&repo, id)?)))
         }
@@ -463,6 +520,8 @@ fn route(
         }
         // C2/C3: agent status + tmux peek, proxied (same-origin) to the agent-chat Bridge.
         (Method::Get, ["api", "agents"]) => Ok(json_resp(200, &bridge_get("/agents")?)),
+        // matrix-Agent pool grid (role×capability) via the bridge — for the console agents panel.
+        (Method::Get, ["api", "pool"]) => Ok(json_resp(200, &bridge_get("/pool")?)),
         (Method::Get, ["api", "agents", name, "peek"]) => {
             let q = if query.is_empty() {
                 String::new()
@@ -528,7 +587,21 @@ fn route(
             404,
             &json!({ "error": format!("no route for {path}") }),
         )),
+    };
+    // When a token gate is active and the token arrived via `?token=`, set a cookie so the SPA's
+    // subsequent fetches authenticate without re-appending the query.
+    let mut resp = dispatched?;
+    if token_cfg.is_some() {
+        if let Some(t) = &token_via_query {
+            if let Ok(h) = Header::from_bytes(
+                &b"Set-Cookie"[..],
+                format!("of_token={t}; Path=/; HttpOnly; SameSite=Lax").as_bytes(),
+            ) {
+                resp.add_header(h);
+            }
+        }
     }
+    Ok(resp)
 }
 
 /// Start a run. Two shapes:
@@ -555,12 +628,10 @@ fn start_run(
         seed_status(repo, &run_id, "authoring spec…", "authoring");
         // An uploaded spec contract (Phase 2.1 #2): build it directly instead of re-drafting.
         // `spec_id` selects a `.spec.md` to build — sanitize it (no path traversal).
-        let spec_file = body["spec_id"].as_str().and_then(safe_id).map(|id| {
-            let spec_dir = std::env::var("OPENFAB_SPEC_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| repo.join("specs"));
-            spec_dir.join(format!("{id}.spec.md"))
-        });
+        let spec_file = body["spec_id"]
+            .as_str()
+            .and_then(safe_id)
+            .map(|id| incoming_spec_path(repo, &id));
         let st = state.clone();
         let repo = repo.to_path_buf();
         let (rid, b, f, fname, g) = (run_id.clone(), base, forge, forge_name, gate);
@@ -673,6 +744,49 @@ fn launch_app(
         anyhow::bail!("could not export the run's source for launch");
     }
 
+    // Dioxus/trunk web apps need a build step before they're previewable — the raw `index.html`
+    // is trunk's unprocessed template (no compiled wasm/js glue, often an empty `<body>`),
+    // serving it as-is is a guaranteed blank page. Build first so `plan_launch` finds `dist/`.
+    if let Some(trunk_dir) = trunk_project_dir(&dest) {
+        if which("trunk").is_none() {
+            return Ok(json_resp(
+                200,
+                &json!({
+                    "kind": "web-failed",
+                    "file": "index.html",
+                    "error": "this is a Dioxus/trunk web app — install `trunk` (cargo install trunk) and the wasm32-unknown-unknown target (rustup target add wasm32-unknown-unknown) to preview it"
+                }),
+            ));
+        }
+        // --release, not just for size/speed: Dioxus 0.6's devtools/hot-patch client (which
+        // tries to open a `/_dioxus` websocket back to `dx serve`'s dev protocol) is compiled
+        // in under debug_assertions. A plain static file server (no such endpoint) leaves that
+        // client stuck mid-handshake, and the app never finishes mounting — a blank page that
+        // looks fine in the network tab (wasm/js both 200) but never renders anything. Release
+        // strips that path entirely, and it's the artifact that should ship to GitHub Pages
+        // anyway.
+        let build = Command::new("trunk")
+            .arg("build")
+            .arg("--release")
+            .current_dir(&trunk_dir)
+            .output()
+            .context("running trunk build")?;
+        if !build.status.success() {
+            let detail = first_nonempty(
+                &String::from_utf8_lossy(&build.stdout),
+                &String::from_utf8_lossy(&build.stderr),
+            );
+            return Ok(json_resp(
+                200,
+                &json!({
+                    "kind": "web-failed",
+                    "file": "index.html",
+                    "error": format!("trunk build failed: {}", truncate(&detail, 400))
+                }),
+            ));
+        }
+    }
+
     let port = free_port()?;
     let Some((cmd, workdir, file)) = plan_launch(&dest, port) else {
         return Ok(json_resp(200, &json!({ "kind": "cli" })));
@@ -718,6 +832,38 @@ fn launch_app(
     }
 }
 
+/// Is `bin` on PATH? (e.g. `trunk`, before attempting a build that would otherwise fail with a
+/// confusing "No such file or directory".)
+fn which(bin: &str) -> Option<()> {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {bin}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .filter(|s| s.success())
+        .map(|_| ())
+}
+
+fn first_nonempty(a: &str, b: &str) -> String {
+    let a = a.trim();
+    if !a.is_empty() {
+        a.to_string()
+    } else {
+        b.trim().to_string()
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() > n {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    } else {
+        s
+    }
+}
+
 fn stop_app(id: &str, state: &Arc<State>) {
     if let Some((pid, _)) = state.launched.lock().unwrap().remove(id) {
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
@@ -731,6 +877,31 @@ fn stop_all_apps(state: &Arc<State>) {
     for (_, (pid, _)) in m.drain() {
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
     }
+}
+
+/// Where an Incoming doc's `.spec.md` lives for a given project — always `<repo>/specs/`, the
+/// project's OWN specs dir (where the Bridge harvests coordinator-submitted specs and where
+/// uploads land). NEVER the server-wide `OPENFAB_SPEC_DIR` override: that env var is fixed to
+/// whichever repo `serve` was started against, so once `?project=` switching is in play it
+/// silently points every OTHER project's "Build" at the wrong repo's specs directory.
+fn incoming_spec_path(repo: &Path, spec_id: &str) -> PathBuf {
+    repo.join("specs").join(format!("{spec_id}.spec.md"))
+}
+
+/// Where a Dioxus/Yew/Leptos `trunk`-built web app lives, if `dest` (or its `app/` subdir) has
+/// both `index.html` and a `Dioxus.toml`/`Trunk.toml` marker — i.e. a project that needs
+/// `trunk build` before it's previewable (the raw `index.html` is trunk's *template*, not a
+/// runnable page: no compiled wasm/js glue, often an empty `<body>`). `None` when neither
+/// marker is present (an ordinary static site, left to the existing serve-as-is path).
+fn trunk_project_dir(dest: &Path) -> Option<PathBuf> {
+    for dir in ["app", "."] {
+        let d = dest.join(dir);
+        let has_marker = d.join("Dioxus.toml").exists() || d.join("Trunk.toml").exists();
+        if has_marker && d.join("index.html").exists() {
+            return Some(d);
+        }
+    }
+    None
 }
 
 /// Decide how to run the product in a browser: an actual web server (reads `PORT`), or a
@@ -758,8 +929,11 @@ fn plan_launch(repo: &Path, port: u16) -> Option<(Vec<String>, PathBuf, String)>
             return Some((vec![runner.into(), f.into()], repo.to_path_buf(), f.into()));
         }
     }
-    // Static site: serve the directory that holds index.html (client-side SPAs).
-    for dir in ["app", "."] {
+    // Static site: serve the directory that holds index.html (client-side SPAs). A `dist/`
+    // subdir (trunk's build output) is preferred over a bare `index.html` — `launch_app` runs
+    // `trunk build` first when it detects a Dioxus/Trunk project, which produces this dir; an
+    // unbuilt `index.html` alone is trunk's *template* (no compiled wasm/js — a blank page).
+    for dir in ["app/dist", "dist", "app", "."] {
         if repo.join(dir).join("index.html").exists() {
             let label = if dir == "." {
                 "index.html".into()
@@ -915,14 +1089,20 @@ fn safe_id(s: &str) -> Option<String> {
 /// with no `Origin` (curl, the CLI) pass; the same-origin SPA sends a localhost origin. This
 /// stops a malicious page the operator visits from driving the localhost API.
 fn csrf_ok(req: &Request) -> bool {
-    let origin = req
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Origin"))
-        .map(|h| h.value.as_str().to_string());
-    match origin {
-        None => true, // non-browser client (curl / CLI) — no CSRF surface
-        Some(o) => o.starts_with("http://127.0.0.1") || o.starts_with("http://localhost"),
+    let origin = match header_value(req, "Origin") {
+        None => return true, // non-browser client (curl / CLI) — no CSRF surface
+        Some(o) => o,
+    };
+    // Always allow localhost (dev). Otherwise require same-origin: the Origin's host[:port] must
+    // equal the request's Host header — this lets a reverse-proxied host (e.g. the Tailscale
+    // Funnel `*.ts.net` name) work while still blocking genuinely cross-origin requests.
+    if origin.starts_with("http://127.0.0.1") || origin.starts_with("http://localhost") {
+        return true;
+    }
+    let origin_host = origin.split("://").nth(1).unwrap_or("");
+    match header_value(req, "Host") {
+        Some(host) => !origin_host.is_empty() && origin_host == host,
+        None => false,
     }
 }
 
@@ -966,6 +1146,56 @@ fn notify_room_on_signoff(
         )
     };
     let _ = crate::adapters::bridge_client::post_message(&bridge, &room, &msg);
+}
+
+/// Local editors (by CLI name) that are installed — for the "Open source" action. The allowlist
+/// is fixed (only these three can be launched); we just report which are on PATH.
+fn detect_editors() -> Vec<&'static str> {
+    ["code", "cursor", "zed"]
+        .into_iter()
+        .filter(|bin| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {bin}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Access-token gate (pure). When a token is configured (public exposure via Tailscale Funnel
+/// etc.), every request must present it. `None` configured → open (localhost dev default).
+fn access_authorized(configured: Option<&str>, provided: Option<&str>) -> bool {
+    match configured.filter(|s| !s.is_empty()) {
+        None => true,
+        Some(want) => provided == Some(want),
+    }
+}
+
+/// The access token a request presents: `?token=`, then `X-OpenFab-Token`, then the `of_token`
+/// cookie (set after the first authorized page load so the SPA's fetches carry it).
+fn header_value(req: &Request, name: &str) -> Option<String> {
+    req.headers()
+        .iter()
+        .find(|h| format!("{}", h.field).eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_string())
+}
+
+fn request_token(req: &Request, query: &str) -> Option<String> {
+    if let Some(t) = query_param(query, "token") {
+        return Some(t);
+    }
+    if let Some(t) = header_value(req, "X-OpenFab-Token") {
+        return Some(t);
+    }
+    header_value(req, "Cookie").and_then(|c| {
+        c.split(';')
+            .map(str::trim)
+            .find_map(|kv| kv.strip_prefix("of_token=").map(str::to_string))
+    })
 }
 
 fn query_param(query: &str, key: &str) -> Option<String> {
@@ -1054,4 +1284,81 @@ fn asset(s: &str, ct: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn ctype(ct: &str) -> Header {
     Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{access_authorized, incoming_spec_path, trunk_project_dir};
+    use std::path::Path;
+
+    #[test]
+    fn test_trunk_project_dir_detects_dioxus_and_trunk_markers() {
+        // root-layout Dioxus/trunk app (Dioxus.toml + index.html at the repo root)
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Dioxus.toml"), "").unwrap();
+        std::fs::write(tmp.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            trunk_project_dir(tmp.path()),
+            Some(tmp.path().to_path_buf())
+        );
+
+        // a generic trunk app (Yew etc.) — Trunk.toml instead of Dioxus.toml
+        let tmp2 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp2.path().join("Trunk.toml"), "").unwrap();
+        std::fs::write(tmp2.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            trunk_project_dir(tmp2.path()),
+            Some(tmp2.path().to_path_buf())
+        );
+
+        // nested under app/ (non-root-layout greenfield default)
+        let tmp3 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp3.path().join("app")).unwrap();
+        std::fs::write(tmp3.path().join("app").join("Dioxus.toml"), "").unwrap();
+        std::fs::write(tmp3.path().join("app").join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            trunk_project_dir(tmp3.path()),
+            Some(tmp3.path().join("app"))
+        );
+
+        // index.html with no Dioxus.toml/Trunk.toml → not a trunk project (plain static site)
+        let tmp4 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp4.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(trunk_project_dir(tmp4.path()), None);
+
+        // Dioxus.toml with no index.html → incomplete, not detected
+        let tmp5 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp5.path().join("Dioxus.toml"), "").unwrap();
+        assert_eq!(trunk_project_dir(tmp5.path()), None);
+    }
+
+    #[test]
+    fn test_incoming_spec_path_is_project_relative_not_global_env() {
+        // A project's Incoming doc must resolve under THAT project's own repo/specs/, never the
+        // server-wide OPENFAB_SPEC_DIR (which is fixed to whichever repo `serve` was started
+        // against — wrong for every OTHER project once multi-project switching is in play).
+        let repo = Path::new("/Users/alex/Work/rust-blog");
+        assert_eq!(
+            incoming_spec_path(repo, "dioxus-blog-ui-polish"),
+            Path::new("/Users/alex/Work/rust-blog/specs/dioxus-blog-ui-polish.spec.md")
+        );
+        let other_repo = Path::new("/Users/alex/Work/some-other-project");
+        assert_eq!(
+            incoming_spec_path(other_repo, "dioxus-blog-ui-polish"),
+            Path::new("/Users/alex/Work/some-other-project/specs/dioxus-blog-ui-polish.spec.md")
+        );
+    }
+
+    #[test]
+    fn test_access_authorized_token_gate() {
+        // no token configured → open (localhost dev default)
+        assert!(access_authorized(None, None));
+        assert!(access_authorized(None, Some("anything")));
+        // empty configured token → treated as no gate
+        assert!(access_authorized(Some(""), None));
+        // configured token → must match exactly
+        assert!(access_authorized(Some("s3cret"), Some("s3cret")));
+        assert!(!access_authorized(Some("s3cret"), Some("wrong")));
+        assert!(!access_authorized(Some("s3cret"), None));
+    }
 }

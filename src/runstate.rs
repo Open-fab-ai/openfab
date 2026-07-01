@@ -181,16 +181,54 @@ pub fn load_run_spec_yaml(repo: &Path, id: &str) -> Result<String> {
     std::fs::read_to_string(&path).with_context(|| format!("reading spec for run {id}"))
 }
 
+/// A minimal [`RunRecord`] for a run that has a `status.json` but no `run.json` yet — i.e. one
+/// still building (or that failed before landing). `run.json` is only written when a run lands,
+/// so without this an in-flight run is invisible in the board/history until it finishes (the
+/// "I triggered a build but OpenFab shows nothing" gap). Pure over the status fields; unknown
+/// fields default. Never accepted/merged (those imply a landed run.json).
+fn run_from_status(id: &str, status: &serde_json::Value) -> RunRecord {
+    let s = |k: &str| status.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    RunRecord {
+        run_id: s("run_id").unwrap_or_else(|| id.to_string()),
+        spec_ref: s("spec_ref").unwrap_or_default(),
+        base_name: String::new(),
+        forge_kind: String::new(),
+        forge_name: String::new(),
+        base_runtime: String::new(),
+        status: s("status").unwrap_or_else(|| "running".to_string()),
+        gate_mode: default_gate_mode(),
+        branch: String::new(),
+        pr_url: String::new(),
+        attestation_repo_path: String::new(),
+        sbom_repo_path: String::new(),
+        acceptance: vec![],
+        acceptance_passed: false,
+        accepted: false,
+        merged: false,
+        parent_run: None,
+        created: s("updated").unwrap_or_default(),
+    }
+}
+
 pub fn list_runs(repo: &Path) -> Result<Vec<RunRecord>> {
     let dir = runs_dir(repo);
     let mut out = vec![];
     if dir.exists() {
         for entry in std::fs::read_dir(&dir)? {
             let p = entry?.path();
+            let Some(id) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
             if p.join("run.json").exists() {
-                if let Some(id) = p.file_name().and_then(|s| s.to_str()) {
-                    if let Ok(r) = load_run(repo, id) {
-                        out.push(r);
+                if let Ok(r) = load_run(repo, id) {
+                    out.push(r);
+                }
+            } else if p.join("status.json").exists() {
+                // In-flight run (no run.json yet): surface it from status.json so it shows as
+                // implementing/failed instead of vanishing until it lands.
+                if let Ok(text) = std::fs::read_to_string(p.join("status.json")) {
+                    if let Ok(sj) = serde_json::from_str::<serde_json::Value>(&text) {
+                        out.push(run_from_status(id, &sj));
                     }
                 }
             }
@@ -531,6 +569,41 @@ mod tests {
             fab_allowlist(repo).unwrap(),
             vec!["did:key:zFAB".to_string()]
         );
+    }
+
+    #[test]
+    fn run_from_status_carries_id_spec_and_status() {
+        let sj = serde_json::json!({
+            "run_id": "r1", "spec_ref": "blog#v2", "status": "running", "updated": "2026-07-01T12:00:00Z"
+        });
+        let r = run_from_status("dir-id", &sj);
+        assert_eq!(r.run_id, "r1");
+        assert_eq!(r.spec_ref, "blog#v2");
+        assert_eq!(r.status, "running");
+        assert_eq!(r.created, "2026-07-01T12:00:00Z");
+        assert!(!r.accepted && !r.merged); // in-progress: never accepted/merged
+                                           // missing run_id falls back to the dir id; missing status → "running"
+        let r2 = run_from_status("dir-id", &serde_json::json!({ "spec_ref": "x#v1" }));
+        assert_eq!(r2.run_id, "dir-id");
+        assert_eq!(r2.status, "running");
+    }
+
+    #[test]
+    fn list_runs_includes_in_progress_runs_without_run_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        // an in-progress run: status.json present, run.json NOT yet written
+        let d = runs_dir(repo).join("live-run");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("status.json"),
+            r#"{"run_id":"live-run","spec_ref":"blog#v2","status":"running"}"#,
+        )
+        .unwrap();
+        let runs = list_runs(repo).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "live-run");
+        assert_eq!(runs[0].status, "running");
     }
 }
 

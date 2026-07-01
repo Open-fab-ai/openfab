@@ -28,6 +28,15 @@
   .agentrow .st { color: var(--muted); font-size: 11.5px; }
   .adot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
   .adot.on { background: var(--ok); } .adot.off { background: var(--faint); }
+  /* matrix-Agent role×capability grid */
+  .mxgrid { border-collapse: collapse; width: 100%; font-size: 11px; }
+  .mxgrid th, .mxgrid td { border: 1px solid var(--line); padding: 5px 6px; text-align: left; vertical-align: top; }
+  .mxgrid th { color: var(--accent); font-weight: 600; }
+  .mxgrid td.cap { color: var(--muted); white-space: nowrap; }
+  .achip { display: block; width: fit-content; padding: 1px 6px; margin: 2px 0; border-radius: 4px; border: 1px solid var(--line); cursor: pointer; white-space: nowrap; }
+  .achip.idle { border-color: var(--ok); color: var(--ok); }
+  .achip.busy { border-color: var(--warn, #d6a700); color: var(--warn, #d6a700); }
+  .achip:hover { background: var(--panel2); }
   .peek { background: #0d111a; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto;
           max-height: 46vh; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; color: var(--ink); }
   .docbody { background: #0d111a; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto;
@@ -98,9 +107,11 @@ let PROJECT = (()=>{ try { return localStorage.getItem("openfab_project") || "de
 // append ?project= to project-scoped URLs (agent status is global, so skip it there)
 function P(u){ if (PROJECT && PROJECT!=="default" && u.startsWith("/api/") && !u.startsWith("/api/agents") && !u.startsWith("/api/projects"))
   return u + (u.includes("?")?"&":"?") + "project=" + encodeURIComponent(PROJECT); return u; }
-const LANES = ["implementing","sign-off","accepted","merged","failed","rejected"];
+const LANES = ["incoming","implementing","sign-off","accepted","merged","failed","rejected"];
 // `blocked` runs land in "sign-off": work is done & signed, only human release remains.
-const LANE_LABEL = { "implementing":"Implementing", "sign-off":"Awaiting sign-off",
+// `incoming` isn't a run state — it's coordinator-submitted docs (Robrix) with no run yet
+// (see loadBoard): otherwise they're invisible on this board until someone clicks Build.
+const LANE_LABEL = { "incoming":"Incoming (from Robrix)", "implementing":"Implementing", "sign-off":"Awaiting sign-off",
   "accepted":"Accepted", "merged":"Merged", "failed":"Failed", "rejected":"Rejected" };
 
 async function jget(u){ const r=await fetch(P(u)); if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error||r.status); return r.json(); }
@@ -121,8 +132,21 @@ async function loadBoard(){
     const items = await jget("/api/board");
     const lanes = {}; LANES.forEach(l=>lanes[l]=[]);
     items.forEach(it=>{ (lanes[it.lane]||(lanes[it.lane]=[])).push(it); });
+    // Incoming (Robrix): docs coordinator submitted that have no run yet — these never appear
+    // among `items` (which is purely run-derived), so without this they're invisible here even
+    // though they already exist and are waiting on a human to click Build.
+    try {
+      const docs = await jget("/api/incoming");
+      const built = new Set(items.map(it=>(it.spec_ref||"").split("#")[0]));
+      lanes["incoming"] = docs.filter(d=>!built.has(d.id));
+    } catch(e){ /* incoming optional */ }
     $("board").innerHTML = LANES.filter(l => l!=="rejected" || lanes[l].length).map(l=>`
-      <div class="lane"><h3>${LANE_LABEL[l]||l} <span class="muted">(${(lanes[l]||[]).length})</span></h3>${(lanes[l]||[]).map(it=>`
+      <div class="lane"><h3>${LANE_LABEL[l]||l} <span class="muted">(${(lanes[l]||[]).length})</span></h3>${(lanes[l]||[]).map(it=>
+        l==="incoming" ? `
+        <div class="rcard">
+          <div class="ref" style="cursor:pointer" onclick="viewIncoming('${esc(it.id)}')">${esc(it.id)}${it.has_requirements?" 📄":""}</div>
+          <div class="meta"><button class="btn ghost sm" onclick="event.stopPropagation();buildIncoming('${esc(it.id)}')">Build</button></div>
+        </div>` : `
         <div class="rcard" onclick="openRun('${esc(it.run_id)}')">
           <div class="ref">${esc(it.spec_ref||it.run_id)}</div>
           <div class="meta">${esc(it.base_name||"")}</div>
@@ -200,11 +224,65 @@ async function showTab(t, el){
 }
 function showDoc(i,el){ document.querySelectorAll('#detail .tabs .tab').forEach(x=>x.classList.remove('active')); if(el)el.classList.add('active'); renderDoc(i); }
 function renderDoc(i){ const doc=window._docs[i]; $("docbody").textContent = doc? doc.content : ""; }
+
+// Incoming (Robrix): view the coordinator-submitted spec + requirements before building —
+// these have no run yet, so they don't go through openRun/showTab at all.
+async function viewIncoming(id){
+  curRun = null; $("runtitle").textContent = "Incoming · " + id;
+  $("pipe").innerHTML = '<span class="muted">not built yet — click Build to start</span>';
+  $("tabs").innerHTML = ""; $("signoff").innerHTML = "";
+  const d = $("detail");
+  try {
+    const doc = await jget(`/api/incoming/${encodeURIComponent(id)}`);
+    const parts = [];
+    if (doc.requirements_md) parts.push({kind:"requirements", content:doc.requirements_md});
+    if (doc.spec_md) parts.push({kind:"spec", content:doc.spec_md});
+    window._docs = parts;
+    d.innerHTML = `<div class="tabs" style="margin-bottom:8px">${parts.map((p,i)=>
+      `<span class="tab ${i===0?'active':''}" onclick="showDoc(${i},this)">${esc(p.kind)}</span>`).join("")}</div><div class="docbody" id="docbody"></div>`;
+    renderDoc(0);
+  } catch(e){ d.innerHTML = `<span class="muted">${esc(e.message)}</span>`; }
+}
+async function buildIncoming(id){
+  try {
+    const r = await jpost("/api/run", { intent: `Build '${id}' (from Robrix).`, spec_id: id, base: "agent-chat", gate: "solo" });
+    if (r.error) throw new Error(r.error);
+    await loadBoard();
+    if (r.run_id) openRun(r.run_id);
+  } catch(e){ alert("build failed: " + e.message); }
+}
 // Escape for both element-content and quoted-attribute contexts (incl. quotes).
 function esc(s){ return String(s==null?"":s).replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c])); }
 function escapeHtml(s){ return esc(s); }
 
+const MX_ROLES=["architect","coding","testing","review","integration","documentation"];
+const MX_TIERS=["strong","medium","lightweight"];
 async function loadAgents(){
+  // Prefer the matrix-Agent pool grid (role×capability); fall back to a flat list if the
+  // scheduler isn't available. Agent names stay clickable to peek their tmux session.
+  try {
+    const pool = await jget("/api/pool");
+    const grid = pool && pool.grid;
+    if (grid && Object.keys(grid).length){
+      // only the known worker roles that actually have agents (drop empty cols + the service
+      // relay's "bridge" pseudo-role) so the grid fits the panel.
+      const has = r => grid[r] && Object.values(grid[r]).some(l=>l.length);
+      const roles = MX_ROLES.filter(has);
+      const tiers = MX_TIERS.filter(t => roles.some(r => ((grid[r]||{})[t]||[]).length));
+      let h = '<div style="overflow-x:auto"><table class="mxgrid"><thead><tr><th>cap \\ role</th>'+roles.map(r=>`<th>${esc(r)}</th>`).join('')+'</tr></thead><tbody>';
+      for (const t of tiers){
+        h += `<tr><td class="cap">${t}</td>`+roles.map(r=>{
+          const list=((grid[r]||{})[t])||[];
+          if(!list.length) return '<td><span class="muted">·</span></td>';
+          return '<td>'+list.map(a=>`<span class="achip ${a.busy?'busy':'idle'}" onclick="peek('${esc(a.name)}')">${esc(a.name)}${a.busy?' ⏳':''}</span>`).join('')+'</td>';
+        }).join('')+'</tr>';
+      }
+      h += '</tbody></table></div>';
+      $("agents").innerHTML = h;
+      return;
+    }
+    throw new Error("empty pool");
+  } catch(_e){ /* fall back to the flat list below */ }
   try {
     const ags = await jget("/api/agents");
     const arr = Array.isArray(ags) ? ags : (ags.agents||[]);
@@ -237,8 +315,11 @@ async function renderPeek(){
       style="width:100%;height:42vh;border:1px solid var(--line);border-radius:8px;background:#000"></iframe>`;
   } else {
     box.innerHTML = head + `<div class="docbody" id="peektext" style="max-height:40vh">loading…</div>`;
-    try { const r = await jget(`/api/agents/${encodeURIComponent(peekAgent)}/peek?lines=120`);
-      $("peektext").textContent = r.error ? r.error : (r.lines||[]).join("\n"); }
+    try { const r = await jget(`/api/agents/${encodeURIComponent(peekAgent)}/peek?lines=1000`);
+      const pt = $("peektext");
+      pt.textContent = r.error ? r.error : (r.lines||[]).join("\n");
+      pt.scrollTop = pt.scrollHeight;  // newest at the bottom; scroll up for history
+    }
     catch(e){ $("peektext").textContent = e.message; }
   }
 }

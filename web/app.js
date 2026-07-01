@@ -31,6 +31,7 @@ async function init() {
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
   $("#reprobtn").onclick = reproduce;
+  { const b = $("#opensrc"); if (b) b.onclick = openSource; }
   $("#runapp").onclick = runApp;
   $("#tryrun").onclick = () => tryRun();
   $("#trycmd").addEventListener("keydown", (e) => { if (e.key === "Enter") tryRun(); });
@@ -115,31 +116,61 @@ async function onProjectChange() {
 
 // Docs ingested from a bound Robrix room (the coordinator submitted them) show up here so
 // the user can build them without uploading anything.
+// Status of a spec's latest run — a coordinator-submitted requirement doesn't vanish once built;
+// it stays listed with its state (a build in progress / awaiting sign-off / merged), so the room
+// → Incoming → run flow is legible instead of "the card disappeared".
+const RUN_STATE = {
+  running:  { label: "🔨 building",          done: false },
+  authoring:{ label: "🔨 building",          done: false },
+  starting: { label: "🔨 building",          done: false },
+  blocked:  { label: "⏳ awaiting sign-off",  done: false },
+  accepted: { label: "✓ accepted",           done: true  },
+  merged:   { label: "✓ merged",             done: true  },
+  failed:   { label: "✗ failed",             done: true  },
+  rejected: { label: "✗ rejected",           done: true  },
+};
 async function loadIncoming() {
   let docs = [];
   try { docs = await api("GET", "/api/incoming"); } catch { /* none */ }
-  // hide specs that already have a run
   let runs = [];
   try { runs = await api("GET", "/api/runs"); } catch {}
-  const built = new Set(runs.map((r) => (r.spec_ref || "").split("#")[0]));
-  const pending = docs.filter((d) => !built.has(d.id));
+  // latest run per spec id (highest version wins)
+  const latest = {};
+  runs.forEach((r) => {
+    const [id, ver] = (r.spec_ref || "").split("#");
+    const v = parseInt((ver || "v0").replace(/^v/, ""), 10) || 0;
+    if (!latest[id] || v >= latest[id].v) latest[id] = { v, status: r.status, run_id: r.run_id };
+  });
   const card = $("#incomingcard"), box = $("#incoming");
-  if (!pending.length) { card.style.display = "none"; return; }
+  if (!docs.length) { card.style.display = "none"; return; }
   card.style.display = "";
   box.innerHTML = "";
-  pending.forEach((d) => {
+  docs.forEach((d) => {
+    const run = latest[d.id];
+    const st = run && (RUN_STATE[run.status] || { label: run.status, done: true });
     const row = el("div", "maintainers");
     row.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)";
-    const name = el("span", "mono", `${esc(d.id)}${d.has_requirements ? " 📄" : ""}`);
+    const badge = st ? ` <span class="muted" style="font-size:11px">${st.label}${run.v ? " #v" + run.v : ""}</span>` : "";
+    const name = el("span", "mono", `${esc(d.id)}${d.has_requirements ? " 📄" : ""}${badge}`);
     name.style.cssText = "font-size:12px;cursor:pointer;flex:1";
     name.title = "view spec + requirements";
-    name.onclick = () => viewIncoming(d.id);
+    name.onclick = () => (st && !st.done ? openHistoryRun(PROJECT, run.run_id) : viewIncoming(d.id));
     row.appendChild(name);
     const v = el("button", "btn ghost sm", "View");
     v.onclick = () => viewIncoming(d.id);
-    const b = el("button", "btn ghost sm", "Build");
-    b.onclick = () => { STATE.uploadedSpecId = d.id; $("#intent").value = `Build '${d.id}' (from Robrix).`; startRun(); };
-    row.appendChild(v); row.appendChild(b); box.appendChild(row);
+    row.appendChild(v);
+    if (st && !st.done) {
+      // build in progress / awaiting sign-off → jump to the run, not a duplicate Build
+      const open = el("button", "btn ghost sm", "Open run");
+      open.onclick = () => openHistoryRun(PROJECT, run.run_id);
+      row.appendChild(open);
+    } else {
+      // never built, or the last run finished → Build (rebuild bumps the version cleanly)
+      const b = el("button", "btn ghost sm", st ? "Rebuild" : "Build");
+      b.onclick = () => { STATE.uploadedSpecId = d.id; $("#intent").value = `Build '${d.id}' (from Robrix).`; startRun(); };
+      row.appendChild(b);
+    }
+    box.appendChild(row);
   });
 }
 
@@ -541,11 +572,8 @@ function selectTab(name) {
   const a = STATE.artifacts; if (!a) return;
   const body = $("#tabbody"); body.innerHTML = "";
   if (name === "code") {
-    if (!a.files.length) { body.appendChild(el("div", "empty", "no files")); return; }
-    a.files.forEach((f) => {
-      body.appendChild(el("div", "file-h", `${f.path}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${f.author}">${f.author}</span>`));
-      body.appendChild(el("pre", "code", escapeHtml(f.contents)));
-    });
+    body.innerHTML = '<div class="muted">loading diff…</div>';
+    renderCodeDiff(body);
   } else if (name === "prov") {
     body.appendChild(renderProvenance(a.attestation));
   } else if (name === "audit") {
@@ -556,6 +584,45 @@ function selectTab(name) {
   } else if (name === "log") {
     body.appendChild(el("pre", "code", escapeHtml(a.timeline)));
   }
+}
+
+// Software tab: GitHub-style git diff of the run's implementation commit (falls back to full
+// files when there's no diff — e.g. an imported build).
+async function renderCodeDiff(body) {
+  let diff = "";
+  try { diff = (await api("GET", `/api/runs/${STATE.runId}/diff`)).diff || ""; } catch { /* fall back */ }
+  if (diff.trim()) {
+    body.innerHTML = `<pre class="diff">${diffToHtml(diff)}</pre>`;
+    return;
+  }
+  const a = STATE.artifacts;
+  body.innerHTML = "";
+  if (!a || !a.files.length) { body.appendChild(el("div", "empty", "no files")); return; }
+  a.files.forEach((f) => {
+    body.appendChild(el("div", "file-h", `${f.path}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${f.author}">${f.author}</span>`));
+    body.appendChild(el("pre", "code", escapeHtml(f.contents)));
+  });
+}
+function diffToHtml(diff) {
+  return diff.split("\n").map((line) => {
+    const e = escapeHtml(line);
+    if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) return `<span class="d-file">${e}</span>`;
+    if (line.startsWith("@@")) return `<span class="d-hunk">${e}</span>`;
+    if (line.startsWith("+")) return `<span class="d-add">${e}</span>`;
+    if (line.startsWith("-")) return `<span class="d-del">${e}</span>`;
+    return `<span class="d-ctx">${e}</span>`;
+  }).join("\n");
+}
+
+// Open source: launch the run's project repo (worktree) in a local editor.
+async function openSource() {
+  let eds = [];
+  try { eds = (await api("GET", "/api/editors")).editors || []; } catch (e) { return toast(e.message, true); }
+  if (!eds.length) return toast("no editor on PATH (install code / cursor / zed)", true);
+  let editor = eds[0];
+  if (eds.length > 1) { editor = window.prompt(`Open the worktree in which editor?\n(${eds.join(" / ")})`, eds[0]); if (!editor) return; }
+  try { await api("POST", "/api/open-editor", { editor }); toast(`opening worktree in ${editor}…`); }
+  catch (e) { toast(e.message, true); }
 }
 
 async function loadAudit(body) {
@@ -609,6 +676,17 @@ function renderProvenance(att) {
   add("attribution", auth);
   const so = (p.signoffs || []).map((s) => `${s.name} (${shortDid(s.did)})`).join("  ·  ") || "—";
   add("human sign-offs", so);
+  if (p.qa_report) {
+    const qr = p.qa_report;
+    const metrics = [
+      qr.coverage_pct != null ? `coverage ${qr.coverage_pct.toFixed(1)}%` : null,
+      qr.mutation_score != null ? `mutation ${qr.mutation_score.toFixed(1)}%` : null,
+    ].filter(Boolean).join("  ·  ");
+    const outcomes = (qr.outcomes || [])
+      .map((o) => `${o.status === "passed" ? "✅" : o.status === "failed" ? "❌" : "⏭️"} ${escapeHtml(o.check)}: ${escapeHtml(o.detail)}`)
+      .join("<br>");
+    add(`QA (${escapeHtml(qr.tier || "")})`, [metrics, outcomes].filter(Boolean).join("<br>"));
+  }
   wrap.appendChild(kv);
   const det = el("details"); det.appendChild(el("summary", "muted", "raw attestation JSON"));
   det.appendChild(el("pre", "code", escapeHtml(JSON.stringify(att, null, 2)))); wrap.appendChild(det);

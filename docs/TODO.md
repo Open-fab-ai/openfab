@@ -59,6 +59,28 @@ reuse the existing UI and swap `/api/*` calls for client-side LLM + WebCrypto.
 - **Capability matrix, not if-scattering:** adapters declare capabilities
   (`shellSandbox`, `forgePush`, `launchApp`, …); features unsupported in a mode render
   honestly disabled with a tooltip — never silently stubbed (R14).
+- **Where it lives:** `web/` in this repo (`index.html` + `app.js` + `style.css`), baked
+  into the Rust binary via `include_str!` (server mode) AND published as-is to Pages
+  (browser mode). One folder, two delivery paths.
+- **STANDING RULE — every `web/` change must keep BOTH modes working.** Server mode
+  (local OpenFab binary) and browser mode (Pages) ship from the same files; a change that
+  breaks either is a regression. Dual-mode behavior is a review criterion for all future
+  web UI work.
+- **Base selection in browser mode:** the base dropdown is hidden — a static page cannot
+  reach local CLIs (claude/codex) or a local agent-chat server. Browser mode has one
+  built-in base, the **browser swarm** (planner/coder/reviewer as prompted roles over
+  direct LLM calls in the tab). A CORS-enabled *remote* base may return later as an option.
+- **LLM provider config (Settings card; mandatory in browser mode, no env vars there):**
+  preset providers — **Ollama (CLOUD mode: ollama.com API + key — local Ollama is not
+  reachable from a hosted page without user config)**, OpenRouter, OpenAI, Anthropic,
+  NVIDIA, DashScope/Qwen, custom OpenAI-compatible URL — plus API key + model, stored in
+  localStorage. Mark which providers are browser/CORS-friendly rather than pretending all
+  work; state plainly that the key never leaves the browser except to the provider.
+- **Artifact exits in browser mode (ForgePort re-embodied as forge REST APIs):**
+  (1) **Download** — zip of code + `att.json` + SBOM, zero auth, always works;
+  (2) **GitHub** — REST API with a fine-grained PAT, code + attestation in ONE commit,
+  optional PR; (3) **Gitea/Forgejo** — token API when the instance enables CORS. The
+  local-git forge does not exist in a browser.
 - **Sequencing (R8/R4):** `app.js` is already over the 300-line budget, so this lands as
   (1) a pure refactor session extracting the ops port (zero behavior change), then
   (2) a feature session adding `ops_browser.js` + the Pages deploy workflow.

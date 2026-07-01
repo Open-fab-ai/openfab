@@ -45,7 +45,7 @@ Then post the approval prompt:
 ```
 post(group=GROUP, summary="Spec ready for approval: <id>",
   full="Requirements: specs/<id>.requirements.md\nContract: specs/<id>.spec.md\n\n
-        Reply `approve <id>` to build, or give changes to revise.")
+        Reply `build <id>` to build (or click Build in the dashboard), or give changes to revise.")
 ```
 
 ## Submit to OpenFab (so it appears on the dashboard)
@@ -71,8 +71,11 @@ dashboard's "Incoming from Robrix" panel.
 A build can start either way — but **every path must converge on OpenFab's gate** (sign +
 N-of-M sign-off). Never let the room workflow end at "done" without OpenFab gating it.
 
-- **Entry ① OpenFab drives** — the human clicks Build in the dashboard (or `approve <id>`):
-  OpenFab ingests the contract and dispatches the implementer itself; you do not implement.
+- **Entry ① OpenFab drives** — the human clicks Build in the dashboard, or types `build <id>`
+  in the room (the Bridge relays it to OpenFab's /api/run; re-building an existing spec auto-bumps
+  the version, so `build <id>` again gives a clean v2). OpenFab ingests the contract and dispatches
+  the implementer itself; you do not implement. (`approve <run>` is different — it signs off an
+  already-built run at the gate, it does NOT start a build.)
 - **Entry ② the room team builds** — you run the normal issue-workflow (implementer →
   reviewers). When the code is finished and the reviewers approve, **you MUST hand the final
   artifact to OpenFab's gate** by submitting the built bytes:

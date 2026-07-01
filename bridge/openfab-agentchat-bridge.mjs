@@ -54,6 +54,9 @@ const ASSIGNEE = process.env.BRIDGE_ASSIGNEE || 'wf_implementer';
 // assignee. Falls back to ASSIGNEE if the scheduler is unavailable or queues.
 const BRIDGE_ROLE = process.env.BRIDGE_ROLE || null;
 const BRIDGE_CAPABILITY = process.env.BRIDGE_CAPABILITY || null;
+// Base used when a room `build <spec-id>` triggers an OpenFab build (agent-chat = the
+// implementer team, the same base the room-driven flow already uses).
+const BRIDGE_BUILD_BASE = process.env.BRIDGE_BUILD_BASE || 'agent-chat';
 
 async function resolveAssignee(body) {
   const role = body.role || BRIDGE_ROLE;
@@ -365,10 +368,20 @@ async function listAgents() {
 async function peekAgent(name, lines) {
   // Only allow well-formed agent names (no shell/tmux injection).
   if (!/^[A-Za-z0-9_.-]+$/.test(name)) throw new Error(`bad agent name: ${name}`);
-  const n = Math.min(Math.max(parseInt(lines, 10) || 60, 1), 400);
+  const n = Math.min(Math.max(parseInt(lines, 10) || 60, 1), 2000);
   try {
-    const { stdout } = await execFileP('tmux', ['capture-pane', '-t', name, '-p']);
-    const all = stdout.split('\n');
+    // `-S -<n>` pulls the tmux scrollback history (not just the visible ~24-line pane), so the
+    // peek panel has real content to scroll up through; `-J` joins wrapped lines.
+    const { stdout } = await execFileP('tmux', [
+      'capture-pane',
+      '-t',
+      name,
+      '-p',
+      '-J',
+      '-S',
+      `-${n}`,
+    ]);
+    const all = stdout.replace(/\n+$/, '').split('\n');
     return { agent: name, lines: all.slice(Math.max(0, all.length - n)) };
   } catch (e) {
     return { agent: name, lines: [], error: `no live tmux session: ${e.message}` };
@@ -500,6 +513,26 @@ async function relayBind(room, project) {
   return { ok: res.ok, status: res.status };
 }
 
+// Trigger an OpenFab build of an already-ingested spec straight from the room: `build <spec-id>`.
+// This is the room-driven counterpart to the dashboard's "Incoming → Build" button — it hits the
+// SAME /api/run endpoint, so version-bumping (v1→v2…), verify, sign and the human gate all apply
+// unchanged. (Distinct from `approve <run>`, which signs off an already-built run.)
+async function relayBuild(specId, project) {
+  const q = project && project !== 'default' ? `?project=${encodeURIComponent(project)}` : '';
+  const res = await fetch(`${OPENFAB_URL}/api/run${q}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      intent: `Build '${specId}' (from Robrix).`,
+      spec_id: specId,
+      base: BRIDGE_BUILD_BASE,
+      gate: 'solo',
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, status: res.status, run_id: data.run_id, error: data.error };
+}
+
 const seenCmds = new Set();
 async function pollApprovals() {
   if (!MESSAGES_FILE) return;
@@ -512,6 +545,7 @@ async function pollApprovals() {
   if (!Array.isArray(msgs)) msgs = msgs?.messages || [];
   const approveRe = /^\s*(approve|sign|reject)\s+(\S+)/i;
   const bindRe = /^\s*\/?bind\s+(\S+)/i;
+  const buildRe = /^\s*\/?build\s+(\S+)/i;
   for (const m of msgs) {
     // Only honor commands that genuinely came through Matrix (a server-attested sender) —
     // do NOT trust a self-declared sender_mxid on a non-matrix message (privilege escalation).
@@ -533,6 +567,24 @@ async function pollApprovals() {
         log(`bound room ${room} → project ${bindM[1]} (by ${mxid}) → ${r.status}`);
       } catch (e) {
         log(`room bind failed for ${room}: ${e.message}`);
+      }
+      continue;
+    }
+
+    const buildM = buildRe.exec(body);
+    if (buildM && room) {
+      seenCmds.add(key);
+      try {
+        const project = await roomProject(room);
+        const r = await relayBuild(buildM[1], project);
+        log(`built ${buildM[1]} (project ${project || 'default'}) by ${mxid} → ${r.status} run=${r.run_id || r.error || ''}`);
+        if (r.ok && r.run_id) {
+          await postMessage(room, `🛠 Building \`${buildM[1]}\` → run \`${r.run_id}\`. Watch the OpenFab dashboard; I'll surface the sign-off gate when it's ready.`);
+        } else {
+          await postMessage(room, `⚠️ Build of \`${buildM[1]}\` failed to start: ${r.error || ('HTTP ' + r.status)}`);
+        }
+      } catch (e) {
+        log(`room build failed for ${buildM[1]}: ${e.message}`);
       }
       continue;
     }
@@ -596,6 +648,10 @@ const server = http.createServer(async (req, res) => {
     // C2: agent status
     if (req.method === 'GET' && url.pathname === '/agents') {
       return send(res, 200, await listAgents());
+    }
+    // matrix-Agent pool grid (role×capability) — passthrough so the OpenFab console can show it.
+    if (req.method === 'GET' && url.pathname === '/pool') {
+      return send(res, 200, await acFetch('/api/pool'));
     }
     // C3: tmux monitor — GET /agents/:name/peek?lines=N
     const peekMatch = url.pathname.match(/^\/agents\/([^/]+)\/peek$/);

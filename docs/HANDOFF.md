@@ -79,21 +79,11 @@ The Core, predicate, spec-cycle, and trust model don't change when swapping thes
    target (small REST API) for the showcase?
 4. **N-of-M default** is 2-of-2 (`policy/trust.json`) — confirm the real policy.
 
-## Known gaps / next steps (do NOT bundle with a feature — R8)
+## Known gaps / next steps
 
-- **File-size budget (R4).** Over 300 lines (incl. doc-comments + `#[cfg(test)]`):
-  `spec_cycle.rs` (514), `cli.rs` (387), `provenance.rs` (376), `ops.rs` (373),
-  `trust.rs` (362), `server.rs` (346), `llm_backend.rs` (343), `base_framework.rs` (316),
-  `runstate.rs` (302). Split each in its own refactor session before extending it.
-- The native framework dispatch (`base_framework::dispatch_native`) and the live
-  `forge_rest` PR path are implemented but **untested against real servers** (no instances
-  in this env). Verify when a native runtime / live forge is connected.
-- `BasePort::events()` (live inbound human-feedback stream, Matrix when base=HiClaw) is
-  not a trait method — feedback enters via the API/CLI. Add when wiring a live HiClaw.
-- No Rekor transparency log / Nix bit-identical build yet (later phases).
-- The web UI is ~614 lines of vanilla JS/CSS/HTML embedded via `include_str!`; no test
-  harness for it yet (verified manually in-browser). A Playwright smoke test is the
-  natural follow-up.
+Consolidated into the single backlog — see [`docs/TODO.md`](TODO.md) (priorities,
+backlog, engineering debt incl. the R4 file-size list, and process/docs). Do NOT bundle
+a gap with a feature (R8).
 
 ## R13 — fresh-session review before merge
 

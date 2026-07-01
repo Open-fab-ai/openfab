@@ -16,14 +16,17 @@ fills it). Skeptical? Read [**OpenFab vs. existing tools — the honest delta**]
 [`OpenFab_MVP_Design_and_PRD.md`](docs/OpenFab_MVP_Design_and_PRD.md)
 (source of truth) and [`AGENTS.md`](AGENTS.md) (how to work here).
 
-> **Status (v0.2, this build):** Core spec-cycle engine, `openfab/generation` in-toto
-> predicate, did:key signing + verification, N-of-M trust gate, conformance, reputation,
-> **a web UI** (`openfab serve`) for the full end-to-end visual flow, **6 swappable bases**
-> (claude · AgentScope · HiClaw · agent-chat · OpenHands) and the **4-forge matrix**
-> (GitHub · Forgejo · Gitea · GitCode), plus a one-click **reproduce/verify**. Every
-> artifact — the spec, the acceptance criteria, and the code — is authored by the Base
-> (LLM); there is no mock and no template. All wired through one shared `ops` layer used by
-> both the CLI and the API. `cargo fmt` + `clippy -D warnings` + 41 tests are green.
+> **Status (v0.3, this build):** Core spec-cycle engine, `openfab/generation` in-toto
+> predicate ([spec v0.1](https://open-fab.ai/attestation/generation/v0.1)), did:key
+> signing + verification, N-of-M trust gate, conformance, reputation, **a web UI**
+> (`openfab serve`) for the full end-to-end visual flow, **6 swappable bases**
+> (claude · codex · AgentScope · HiClaw · agent-chat · OpenHands) and the **4-forge matrix**
+> (GitHub · Forgejo · Gitea · GitCode), a one-click **reproduce/verify**, and **`openfab
+> attest`** to sign + gate code an external AI agent factory already produced (see
+> [ENTERPRISE_QUICKSTART](docs/ENTERPRISE_QUICKSTART.md)). Every artifact — the spec, the
+> acceptance criteria, and the code — is authored by the Base (LLM); there is no mock and
+> no template. All wired through one shared `ops` layer used by both the CLI and the API.
+> `cargo fmt` + `clippy -D warnings` + 51 tests are green.
 
 ---
 
@@ -60,6 +63,13 @@ demo/run_demo.sh             # cross-forge + iteration over a saved spec (base=c
 demo/run_selfhost_demo.sh    # OpenFab develops OpenFab — verified by cargo, signed, gated (PRD §6)
 ```
 
+**Already have your own AI agent factory?** Don't replace it — wrap it. `openfab attest`
+signs + gates code your factory *already produced*: it reads the existing files, runs the
+acceptance contract, and emits the same signed `openfab/generation` AI-BOM as a full run,
+verifiable offline with `openfab verify-file`. See
+[**ENTERPRISE_QUICKSTART**](docs/ENTERPRISE_QUICKSTART.md) for the end-to-end flow and how
+to wrap a factory as a base.
+
 **Self-hosting (PRD §6):** `run_selfhost_demo.sh` clones OpenFab's own source and points
 OpenFab at it to implement a change to *itself* — verified with the project's own
 `cargo build` + `cargo test` in the sandbox, signed with provenance, and merged only after
@@ -91,6 +101,7 @@ NL intent  →  spec (contract)  →  dispatch to base  →  app written
 | **Human-in-the-loop** | the trust gate **blocks merge** until N-of-M maintainers sign off |
 | **Neutral / cross-forge** | identical flow on two independent forges; provenance is plain JSON committed in-repo |
 | **Swappable base** | `--base claude` or `codex` (local CLIs) or any framework base (`agentscope`/`hiclaw`/`agent-chat`/`openhands`) — same Core pipeline |
+| **Bring your own factory** | `openfab attest` signs + gates code an external AI factory already produced — same AI-BOM, no generation ([enterprise guide](docs/ENTERPRISE_QUICKSTART.md)) |
 | **Spec cycle / iterative** | `openfab feedback` folds human NL into spec v→v+1 and re-runs |
 | **Decision memory** | per-run human-readable timeline/audit trail (`.openfab/runs/<id>/timeline.md`) |
 
@@ -210,8 +221,10 @@ or Qwen/DashScope with `OPENFAB_LLM=dashscope`.
 ```
 openfab serve    --repo <dir> [--port 8787]          # the web UI + JSON API
 openfab run      --spec <yaml> --repo <dir> [--base <id>] [--forge github|forgejo|gitea|gitcode]
+openfab attest   --spec <yaml> --repo <dir> [--gate solo|team|crowd|none]  # sign + gate EXISTING files (no generation)
 openfab signoff  --repo <dir> --run <id> --as <maintainer>
 openfab verify   --repo <dir> --run <id>
+openfab verify-file --repo <dir> --att provenance/<spec>-vN.att.json        # forge-agnostic, offline
 openfab feedback --repo <dir> --run <id> --note "<nl>" [--add-check "id=..,check=.."]
 openfab maintainer-add --repo <dir> --name <name>
 openfab reputation / list --repo <dir>

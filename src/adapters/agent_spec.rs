@@ -631,7 +631,13 @@ fn run_agent_spec_json(args: &[&str]) -> Result<serde_json::Value> {
 /// Author a spec as an agent-spec Task Contract: draft `.spec.md` from the NL intent (LLM),
 /// quality-gate it (`agent-spec lint`), then parse it (`agent-spec parse`) into an
 /// [`AgentSpecContract`]. The `.spec.md` is persisted in `spec_dir` as the source of truth.
-pub fn author_via_agent_spec(intent: &str, spec_dir: &Path) -> Result<Authored> {
+/// `forced_id`: when re-authoring an *existing* spec (refine), the caller's prior id — pinned
+/// before persisting so the file the next verify reads is the one this draft just wrote.
+pub fn author_via_agent_spec(
+    intent: &str,
+    spec_dir: &Path,
+    forced_id: Option<&str>,
+) -> Result<Authored> {
     let prompt = draft_prompt(intent);
     let (text, model, provider) = crate::adapters::llm_backend::complete(&prompt)
         .context("LLM failed to draft a .spec.md")?;
@@ -639,18 +645,31 @@ pub fn author_via_agent_spec(intent: &str, spec_dir: &Path) -> Result<Authored> 
     if !md.contains("spec:") {
         bail!("LLM reply did not contain a .spec.md (no `spec:` frontmatter):\n{text}");
     }
-    author_from_md(&md, intent, spec_dir, model, provider)
+    author_from_md(&md, intent, spec_dir, model, provider, forced_id)
+}
+
+/// Pin a contract's id when the caller already has a canonical one (refine: re-authoring an
+/// *existing* spec). The LLM drafts a fresh `.spec.md` from scratch and may pick a different
+/// `name:` than the original — applying the forced id BEFORE persisting (see [`author_from_md`])
+/// keeps the on-disk filename and the in-memory `Spec.id` from ever diverging. `None` (a fresh,
+/// no-prior-version build) keeps the LLM's own choice.
+fn apply_forced_id(contract: &mut AgentSpecContract, forced_id: Option<&str>) {
+    if let Some(id) = forced_id {
+        contract.spec.id = id.to_string();
+    }
 }
 
 /// The deterministic half of authoring (no LLM): take a `.spec.md` body, gate it with
 /// `agent-spec lint`, parse it with `agent-spec parse`, and persist it under its canonical
-/// id. `model`/`provider` label who drafted the `.spec.md`.
+/// id — `forced_id` when the caller has one (refine), else the drafted contract's own id.
+/// `model`/`provider` label who drafted the `.spec.md`.
 pub fn author_from_md(
     md: &str,
     intent: &str,
     spec_dir: &Path,
     model: String,
     provider: String,
+    forced_id: Option<&str>,
 ) -> Result<Authored> {
     std::fs::create_dir_all(spec_dir)
         .with_context(|| format!("creating spec dir {}", spec_dir.display()))?;
@@ -672,9 +691,11 @@ pub fn author_from_md(
 
     // Parse the contract into OpenFab's derived Spec.
     let ast = run_agent_spec_json(&["parse", &draft_str, "--format", "json"])?;
-    let contract = parse_contract(&ast, intent)?;
+    let mut contract = parse_contract(&ast, intent)?;
+    apply_forced_id(&mut contract, forced_id);
 
-    // Persist under the canonical id and drop the draft.
+    // Persist under the canonical id (BEFORE this point, never after — the file path and the
+    // in-memory Spec.id must never diverge) and drop the draft.
     let final_path = spec_dir.join(format!("{}.spec.md", contract.spec.id));
     std::fs::rename(&draft, &final_path)
         .with_context(|| format!("persisting spec to {}", final_path.display()))?;
@@ -687,14 +708,151 @@ pub fn author_from_md(
     })
 }
 
-/// Verify a spec by delegating to `agent-spec lifecycle` against the generated repo. The
-/// `.spec.md` is located at `<OPENFAB_SPEC_DIR>/<spec.id>.spec.md` (the source of truth).
+/// Recover the Allowed-Changes globs from a folded spec's assumptions (the `may modify: …`
+/// lines). Each line's leading token — backtick-quoted (`` `assets/**` ``) or bare — is the
+/// path glob; trailing prose (`… (adding class attributes only)`) is dropped. Empty when the
+/// spec declared no boundaries.
+pub fn allowed_globs(assumptions: &[String]) -> Vec<String> {
+    assumptions
+        .iter()
+        .filter_map(|a| a.trim().strip_prefix("may modify:"))
+        .filter_map(|rest| {
+            let rest = rest.trim();
+            let tok = if let Some(start) = rest.strip_prefix('`') {
+                start.split('`').next() // backtick-quoted glob
+            } else {
+                rest.split_whitespace().next() // first bare token
+            };
+            tok.map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// True if `rel` is covered by `glob` (exact, or a `dir`/`dir/**` prefix). Mirrors the
+/// bridge's allow-scope semantics.
+fn glob_match(rel: &str, glob: &str) -> bool {
+    let g = glob
+        .trim()
+        .trim_matches('`')
+        .trim_start_matches("./")
+        .trim_end_matches("**")
+        .trim_end_matches('/');
+    !g.is_empty() && (rel == g || rel.starts_with(&format!("{g}/")))
+}
+
+/// The implementation's REAL changed paths, parsed from `git status --porcelain -uall`. Uses
+/// git's own view of the worktree (not the base's self-reported file list) so a no-op build —
+/// the implementer "wrote" files whose content already matches HEAD, net-zero diff — is seen as
+/// empty. Excludes OpenFab's own bookkeeping (`specs/`, `provenance/`, `.openfab/`), which the
+/// cycle writes regardless of what the implementation did. Handles `R  old -> new` (takes new).
+pub fn parse_git_status_paths(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let path = line[3..].trim();
+            let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
+            if path.is_empty() || is_bookkeeping_or_artifact(path) {
+                return None;
+            }
+            Some(path.to_string())
+        })
+        .collect()
+}
+
+/// True for paths that are NOT part of the implementation: OpenFab's own bookkeeping
+/// (`specs/`, `provenance/`, `.openfab/`) and build artifacts / lockfiles that a fresh
+/// `cargo`/`trunk` build spews (`target/`, `dist/`, `node_modules/`, `Cargo.lock`, `*.bak`).
+/// Generated crates frequently ship no `.gitignore`, so `git status` would otherwise report
+/// thousands of these and the boundary check would mis-flag every one as a violation.
+fn is_bookkeeping_or_artifact(path: &str) -> bool {
+    const DIRS: &[&str] = &[
+        "specs/",
+        "provenance/",
+        ".openfab/",
+        "target/",
+        "dist/",
+        "node_modules/",
+        ".git/",
+    ];
+    // any path segment that is one of these dirs (so `app/target/…`, `app/dist/…` match too)
+    let hit_dir = DIRS.iter().any(|d| {
+        let bare = d.trim_end_matches('/');
+        path == bare
+            || path.starts_with(d)
+            || path.contains(&format!("/{d}"))
+            || path.split('/').any(|seg| seg == bare)
+    });
+    hit_dir || path.ends_with("Cargo.lock") || path.ends_with(".bak") || path.ends_with(".rlib")
+}
+
+/// Changed files that fall OUTSIDE the spec's Allowed Changes — i.e. the implementer edited
+/// files the contract didn't permit (v1's data-model deletion, a tampered "frozen" test file).
+/// Returns them so the cycle can FAIL the build (the Forbidden boundary is otherwise only
+/// advisory prompt text — never checked against the real diff). Empty when the spec declared no
+/// boundaries (nothing to enforce). Matches each changed path (repo-relative, e.g. `app/x`)
+/// against each glob both as-is and with the `target_dir/` prefix stripped, since specs write
+/// boundaries either repo-relative (`app/assets/**`) or target-relative (`assets/**`).
+pub fn boundary_violations(
+    changed: &[String],
+    target_dir: &str,
+    assumptions: &[String],
+) -> Vec<String> {
+    let globs = allowed_globs(assumptions);
+    if globs.is_empty() {
+        return vec![];
+    }
+    let prefix = format!("{}/", target_dir.trim_end_matches('/'));
+    changed
+        .iter()
+        .filter(|path| {
+            let stripped = path.strip_prefix(&prefix).unwrap_or(path);
+            !globs
+                .iter()
+                .any(|g| glob_match(path, g) || glob_match(stripped, g))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Required (`must_pass`) scenarios the verifier produced NO outcome for — i.e. the *verified*
+/// contract drifted from the *built* contract (e.g. the authored `.spec.md` got reset by a git
+/// branch op because OPENFAB_SPEC_DIR overlaps the repo, so `agent-spec lifecycle` ran an older
+/// spec). These otherwise fail acceptance silently; surface them by name so the cause is obvious.
+pub fn unverified_scenarios(spec: &Spec, outcomes: &[AcceptanceOutcome]) -> Vec<String> {
+    spec.acceptance
+        .iter()
+        .filter(|a| a.must_pass)
+        .filter(|a| !outcomes.iter().any(|o| o.id == a.id))
+        .map(|a| a.id.clone())
+        .collect()
+}
+
+/// Where a spec's generated code actually lives — `<repo>/<target_dir>`. Greenfield builds may
+/// nest the crate under `app/`, so acceptance (and coverage) must run *there*, not at the repo
+/// root (which can hold an unrelated/stale crate). `target_dir == "."` resolves to the repo root.
+pub fn acceptance_code_dir(repo: &Path, spec: &Spec) -> PathBuf {
+    let t = spec.target_dir.trim();
+    if t.is_empty() || t == "." {
+        repo.to_path_buf()
+    } else {
+        repo.join(t)
+    }
+}
+
+/// Verify a spec by delegating to `agent-spec lifecycle` against the generated code. The
+/// `.spec.md` is located at `<OPENFAB_SPEC_DIR>/<spec.id>.spec.md` (the source of truth); the
+/// bound tests run in the spec's `target_dir` (where the implementer wrote the code).
 /// Returns per-scenario [`AcceptanceOutcome`]s; the caller computes acceptance_passed.
 pub fn verify_via_lifecycle(
     spec: &Spec,
     repo: &Path,
 ) -> Result<(Vec<AcceptanceOutcome>, Vec<ScenarioVerdict>)> {
-    lifecycle_run(&spec_md_path(&spec.id), repo)
+    lifecycle_run(&spec_md_path(&spec.id), &acceptance_code_dir(repo, spec))
 }
 
 /// Run `agent-spec lifecycle <spec_md> --code <repo>` and return the per-scenario
@@ -785,7 +943,9 @@ pub fn verify_with_review(
     changed_paths: &[String],
 ) -> Result<(Vec<AcceptanceOutcome>, Vec<ScenarioVerdict>)> {
     let spec_md = spec_md_path(&spec.id);
-    let caller = lifecycle_caller_run(&spec_md, repo)?;
+    // Bound tests run where the code was generated (target_dir), not the repo root.
+    let code_dir = acceptance_code_dir(repo, spec);
+    let caller = lifecycle_caller_run(&spec_md, &code_dir)?;
 
     let report = match lifecycle_ai_pending(&caller) {
         Some(req_file) if !bridge_url.is_empty() => {
@@ -807,7 +967,7 @@ pub fn verify_with_review(
                 room,
             )?;
             let decisions = parse_review_decisions(&decisions_json);
-            resolve_ai_run(&spec_md, repo, &decisions)?
+            resolve_ai_run(&spec_md, &code_dir, &decisions)?
         }
         // No AI-pending scenarios (or no Bridge): the caller-mode report is already final.
         _ => caller,
@@ -942,6 +1102,180 @@ mod tests {
             "diagnostics": diagnostics,
             "quality_score": { "determinism": 1.0, "testability": 1.0, "coverage": 1.0, "overall": overall }
         })
+    }
+
+    fn spec_with_target(target_dir: &str) -> Spec {
+        Spec {
+            id: "demo".into(),
+            version: 1,
+            intent: "x".into(),
+            context: vec![],
+            acceptance: vec![],
+            assumptions: vec![],
+            open_questions: vec![],
+            human_signoff_required: true,
+            target_dir: target_dir.into(),
+            language: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_git_status_real_impl_paths() {
+        // `git status --porcelain -uall` output: 2-char code, space, path. Covers modified (` M`),
+        // added/untracked (`??`), and staged-add (`A `).
+        let out = " M app/assets/styles.css\n?? app/tests/styling.rs\nA  app/src/posts.rs\n M specs/x.spec.md\n?? provenance/x.att.json\n M .openfab/runs/r/status.json\n";
+        // OpenFab's own bookkeeping (specs/, provenance/, .openfab/) is excluded — only the
+        // implementation's real changes remain.
+        assert_eq!(
+            parse_git_status_paths(out),
+            vec![
+                "app/assets/styles.css".to_string(),
+                "app/tests/styling.rs".to_string(),
+                "app/src/posts.rs".to_string(),
+            ]
+        );
+        // a no-op build (implementer wrote content identical to HEAD) → git reports nothing
+        assert!(parse_git_status_paths("").is_empty());
+        // only bookkeeping changed → still counts as no real implementation
+        assert!(
+            parse_git_status_paths(" M specs/x.spec.md\n?? provenance/x.sbom.json\n").is_empty()
+        );
+        // renamed form "R  old -> new" → the new path is taken
+        assert_eq!(
+            parse_git_status_paths("R  app/a.rs -> app/b.rs\n"),
+            vec!["app/b.rs".to_string()]
+        );
+        // build artifacts must be ignored even when the project ships no .gitignore (generated
+        // crates often don't) — otherwise `trunk build`/`cargo` output (target/, dist/, lockfiles)
+        // floods git status and gets mis-flagged as thousands of boundary violations.
+        let noisy = " M app/assets/styles.css\n?? app/target/x.rlib\n?? target/debug/y\n?? dist/index.html\n?? app/dist/app.js\n?? Cargo.lock\n?? app/Cargo.lock\n?? app/index.html.bak\n?? node_modules/z\n";
+        assert_eq!(
+            parse_git_status_paths(noisy),
+            vec!["app/assets/styles.css".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_boundary_violations_catches_out_of_scope_edits() {
+        // A folded spec whose Allowed Changes are `assets/**`, `src/app.rs`, `tests/**`
+        // (target-relative, backtick-quoted, some with trailing prose — the real format).
+        let asm = vec![
+            "may modify: `assets/**`".to_string(),
+            "may modify: `src/app.rs` (adding `class` attributes only — never the Route enum)"
+                .to_string(),
+            "may modify: `tests/**`".to_string(),
+            "must not: Do NOT change `src/posts.rs`.".to_string(),
+        ];
+        // changed_files are repo-relative (`app/…`); target_dir is `app`.
+        let changed = vec![
+            "app/assets/blog.css".to_string(), // in scope (assets/**)
+            "app/src/app.rs".to_string(),      // in scope (src/app.rs)
+            "app/src/posts.rs".to_string(),    // OUT of scope → violation
+            "app/src/route.rs".to_string(),    // OUT of scope → violation
+        ];
+        let v = boundary_violations(&changed, "app", &asm);
+        assert_eq!(
+            v,
+            vec![
+                "app/src/posts.rs".to_string(),
+                "app/src/route.rs".to_string()
+            ]
+        );
+
+        // repo-relative globs (the v2 convention, `app/…`) also match
+        let asm2 = vec!["may modify: `app/assets/styles.css`".to_string()];
+        assert!(boundary_violations(&["app/assets/styles.css".into()], "app", &asm2).is_empty());
+        assert_eq!(
+            boundary_violations(&["app/src/posts.rs".into()], "app", &asm2),
+            vec!["app/src/posts.rs".to_string()]
+        );
+
+        // no declared boundaries → nothing enforced (don't fail specs that omit them)
+        assert!(boundary_violations(&["anything.rs".into()], "app", &[]).is_empty());
+    }
+
+    #[test]
+    fn test_unverified_scenarios_detects_drift() {
+        let mut spec = spec_with_target(".");
+        spec.acceptance = vec![
+            Acceptance {
+                id: "A".into(),
+                check: "x".into(),
+                must_pass: true,
+            },
+            Acceptance {
+                id: "B".into(),
+                check: "y".into(),
+                must_pass: true,
+            },
+        ];
+        // verifier only produced an outcome for "A" (a different/older contract) → "B" unverified
+        let outcomes = vec![AcceptanceOutcome {
+            id: "A".into(),
+            check: "agent-spec lifecycle [pass]".into(),
+            passed: true,
+            exit_code: 0,
+        }];
+        assert_eq!(
+            unverified_scenarios(&spec, &outcomes),
+            vec!["B".to_string()]
+        );
+        // every required scenario has an outcome → no drift
+        let full = vec![
+            AcceptanceOutcome {
+                id: "A".into(),
+                check: String::new(),
+                passed: true,
+                exit_code: 0,
+            },
+            AcceptanceOutcome {
+                id: "B".into(),
+                check: String::new(),
+                passed: true,
+                exit_code: 0,
+            },
+        ];
+        assert!(unverified_scenarios(&spec, &full).is_empty());
+    }
+
+    #[test]
+    fn test_apply_forced_id_overrides_when_present() {
+        // A refine draft: the LLM re-drafted the contract under a NEW name ("add-i32-lib"),
+        // unrelated to the prior spec's id ("demo-qa-add"). Without forcing, this would persist
+        // to a different file than the one verify reads later (the actual bug this guards).
+        let mut contract = AgentSpecContract {
+            spec: spec_with_target("."),
+            decisions: vec![],
+            allow: vec![],
+            deny: vec![],
+        };
+        contract.spec.id = "add-i32-lib".to_string();
+        apply_forced_id(&mut contract, Some("demo-qa-add"));
+        assert_eq!(contract.spec.id, "demo-qa-add");
+
+        // Greenfield (no prior id to preserve): the LLM's own id choice is kept.
+        let mut fresh = AgentSpecContract {
+            spec: spec_with_target("."),
+            decisions: vec![],
+            allow: vec![],
+            deny: vec![],
+        };
+        fresh.spec.id = "add-i32-lib".to_string();
+        apply_forced_id(&mut fresh, None);
+        assert_eq!(fresh.spec.id, "add-i32-lib");
+    }
+
+    #[test]
+    fn test_acceptance_code_dir_uses_target_dir() {
+        let repo = Path::new("/tmp/proj");
+        // greenfield nested under app/ → acceptance runs there, not the repo root
+        assert_eq!(
+            acceptance_code_dir(repo, &spec_with_target("app")),
+            Path::new("/tmp/proj/app")
+        );
+        // root layout (".") and empty → the repo root unchanged
+        assert_eq!(acceptance_code_dir(repo, &spec_with_target(".")), repo);
+        assert_eq!(acceptance_code_dir(repo, &spec_with_target("")), repo);
     }
 
     #[test]

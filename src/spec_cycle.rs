@@ -311,13 +311,69 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     // record its hash in the signed provenance (requirements → spec → code traceability).
     let requirements_sha256 = crate::adapters::agent_spec::requirements_sha256(&spec.id);
 
-    let acceptance_passed = spec.acceptance.iter().filter(|a| a.must_pass).all(|a| {
-        outcomes
-            .iter()
-            .find(|o| o.id == a.id)
-            .map(|o| o.passed)
-            .unwrap_or(false)
-    });
+    // Spec-drift guard: a required scenario with no verification outcome means the verified
+    // contract differs from the built one (don't fail silently — name the cause).
+    let drift = crate::adapters::agent_spec::unverified_scenarios(spec, &outcomes);
+    if !drift.is_empty() {
+        tl.step(
+            base,
+            "⚠️",
+            &format!(
+                "spec drift — {} required scenario(s) had NO verification result; the verified \
+                 contract differs from the built one (is OPENFAB_SPEC_DIR inside the repo, so a \
+                 branch op reset the authored spec?): [{}]",
+                drift.len(),
+                drift.join(", ")
+            ),
+        );
+    }
+
+    // Trust gate hardening (two holes that let dishonest builds pass acceptance):
+    //  ① empty implementation — the base produced no files, so the bound tests "pass" against
+    //     the pre-existing tree (a no-op build that reports success). Must fail.
+    //  ② out-of-scope edits — the base touched files the spec's Allowed Changes forbid (e.g.
+    //     deleting the data model, or rewriting a "frozen" test to make an unchanged-check pass).
+    //     The Forbidden boundary is otherwise only advisory prompt text; enforce it on the diff.
+    // Use git's OWN view of the worktree (not the base's self-reported `changed_files`): a no-op
+    // build "writes" files whose content already matches HEAD → net-zero diff → git shows
+    // nothing, even though the base claims it produced files. This is what let v3/v4/v5 pass.
+    let real_changed = git_worktree_changes(&repo);
+    let empty_impl = real_changed.is_empty();
+    if empty_impl {
+        tl.step(
+            base,
+            "⛔",
+            "no changes produced — the implementation made no net change to the code (git diff is \
+             empty); acceptance cannot be credited (it would only re-test pre-existing code).",
+        );
+    }
+    let boundary_violations = crate::adapters::agent_spec::boundary_violations(
+        &real_changed,
+        &spec.target_dir,
+        &spec.assumptions,
+    );
+    if !boundary_violations.is_empty() {
+        tl.step(
+            base,
+            "⛔",
+            &format!(
+                "boundary violation — {} file(s) edited outside the spec's Allowed Changes (the \
+                 Forbidden boundary was crossed): [{}]",
+                boundary_violations.len(),
+                boundary_violations.join(", ")
+            ),
+        );
+    }
+
+    let acceptance_passed = !empty_impl
+        && boundary_violations.is_empty()
+        && spec.acceptance.iter().filter(|a| a.must_pass).all(|a| {
+            outcomes
+                .iter()
+                .find(|o| o.id == a.id)
+                .map(|o| o.passed)
+                .unwrap_or(false)
+        });
 
     // 4b. Layered QA (PPT S11/S14 pillar 1): beyond the bound tests, run the configured tier's
     // checks (coverage now; mutation/fuzz honest-skip). A QA failure blocks like a failed test;
@@ -331,7 +387,9 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
-    let qa = crate::adapters::qa::run(&repo, qa_tier, qa_min_cov, qa_min_mut);
+    // Coverage/mutation run where the code lives (target_dir), not the repo root.
+    let qa_code_dir = crate::adapters::agent_spec::acceptance_code_dir(&repo, spec);
+    let qa = crate::adapters::qa::run(&qa_code_dir, qa_tier, qa_min_cov, qa_min_mut);
     let qa_passed = qa.passed();
     let qa_report_json = if matches!(qa_tier, crate::adapters::qa::QaTier::Fast) {
         None
@@ -648,6 +706,24 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{}…", s.chars().take(n).collect::<String>())
     } else {
         s
+    }
+}
+
+/// The implementation's real changed paths from git (`git status --porcelain -uall`) — the
+/// ground truth for "did the implementation actually change anything, and within bounds?", used
+/// by the trust-gate hardening instead of the base's self-reported file list. On any git error,
+/// returns empty (which the caller treats as a no-op → fail-closed, never silently pass).
+fn git_worktree_changes(repo: &Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            crate::adapters::agent_spec::parse_git_status_paths(&String::from_utf8_lossy(&o.stdout))
+        }
+        _ => vec![],
     }
 }
 

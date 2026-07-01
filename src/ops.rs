@@ -67,14 +67,18 @@ pub fn spec_source() -> SpecSource {
 }
 
 pub fn author_spec(intent: &str) -> Result<(Spec, String, String)> {
-    author_spec_with_file(intent, None)
+    author_spec_with_file(intent, None, None)
 }
 
 /// Author the spec, optionally ingesting an explicit `.spec.md` file (e.g. one the user
 /// uploaded in the dashboard) which takes precedence over the env-selected source.
+/// `forced_id`: refine's prior spec id — re-authoring an *existing* spec must persist under
+/// the SAME id the caller already knows (the LLM's redraft may pick a different `name:`, which
+/// would otherwise persist a different file than the one verify reads back — silent drift).
 pub fn author_spec_with_file(
     intent: &str,
     spec_file: Option<&Path>,
+    forced_id: Option<&str>,
 ) -> Result<(Spec, String, String)> {
     if intent.trim().len() < 4 {
         bail!("describe what you want to build");
@@ -97,14 +101,18 @@ pub fn author_spec_with_file(
                 Path::new(&spec_dir),
                 "ingested".to_string(),
                 "coordinator".to_string(),
+                forced_id,
             )?;
             let spec = authored.contract.folded_spec();
             spec.validate().context("the ingested spec was invalid")?;
             return Ok((spec, authored.model, authored.provider));
         }
         SpecSource::AgentSpecDraft => {
-            let authored =
-                crate::adapters::agent_spec::author_via_agent_spec(intent, Path::new(&spec_dir))?;
+            let authored = crate::adapters::agent_spec::author_via_agent_spec(
+                intent,
+                Path::new(&spec_dir),
+                forced_id,
+            )?;
             let spec = authored.contract.folded_spec();
             spec.validate()
                 .context("the agent-spec-authored spec was invalid")?;
@@ -114,7 +122,7 @@ pub fn author_spec_with_file(
     }
     let (a, model, provider) = crate::adapters::llm_backend::author_spec(intent)?;
     let spec = Spec {
-        id: slug(intent),
+        id: forced_id.map(String::from).unwrap_or_else(|| slug(intent)),
         version: 1,
         intent: intent.trim().to_string(),
         context: vec![],
@@ -169,7 +177,10 @@ pub fn build_with_spec_file(
     policy: &Policy,
     spec_file: Option<&Path>,
 ) -> Result<RunRecord> {
-    let (spec, model, provider) = author_spec_with_file(intent, spec_file)?;
+    let (mut spec, model, provider) = author_spec_with_file(intent, spec_file, None)?;
+    // Re-building an already-built spec (Incoming "Build" / repeated intent) must land on a fresh
+    // version + branch, not collide with the existing one. First build of a new spec → stays v1.
+    spec.version = next_version_for_spec(repo, &spec.id);
     start_run(
         repo,
         RunRequest {
@@ -206,6 +217,7 @@ pub fn import_build(
     let (spec, _m, _p) = author_spec_with_file(
         &format!("Import pre-built artifact from {builder}."),
         spec_file,
+        None,
     )?;
     start_run(
         repo,
@@ -228,6 +240,36 @@ pub fn import_build(
 /// acceptance criteria)** so the new requirement is actually captured + tested, and
 /// rebuild as v→v+1. This is why a refine genuinely changes the software (issue: a refine
 /// that kept the old acceptance just rebuilt to the same contract).
+/// The next version for a spec id, given existing runs' `spec_ref`s (`"<id>#v<N>"`). Returns
+/// `max(version for this id) + 1`, or 1 when the spec has never been built. Pure so the
+/// version-bump policy (used by every build path) is unit-tested independent of the run store.
+pub fn next_version(existing_spec_refs: &[String], spec_id: &str) -> u32 {
+    existing_spec_refs
+        .iter()
+        .filter_map(|r| {
+            let (id, ver) = r.split_once('#')?;
+            if id != spec_id {
+                return None;
+            }
+            ver.trim_start_matches('v').parse::<u32>().ok()
+        })
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1)
+}
+
+/// [`next_version`] reading the repo's run store — so re-building an already-built spec (from
+/// the Incoming "Build" button, a room `approve`, or a repeated NL intent) issues a fresh
+/// `#vN+1` on its own branch instead of colliding with the existing `#v1`.
+fn next_version_for_spec(repo: &Path, spec_id: &str) -> u32 {
+    let refs: Vec<String> = runstate::list_runs(repo)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.spec_ref)
+        .collect();
+    next_version(&refs, spec_id)
+}
+
 pub fn refine(
     repo: &Path,
     prior_run: &str,
@@ -243,9 +285,15 @@ pub fn refine(
         prior_spec.intent.trim(),
         note.trim()
     );
-    let (mut spec, model, provider) = author_spec(&combined)?;
-    spec.id = prior_spec.id.clone();
-    spec.version = prior_spec.version + 1;
+    // Force the prior spec's id (not just override it in memory after the fact): the LLM
+    // redrafts from scratch and may choose a different `name:` than before, which would
+    // otherwise persist the new contract under a DIFFERENT file than the one verify reads back
+    // — silent spec drift (gate compares against the new in-memory ids, verify ran the stale
+    // file's old ones, nothing matches, acceptance fails with no clue why).
+    let (mut spec, model, provider) = author_spec_with_file(&combined, None, Some(&prior_spec.id))?;
+    // max(existing versions)+1, not prior.version+1 — refining an older run must not collide with
+    // versions produced by later refines of the same spec.
+    spec.version = next_version_for_spec(repo, &spec.id);
     spec.intent = combined;
     start_run(
         repo,
@@ -475,6 +523,46 @@ pub fn docs(repo: &Path, run: &str) -> Result<Vec<Doc>> {
         }
     }
     Ok(out)
+}
+
+/// The unified git diff of a run's implementation (its feat commit on the run branch), for a
+/// GitHub-style diff view. Excludes provenance/ noise (the signed blob is in the Provenance tab).
+/// `None`/empty when the run has no feat commit (e.g. an import with no code change recorded).
+pub fn run_diff(repo: &Path, run: &str) -> Result<String> {
+    let rec = runstate::load_run(repo, run)?;
+    let git = |args: &[&str]| -> Result<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .context("invoking git")?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    // The agent's code commit carries the `OpenFab-Acceptance` trailer (sign-off commits carry
+    // `OpenFab-Signoff`, merges carry neither); find the latest such commit on the run's branch.
+    let commit = git(&[
+        "log",
+        &rec.branch,
+        "-n",
+        "1",
+        "--grep=OpenFab-Acceptance:",
+        "--format=%H",
+    ])?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        return Ok(String::new());
+    }
+    // Unified diff of that commit, dropping provenance/ JSON noise.
+    git(&[
+        "show",
+        commit,
+        "--format=",
+        "--unified=3",
+        "--",
+        ".",
+        ":(exclude)provenance/*",
+    ])
 }
 
 /// Reserve a run id for a fresh NL build (no LLM call needed — derived from the intent).
@@ -1129,6 +1217,37 @@ pub fn audit(repo: &Path, run: &str) -> Result<AuditTrail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_next_version_bumps_past_existing_runs() {
+        // no prior run for this spec → v1
+        assert_eq!(next_version(&[], "blog-ui"), 1);
+        assert_eq!(next_version(&["other#v3".into()], "blog-ui"), 1);
+        // one prior run → v2 (the bug: this used to always re-issue v1 and collide the branch)
+        assert_eq!(next_version(&["blog-ui#v1".into()], "blog-ui"), 2);
+        // several priors (incl. out-of-order / gaps) → max+1, not count+1
+        assert_eq!(
+            next_version(
+                &[
+                    "blog-ui#v1".into(),
+                    "blog-ui#v3".into(),
+                    "blog-ui#v2".into()
+                ],
+                "blog-ui"
+            ),
+            4
+        );
+        // other specs' versions never leak in
+        assert_eq!(
+            next_version(&["blog-ui#v1".into(), "counter#v9".into()], "blog-ui"),
+            2
+        );
+        // malformed refs are ignored, not panics
+        assert_eq!(
+            next_version(&["blog-ui".into(), "blog-ui#vX".into()], "blog-ui"),
+            1
+        );
+    }
 
     #[test]
     fn test_signoff_authorized_credential_gate() {

@@ -60,6 +60,7 @@ fn lints_parses_maps_and_persists_a_spec_md() {
         tmp.path(),
         "hand-written".to_string(),
         "test".to_string(),
+        None,
     )
     .expect("author_from_md failed");
 

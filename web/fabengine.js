@@ -57,7 +57,19 @@ const FabEngine = (() => {
     } catch (e) { return { ok: false, error: `${e.message} — the provider may not allow browser (CORS) calls` }; }
   }
 
-  async function chat(system, user) {
+  // Optional per-role models (Advanced): fall back to the primary model when unset.
+  function roleModel(role) {
+    const c = llmConfig() || {};
+    return (role === "spec" ? c.specModel : role === "coder" ? c.coderModel : "") || c.model;
+  }
+  // Fetch the full OpenRouter catalogue (no auth needed) → sorted ids, for "load all models".
+  async function loadOpenRouterModels() {
+    const r = await fetch("https://openrouter.ai/api/v1/models");
+    if (!r.ok) throw new Error(`OpenRouter models HTTP ${r.status}`);
+    return (await r.json()).data.map((m) => m.id).sort();
+  }
+
+  async function chat(system, user, modelOverride) {
     const cfg = llmConfig();
     if (!cfg || !cfg.baseUrl || !cfg.model) throw new Error("no LLM configured — open ⚙ Settings and set a provider, key and model");
     const url = cfg.baseUrl.replace(/\/+$/, "") + "/chat/completions";
@@ -66,7 +78,7 @@ const FabEngine = (() => {
     if (cfg.providerId === "anthropic") headers["anthropic-dangerous-direct-browser-access"] = "true";
     const r = await fetch(url, {
       method: "POST", headers,
-      body: JSON.stringify({ model: cfg.model, temperature: 0, stream: false, max_tokens: 6000,
+      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: false, max_tokens: 6000,
         messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
     });
     if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text().catch(() => "")).slice(0, 180)}`);
@@ -93,12 +105,12 @@ const FabEngine = (() => {
 
   // Parse, or ask the model once to re-emit as strict JSON (models occasionally wrap or
   // truncate). A second failure throws — we never fabricate a result (R14).
-  async function chatJson(system, user) {
-    const first = await chat(system, user);
+  async function chatJson(system, user, modelOverride) {
+    const first = await chat(system, user, modelOverride);
     try { return { obj: parseJson(first.text), model: first.model }; }
     catch (_) {
       const retry = await chat("Return ONLY the corrected JSON object — no prose, no code fences, no <think> blocks.",
-        `The following was supposed to be a single JSON object but did not parse. Re-emit it as strict, complete JSON:\n\n${first.text.slice(0, 12000)}`);
+        `The following was supposed to be a single JSON object but did not parse. Re-emit it as strict, complete JSON:\n\n${first.text.slice(0, 12000)}`, modelOverride);
       return { obj: parseJson(retry.text), model: first.model };
     }
   }
@@ -121,7 +133,7 @@ Rules for acceptance (the contract the built app is verified against):
   (an id= or function name), never a whole tag with attributes.
 USER REQUEST:
 ${intent}`;
-    const out = await chat(sys, usr);
+    const out = await chat(sys, usr, roleModel("spec"));
     const a = parseJson(out.text);
     a.model = out.model;
     return a;
@@ -155,7 +167,7 @@ ${intent}`;
     const tb = taskBlock(spec, intent);
     onEvent("🤖", "coder: generating the app (in-tab LLM call)");
     const coder = await chatJson(CODER_SYS,
-      `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`);
+      `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"));
     let files = normalizeFiles(coder.obj.files);
 
     onEvent("🧪", "checking against the acceptance contract");
@@ -165,7 +177,7 @@ ${intent}`;
       const rev = await chatJson(CODER_SYS,
         `${tb}\n\nCURRENT FILES:\n${dumpFiles(files)}\n\nThese acceptance checks FAILED — change the files so EVERY one passes verbatim:\n` +
         failed.map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}${c.detail ? " → " + c.detail : ""}`).join("\n") +
-        `\n\nReturn the COMPLETE corrected file set. ${FILES_SHAPE}`);
+        `\n\nReturn the COMPLETE corrected file set. ${FILES_SHAPE}`, roleModel("coder"));
       if (rev.obj.files && Object.keys(rev.obj.files).length) files = normalizeFiles(rev.obj.files);
     }
     return { files, model: coder.model, prompt: tb };
@@ -218,5 +230,5 @@ ${intent}`;
     return out;
   }
 
-  return { PROVIDERS, suggestedModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, generate, runChecks };
+  return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, generate, runChecks };
 })();

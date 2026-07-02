@@ -228,7 +228,20 @@
     <label class="fld">Model <span class="muted">(pick one or type any id)</span></label>
     <input type="text" id="llmmodel" list="modellist" placeholder="e.g. z-ai/glm-4.7-flash" autocomplete="off" />
     <datalist id="modellist"></datalist>
-    <div class="hint" style="margin-top:4px">Speed tip: <b>reasoning</b> models (e.g. <code>z-ai/glm-5.2</code>) think before answering, so they're slower. For faster generation pick a coder/flash model like <code>z-ai/glm-4.7-flash</code> or <code>qwen/qwen3-coder</code>.</div>
+    <div class="hint" style="margin-top:4px">
+      Speed tip: <b>reasoning</b> models (e.g. <code>z-ai/glm-5.2</code>) are slower; a coder/flash model like <code>z-ai/glm-4.7-flash</code> generates faster.
+      <a href="#" id="llmloadall" class="hidden" style="margin-left:6px">⟳ load all OpenRouter models</a>
+    </div>
+    <details class="adv" style="margin-top:10px">
+      <summary>Advanced — different models per role</summary>
+      <div class="advbody">
+        <div class="hint" style="margin-bottom:6px">Optional. Leave blank to use the model above for everything. OpenFab uses two LLM roles (the acceptance checks are deterministic, not an LLM).</div>
+        <label class="fld">Spec-author model <span class="muted">(reasoning helps)</span></label>
+        <input type="text" id="llmspecmodel" list="modellist" placeholder="same as above" autocomplete="off" />
+        <label class="fld">Code-gen model <span class="muted">(coder/flash is faster)</span></label>
+        <input type="text" id="llmcodermodel" list="modellist" placeholder="same as above" autocomplete="off" />
+      </div>
+    </details>
     <div style="display:flex; gap:8px; margin-top:10px">
       <button class="btn sm" id="llmsave" type="button" style="width:auto">Save</button>
       <button class="btn ghost sm" id="llmtest" type="button" style="width:auto">Test connection</button>

@@ -585,12 +585,22 @@ function wireLlmCard() {
       ? "browser-callable (CORS OK)"
       : "⚠ this provider does not answer browser CORS today — calls from a page will be blocked; use OpenRouter or a proxy";
     fillModels(p.id);
+    $("#llmloadall").classList.toggle("hidden", p.id !== "openrouter"); // full list only makes sense for OpenRouter
   };
   sel.onchange = () => fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value));
-  if (cur) { sel.value = cur.providerId || "custom"; $("#llmkey").value = cur.apiKey || ""; $("#llmmodel").value = cur.model || ""; }
+  if (cur) {
+    sel.value = cur.providerId || "custom"; $("#llmkey").value = cur.apiKey || ""; $("#llmmodel").value = cur.model || "";
+    $("#llmspecmodel").value = cur.specModel || ""; $("#llmcodermodel").value = cur.coderModel || "";
+    if (cur.specModel || cur.coderModel) $("#llmspecmodel").closest("details").open = true;
+  }
   fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value) || FabEngine.PROVIDERS[0]);
+  $("#llmloadall").onclick = async (e) => {
+    e.preventDefault(); const a = $("#llmloadall"); const old = a.textContent; a.textContent = "loading…";
+    try { const ids = await FabEngine.loadOpenRouterModels(); $("#modellist").innerHTML = ids.map((m) => `<option value="${escapeHtml(m)}">`).join(""); a.textContent = `✓ ${ids.length} models loaded`; }
+    catch (err) { a.textContent = old; toast(err.message, true); }
+  };
   $("#llmsave").onclick = () => {
-    FabEngine.saveLlmConfig({ providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim() });
+    FabEngine.saveLlmConfig({ providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim(), specModel: $("#llmspecmodel").value.trim(), coderModel: $("#llmcodermodel").value.trim() });
     $("#llmstatus").textContent = "saved — stored only in this browser";
     toast("LLM provider saved");
     updateFirstRun();

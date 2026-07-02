@@ -601,8 +601,8 @@ function wireLlmCard() {
   };
   $("#llmsave").onclick = () => {
     FabEngine.saveLlmConfig({ providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim(), specModel: $("#llmspecmodel").value.trim(), coderModel: $("#llmcodermodel").value.trim() });
-    $("#llmstatus").textContent = "saved — stored only in this browser";
-    toast("LLM provider saved");
+    $("#llmstatus").textContent = "saved — stored only in this browser · applies to your next Fabricate (past runs keep the model that made them)";
+    toast("LLM saved — applies to your next Fabricate");
     updateFirstRun();
     if (MODE === "browser") { loadBases(); loadModels(); }
   };

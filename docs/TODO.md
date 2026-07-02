@@ -141,6 +141,24 @@ code. This is a design task, not an implementation task, yet.
 
 ## Backlog (from the former ROADMAP)
 
+- **Browser attest of local files (OpenFab Web).** User points the page at a local folder
+  (File System Access API); OpenFab notarizes it and pushes to their forge — same posture
+  as the server-side `attest` base (`base: "attest"`, `runtime: "attested"`, model empty).
+  UX: pick folder → optional `js:` checks (or LLM-authored from the files; if declined,
+  the attestation states "no acceptance contract — integrity/identity only", never a
+  vacuous pass) → ONE authorship dropdown (`ai`/`human`/`mixed`, recorded as an operator
+  CLAIM) → sign → push (code + attestation, one commit). No metadata forms: typed-in
+  model/prompt "provenance" is unverifiable hearsay and must not be collected (R14).
+  **KEY DIFFERENCE from the generation AI-BOM:** a generation attestation records
+  provenance OpenFab *observed* — the model, the prompt fingerprint, the swarm, the
+  checks run at build time, authorship as it happened. An attest notarization records
+  only what can be observed *after the fact* — file digests, checks run now, signer,
+  time — and authorship only as a labeled claim. Observed-generation vs.
+  after-the-fact-notarization must stay visibly distinct in the predicate
+  (`base`/`runtime` fields) and in any verifier UI, so a notarization can never pass
+  itself off as generation provenance. The only real fix for unobserved provenance is
+  capture at generation time — which is the adoption pitch for the standard itself.
+
 - **Lineage chaining.** Embed `parent_attestation_sha256` in the generation predicate so a
   release cryptographically links to the version it refined (provable v1→v2→v3), instead
   of lineage living only in local run-state (`parent_run`). Lightweight; high audit value.

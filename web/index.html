@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>OpenFab — the trusted software fab</title>
-<link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <div class="wrap">
@@ -14,7 +14,8 @@
       <h1>OpenFab</h1>
       <p>natural language in · <b>trustworthy software</b> out — reproducible, signed, attributed, cross-forge</p>
     </div>
-    <button class="btn ghost sm" id="settingsbtn" type="button" title="Maintainers &amp; reputation">⚙ Settings</button>
+    <span class="modebadge" id="modebadge" title="How this OpenFab is running"></span>
+    <button class="btn ghost sm" id="settingsbtn" type="button" title="LLM provider · maintainers · reputation">⚙ Settings</button>
   </header>
   <div class="chips" id="propchips">
     <span class="chip"><b>signed provenance</b> (in-toto / SLSA)</span>
@@ -129,6 +130,22 @@
         </details>
         <pre class="code" id="tryout" style="display:none; margin-top:10px"></pre>
 
+        <div class="publishrow hidden" id="publishrow">
+          <div class="panel-h">📦 Publish <span class="muted">— the pushed repo is the durable, versioned record</span></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px">
+            <button class="btn ok sm" id="dlbundle" type="button" style="width:auto">⬇ Download bundle (code + attestation + SBOM)</button>
+            <button class="btn sm" id="ghpushbtn" type="button" style="width:auto">⬆ Push to GitHub…</button>
+            <button class="btn ghost sm" type="button" style="width:auto" disabled title="Planned — needs a CORS-enabled instance">Gitea/Forgejo (planned)</button>
+          </div>
+          <div id="ghpushform" class="hidden" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap">
+            <input type="text" id="ghowner" placeholder="owner" style="width:130px" />
+            <input type="text" id="ghrepo" placeholder="repo" style="width:150px" />
+            <input type="text" id="ghbranch" placeholder="branch (openfab)" style="width:140px" />
+            <input type="password" id="ghtoken" placeholder="fine-grained PAT (never leaves this browser except to api.github.com)" style="flex:1; min-width:220px" autocomplete="off" />
+            <button class="btn ok sm" id="ghpushgo" type="button" style="width:auto">Push</button>
+          </div>
+          <div class="hint" id="publishmsg" style="margin-top:6px"></div>
+        </div>
         <hr style="border:none; border-top:1px solid var(--line); margin:16px 0" />
         <div class="repro" id="reprorow">
           <button class="btn ghost sm" id="reprobtn" type="button">⟳ Reproduce &amp; verify (sovereign proof)</button>
@@ -190,6 +207,20 @@
     <h2>Settings</h2>
     <button class="btn ghost sm" id="drawerclose" type="button">✕</button>
   </div>
+  <div class="card" id="llmcard">
+    <h2>LLM provider <span class="muted">(browser mode — your key stays in this browser)</span></h2>
+    <label class="fld">Provider</label>
+    <select id="llmprovider"></select>
+    <div class="hint" id="llmproviderhint" style="margin-top:4px"></div>
+    <label class="fld">Base URL <span class="muted">(OpenAI-compatible)</span></label>
+    <input type="text" id="llmbaseurl" placeholder="https://openrouter.ai/api/v1" />
+    <label class="fld">API key</label>
+    <input type="password" id="llmkey" placeholder="sk-…" autocomplete="off" />
+    <label class="fld">Model</label>
+    <input type="text" id="llmmodel" placeholder="e.g. qwen/qwen3-coder" />
+    <button class="btn sm" id="llmsave" type="button" style="margin-top:10px; width:auto">Save</button>
+    <div class="hint" id="llmstatus" style="margin-top:6px"></div>
+  </div>
   <div class="card">
     <h2>Preferences</h2>
     <label class="fld">Default agent base <span class="muted">(pre-selected for new fabrications)</span></label>
@@ -209,6 +240,10 @@
     <div id="reputation"><div class="empty">Run a fabrication to populate.</div></div>
   </div>
 </aside>
-<script src="/app.js"></script>
+<script src="fabcrypto.js"></script>
+<script src="fabengine.js"></script>
+<script src="ops_browser.js"></script>
+<script src="forgepush.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

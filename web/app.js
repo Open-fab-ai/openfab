@@ -3,18 +3,51 @@
 
 const $ = (s) => document.querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
-const api = async (m, url, body) => {
+// The ops port: the JSON API is the contract. Two backends — the Rust server (fetch)
+// or OpsBrowser (the same routes implemented in-page). detectMode() picks one at boot.
+let MODE = "server";
+const serverBackend = async (m, url, body) => {
   const r = await fetch(url, { method: m, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { const e = new Error(j.error || j.hint || `${r.status}`); e.status = r.status; e.body = j; throw e; }
   return j;
 };
+const browserBackend = async (m, url, body) => {
+  try { return await OpsBrowser.dispatch(m, url, body); }
+  catch (e) { if (!e.status) e.status = 500; if (!e.body) e.body = { error: e.message }; throw e; }
+};
+let BACKEND = serverBackend;
+const api = (m, url, body) => BACKEND(m, url, body);
+
+async function detectMode() {
+  const forced = localStorage.getItem("openfab_mode"); // "server" | "browser" | null=auto
+  if (forced === "browser" || forced === "server") MODE = forced;
+  else {
+    try {
+      const c = new AbortController(); const t = setTimeout(() => c.abort(), 1500);
+      const r = await fetch("/api/bases", { signal: c.signal }); clearTimeout(t);
+      MODE = r.ok ? "server" : "browser";
+    } catch { MODE = "browser"; }
+  }
+  BACKEND = MODE === "server" ? serverBackend : browserBackend;
+  const b = $("#modebadge");
+  if (b) {
+    b.textContent = MODE === "server" ? "⚙ server fab" : "🌐 browser fab";
+    b.className = "modebadge " + MODE;
+    b.title = MODE === "server"
+      ? "Running against the local OpenFab server — full sandbox, git forge, all bases"
+      : "Running entirely in this browser — generation, js: checks, signing and verify are real; shell sandbox + git audit need the server";
+  }
+}
 function toast(msg, err) { const t = el("div", "toast" + (err ? " err" : ""), msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
 
 let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null, verify: null, draft: null };
 
 // ---------- init ----------
 async function init() {
+  await detectMode();
+  wireLlmCard();
+  wirePublish();
   $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
@@ -139,6 +172,7 @@ async function addMaintainer() {
 async function startRun(allowBridged) {
   const intent = $("#intent").value.trim();
   if (intent.length < 4) return toast("describe what you want to build first", true);
+  if (MODE === "browser" && !FabEngine.llmConfig()) { toggleDrawer(true); return toast("configure an LLM provider first (⚙ Settings)", true); }
   resetFlow();
   $("#baseprompt").classList.add("hidden");
   $("#run").disabled = true; $("#run").innerHTML = '<span class="spin"></span> the LLM is authoring the spec & building…';
@@ -248,14 +282,14 @@ async function showPhase(step) {
       <pre class="code">${escapeHtml(JSON.stringify(a.spec, null, 2))}</pre>`;
   } else if (step === "generate") {
     h = `<div class="ph-h">🤖 Generate — what the agent authored</div>
-      <div class="kv"><div class="k">base · model</div><div class="v">${p ? p.agent.base + " · " + p.agent.model : a.run.base_name}</div>
+      <div class="kv"><div class="k">base · model</div><div class="v">${p ? escapeHtml(p.agent.base + " · " + p.agent.model) : escapeHtml(a.run.base_name)}</div>
       <div class="k">runtime</div><div class="v">${a.run.base_runtime}</div>` +
       (p ? `<div class="k">prompt sha256</div><div class="v">${p.prompt_sha256}</div></div>` : `</div>`) +
       (a.prompt
         ? `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ show the exact generation prompt</summary><pre class="code" style="margin-top:8px; white-space:pre-wrap; max-height:260px; overflow:auto">${escapeHtml(a.prompt)}</pre><div class="muted" style="margin-top:4px">Local run-state — the signed BOM stores only its sha256 (privacy/portability).</div></details>`
         : "") +
       (a.files.length
-        ? a.files.map((f) => `<div class="file-h">${f.path} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${f.author}">${f.author}</span></div>`).join("")
+        ? a.files.map((f) => `<div class="file-h">${escapeHtml(f.path)} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${escapeHtml(f.author)}">${escapeHtml(f.author)}</span></div>`).join("")
         : `<div class="muted">Files are committed to the draft branch <span class="mono">${a.run.branch}</span>. The signed file manifest (sha256 + author per file) is produced on release.</div>`) +
       `<div class="muted">Run it in “Run the app”.</div>`;
   } else if (step === "verify") {
@@ -328,7 +362,9 @@ async function runDraftApp() {
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
-    if (r.kind === "web") {
+    if (r.kind === "web-sandbox") {
+      renderSandboxedApp(frame, r.html);
+    } else if (r.kind === "web") {
       window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
       frame.innerHTML =
         `<div class="hint">🌐 running in a new tab → <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="dreopen">re-open</a> · <a href="#" id="dstopapp">stop</a></div>`;
@@ -465,6 +501,8 @@ async function loadArtifacts() {
   buildTryPresets();
   $("#tryout").style.display = "none";
   renderExplorer();
+  // Browser mode: publishing (download / forge push) is how a run becomes durable.
+  $("#publishrow").classList.toggle("hidden", MODE !== "browser");
   // Bring the just-revealed product step into view and focus its primary action so
   // the user doesn't have to scroll-hunt for it after generation completes.
   requestAnimationFrame(() => {
@@ -476,6 +514,61 @@ async function loadArtifacts() {
 function toggleDrawer(open) {
   $("#settingsdrawer").classList.toggle("hidden", !open);
   $("#drawerscrim").classList.toggle("hidden", !open);
+}
+
+// Render untrusted generated HTML in a sandbox="allow-scripts" iframe: scripts run, but
+// with an opaque (null) origin — no cookies, no localStorage/IndexedDB of this page.
+function renderSandboxedApp(container, html) {
+  const fr = document.createElement("iframe");
+  fr.className = "appsandbox";
+  fr.setAttribute("sandbox", "allow-scripts");
+  fr.srcdoc = html;
+  container.innerHTML = "";
+  container.appendChild(fr);
+}
+
+// ---------- browser mode: LLM provider card + publish exits ----------
+function wireLlmCard() {
+  const sel = $("#llmprovider"); if (!sel || typeof FabEngine === "undefined") return;
+  sel.innerHTML = "";
+  FabEngine.PROVIDERS.forEach((p) => { const o = el("option"); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
+  const cur = FabEngine.llmConfig();
+  const fill = (p) => {
+    $("#llmbaseurl").value = (cur && cur.providerId === p.id ? cur.baseUrl : p.baseUrl) || "";
+    $("#llmproviderhint").textContent = p.browser
+      ? "browser-callable (CORS OK)"
+      : "⚠ this provider does not answer browser CORS today — calls from a page will be blocked; use OpenRouter or a proxy";
+  };
+  sel.onchange = () => fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value));
+  if (cur) { sel.value = cur.providerId || "custom"; $("#llmkey").value = cur.apiKey || ""; $("#llmmodel").value = cur.model || ""; }
+  fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value) || FabEngine.PROVIDERS[0]);
+  $("#llmsave").onclick = () => {
+    FabEngine.saveLlmConfig({ providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim() });
+    $("#llmstatus").textContent = "saved — stored only in this browser";
+    toast("LLM provider saved");
+    if (MODE === "browser") { loadBases(); loadModels(); }
+  };
+  if (MODE === "server") $("#llmstatus").textContent = "server mode uses the server's OPENFAB_LLM config — this card applies when running as a static page (browser mode).";
+}
+
+function wirePublish() {
+  const dl = $("#dlbundle"); if (!dl) return;
+  dl.onclick = () => { if (STATE.artifacts) ForgePush.download(STATE.artifacts); };
+  $("#ghpushbtn").onclick = () => $("#ghpushform").classList.toggle("hidden");
+  const saved = JSON.parse(localStorage.getItem("openfab_gh_target") || "{}");
+  $("#ghowner").value = saved.owner || ""; $("#ghrepo").value = saved.repo || ""; $("#ghbranch").value = saved.branch || "";
+  $("#ghpushgo").onclick = async () => {
+    const t = { owner: $("#ghowner").value.trim(), repo: $("#ghrepo").value.trim(), branch: $("#ghbranch").value.trim() || "openfab", token: $("#ghtoken").value.trim() };
+    if (!t.owner || !t.repo || !t.token) return toast("owner, repo and a PAT are required", true);
+    localStorage.setItem("openfab_gh_target", JSON.stringify({ owner: t.owner, repo: t.repo, branch: t.branch })); // never the token
+    const btn = $("#ghpushgo"); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+    try {
+      const out = await ForgePush.pushGitHub({ ...t, message: `openfab: ${STATE.artifacts.run.spec_ref} — code + signed attestation` }, STATE.artifacts);
+      $("#publishmsg").innerHTML = `✅ pushed in one commit → <a href="${out.url}" target="_blank" rel="noopener">${out.sha.slice(0, 10)}</a> (code + attestation + SBOM)`;
+      toast("pushed to GitHub ✓");
+    } catch (e) { toast(e.message, true); $("#publishmsg").textContent = "✖ " + e.message; }
+    finally { btn.disabled = false; btn.textContent = "Push"; }
+  };
 }
 
 // Wizard collapse: fold a finished step to a one-line summary; null summary expands it.
@@ -506,7 +599,13 @@ async function runApp() {
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…'; msg.innerHTML = "";
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
-    if (r.kind === "web") {
+    if (r.kind === "web-sandbox") {
+      // Browser mode: the generated app is UNTRUSTED model output — render it only in a
+      // sandboxed iframe with an opaque origin (no allow-same-origin), so it can never
+      // read this page's storage (LLM key, signing keys). Never a same-origin tab/blob.
+      renderSandboxedApp($("#appframe"), r.html);
+      msg.innerHTML = "🌐 running below in a sandboxed frame — opaque origin, no access to this page's keys or storage";
+    } else if (r.kind === "web") {
       // Open the running app in a SEPARATE browser tab (keeps the OpenFab tab clean for
       // the demo), with controls to re-open or stop it.
       window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
@@ -584,7 +683,7 @@ function viewToggle(detail, prettyFn, rawText) {
 
 function renderFile(f) {
   const d = $("#artdetail"); d.innerHTML = "";
-  d.appendChild(el("div", "file-h", `${f.path}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${f.author}">${f.author}</span>`));
+  d.appendChild(el("div", "file-h", `${escapeHtml(f.path)}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${escapeHtml(f.author)}">${escapeHtml(f.author)}</span>`));
   const ext = (f.path.split(".").pop() || "").toLowerCase();
   if (ext === "md") {
     viewToggle(d, () => { const m = el("div", "md"); m.innerHTML = mdToHtml(f.contents); return m; }, f.contents);
@@ -632,7 +731,14 @@ function mdToHtml(src) {
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/\*([^*]+)\*/g, "<i>$1</i>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => {
+      const url = u.trim();
+      // Strict allowlist: an http(s)/mailto URL with NO chars that could break out of the
+      // href="..." attribute (quotes, angle brackets, backtick, whitespace, control chars).
+      // Otherwise render as plain escaped text — the link text/url are LLM-controlled.
+      return /^(https?:|mailto:)[^\s"'<>` -]*$/i.test(url)
+        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${t}</a>` : `${t} (${u})`;
+    });
   let html = "", list = null;
   for (const ln of esc(src).split("\n")) {
     let m;
@@ -691,13 +797,13 @@ function renderProvenance(att) {
     ? `<a href="${escapeHtml(pt)}" target="_blank" rel="noopener">${escapeHtml(pt)}</a>`
     : escapeHtml(pt));
   add("agent DID", (p.agent?.did) || "");
-  add("base · model", `${p.agent?.base || ""} · ${p.agent?.model || ""}`);
+  add("base · model", `${escapeHtml(p.agent?.base || "")} · ${escapeHtml(p.agent?.model || "")}`);
   add("prompt sha256", (p.prompt_sha256 || "").slice(0, 32) + "…");
   add("acceptance", p.acceptance_passed ? "✅ passed" : "❌ failed");
   add("payload sha256", (att.payload_sha256 || "").slice(0, 32) + "…");
   const sigs = (att.signatures || []).map((s) => `${s.role}:${shortDid(s.keyid)}`).join("  ·  ");
   add("signatures", sigs);
-  const auth = (p.generated || []).map((g) => `${g.path} [${g.lines}] <span class="tag-${g.author}">${g.author}</span>`).join("<br>");
+  const auth = (p.generated || []).map((g) => `${escapeHtml(g.path)} [${escapeHtml(g.lines)}] <span class="tag-${escapeHtml(g.author)}">${escapeHtml(g.author)}</span>`).join("<br>");
   add("attribution", auth);
   const so = (p.signoffs || []).map((s) => `${s.name} (${shortDid(s.did)})`).join("  ·  ") || "—";
   add("human sign-offs", so);
@@ -797,7 +903,11 @@ async function launchAppById(rid, btn) {
   const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
   try {
     const r = await api("POST", `/api/runs/${rid}/launch`);
-    if (r.kind === "web") { window.open(r.url, "_blank"); toast("launched → " + r.url); }
+    if (r.kind === "web-sandbox") {
+      // Open this app (loads its run) so its sandboxed frame renders in the product panel.
+      await openApp(rid, "");
+      toast("running in a sandboxed frame below");
+    } else if (r.kind === "web") { window.open(r.url, "_blank", "noopener"); toast("launched → " + r.url); }
     else if (r.kind === "web-failed") { toast(r.error, true); }
     else { toast("This app is a CLI (no web server)."); }
   } catch (e) { toast(e.message, true); }
@@ -815,6 +925,12 @@ async function deleteApp(id, name) {
 
 // ---------- util ----------
 function shortDid(d) { return d && d.length > 22 ? d.slice(0, 14) + "…" + d.slice(-4) : (d || ""); }
-function escapeHtml(s) { return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+// Escapes for BOTH text and double/single-quoted attribute contexts (quotes included) —
+// so the same helper is safe wherever it is interpolated (R13: escapeHtml was used in
+// href="..."/title="..." attribute contexts but did not escape quotes → breakout).
+function escapeHtml(s) {
+  return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 
 init();

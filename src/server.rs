@@ -33,6 +33,12 @@ use crate::spec_cycle::RunMode;
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
+// Browser-mode modules (OpenFab Web). Loaded in both modes so web/ ships identically to
+// the binary and to GitHub Pages; they stay dormant when the server answers /api/*.
+const FABCRYPTO_JS: &str = include_str!("../web/fabcrypto.js");
+const FABENGINE_JS: &str = include_str!("../web/fabengine.js");
+const OPS_BROWSER_JS: &str = include_str!("../web/ops_browser.js");
+const FORGEPUSH_JS: &str = include_str!("../web/forgepush.js");
 
 struct State {
     repo: PathBuf,
@@ -103,6 +109,10 @@ fn route(
         (Method::Get, [""]) | (Method::Get, ["index.html"]) => Ok(html(INDEX_HTML)),
         (Method::Get, ["app.js"]) => Ok(asset(APP_JS, "application/javascript")),
         (Method::Get, ["style.css"]) => Ok(asset(STYLE_CSS, "text/css")),
+        (Method::Get, ["fabcrypto.js"]) => Ok(asset(FABCRYPTO_JS, "application/javascript")),
+        (Method::Get, ["fabengine.js"]) => Ok(asset(FABENGINE_JS, "application/javascript")),
+        (Method::Get, ["ops_browser.js"]) => Ok(asset(OPS_BROWSER_JS, "application/javascript")),
+        (Method::Get, ["forgepush.js"]) => Ok(asset(FORGEPUSH_JS, "application/javascript")),
 
         // --- catalog ---
         (Method::Get, ["api", "bases"]) => Ok(json_resp(200, &json!(registry::list_bases()))),

@@ -225,7 +225,8 @@
     <label class="fld">API key</label>
     <input type="password" id="llmkey" placeholder="sk-…" autocomplete="off" />
     <label class="fld">Model</label>
-    <input type="text" id="llmmodel" placeholder="e.g. qwen/qwen3-coder" />
+    <input type="text" id="llmmodel" placeholder="e.g. z-ai/glm-5.2 · qwen/qwen3-coder" />
+    <div class="hint" style="margin-top:4px">Speed tip: <b>reasoning</b> models (e.g. <code>z-ai/glm-5.2</code>) think before answering, so they're slower. For faster generation try a non-reasoning coder model — e.g. <code>z-ai/glm-4.7-flash</code> or <code>qwen/qwen3-coder</code>.</div>
     <button class="btn sm" id="llmsave" type="button" style="margin-top:10px; width:auto">Save</button>
     <div class="hint" id="llmstatus" style="margin-top:6px"></div>
   </div>

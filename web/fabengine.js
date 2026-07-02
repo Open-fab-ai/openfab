@@ -103,34 +103,39 @@ ${intent}`;
     return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions over a files map — your files MUST make each return true):\n${checks}`;
   }
 
+  const CODER_SYS = "You are a senior CODER agent. Produce a complete, working, client-side web app. Use only vanilla HTML/CSS/JS.";
+  function normalizeFiles(files) {
+    const norm = {};
+    for (const [p, c] of Object.entries(files || {})) norm[p.startsWith("app/") ? p : "app/" + p.replace(/^\/+/, "")] = String(c);
+    return norm;
+  }
+  function dumpFiles(files) {
+    return Object.entries(files).map(([p, c]) => `--- ${p} ---\n${c}`).join("\n\n").slice(0, 24000);
+  }
+
+  // coder → run the REAL acceptance checks → revise ONLY on a real failure. This replaces
+  // a separate "reviewer" LLM call (which only *guessed* whether the checks pass) with the
+  // deterministic checks themselves — the acceptance contract IS the reviewer. Common apps
+  // pass on the first try, so most runs make just ONE code-gen call (faster + more honest:
+  // the revise is grounded in the actual failing checks, not a model's opinion).
   async function generate(spec, intent, onEvent) {
     const tb = taskBlock(spec, intent);
-    onEvent("🤖", "browser swarm: coder generating (in-tab LLM call)");
-    const coder = await chatJson(
-      "You are a senior CODER agent. Produce a complete, working, client-side web app. Use only vanilla HTML/CSS/JS.",
+    onEvent("🤖", "coder: generating the app (in-tab LLM call)");
+    const coder = await chatJson(CODER_SYS,
       `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`);
-    let out = coder.obj;
-    let files = out.files || {};
-    onEvent("🧐", "browser swarm: reviewer critiquing");
-    let review = { ok: true, issues: [] };
-    try {
-      const dump = Object.entries(files).map(([p, c]) => `--- ${p} ---\n${c}`).join("\n\n").slice(0, 24000);
-      review = parseJson((await chat(
-        "You are a strict REVIEWER agent. You do NOT write code — you find unmet acceptance checks and concrete bugs.",
-        `${tb}\n\nFILES:\n${dump}\n\nMentally evaluate each js: check against the files map. Reply ONLY JSON {"ok":<bool>,"issues":["..."]}`)).text);
-    } catch (e) { onEvent("  ", `reviewer parse failed (${e.message}); continuing`); }
-    if (review && review.ok === false && (review.issues || []).length) {
-      onEvent("🔧", `browser swarm: coder revising ${review.issues.length} issue(s)`);
-      const dump = Object.entries(files).map(([p, c]) => `--- ${p} ---\n${c}`).join("\n\n").slice(0, 24000);
-      const rev = parseJson((await chat(
-        "You are the CODER agent. Apply the reviewer's fixes and return the COMPLETE corrected file set.",
-        `${tb}\n\nCURRENT FILES:\n${dump}\n\nISSUES:\n${review.issues.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}\n\n${FILES_SHAPE}`)).text);
-      if (rev.files && Object.keys(rev.files).length) files = rev.files;
+    let files = normalizeFiles(coder.obj.files);
+
+    onEvent("🧪", "checking against the acceptance contract");
+    const failed = (await runChecks(spec, files)).filter((c) => !c.passed);
+    if (failed.length) {
+      onEvent("🔧", `coder: ${failed.length} acceptance check(s) failed — one revision pass`);
+      const rev = await chatJson(CODER_SYS,
+        `${tb}\n\nCURRENT FILES:\n${dumpFiles(files)}\n\nThese acceptance checks FAILED — change the files so EVERY one passes verbatim:\n` +
+        failed.map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}${c.detail ? " → " + c.detail : ""}`).join("\n") +
+        `\n\nReturn the COMPLETE corrected file set. ${FILES_SHAPE}`);
+      if (rev.obj.files && Object.keys(rev.obj.files).length) files = normalizeFiles(rev.obj.files);
     }
-    // normalize: everything under app/
-    const norm = {};
-    for (const [p, c] of Object.entries(files)) norm[p.startsWith("app/") ? p : "app/" + p.replace(/^\/+/, "")] = String(c);
-    return { files: norm, model: coder.model, prompt: tb };
+    return { files, model: coder.model, prompt: tb };
   }
 
   // ---- acceptance: js: expressions run for real, but NEVER in this page's realm ----

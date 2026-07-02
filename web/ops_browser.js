@@ -106,8 +106,8 @@ const OpsBrowser = (() => {
         if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.join("; ")}`);
         const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m));
         rec.files = gen.files;
-        ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) against the generated files`);
-        rec.acceptance = FabEngine.runChecks(rec.spec, rec.files);
+        ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
+        rec.acceptance = await FabEngine.runChecks(rec.spec, rec.files);
         rec.acceptance.forEach((c) => ev(rec, c.passed ? "✅" : "❌", `acceptance [${c.id}] ${c.check} → ${c.passed ? "pass" : "FAIL" + (c.detail ? ` (${c.detail})` : "")}`));
         rec.acceptance_passed = rec.acceptance.every((c) => c.passed);
         if (rec.mode === "draft") {
@@ -172,20 +172,22 @@ const OpsBrowser = (() => {
       const c = rec.files && rec.files[g.path];
       if (c == null || (await FabCrypto.sha256Hex(c)) !== g.sha256) source_identical = false;
     }
-    const checks = FabEngine.runChecks(rec.spec, rec.files || {});
+    const checks = await FabEngine.runChecks(rec.spec, rec.files || {});
     const all = checks.every((c) => c.passed);
     return { run_id: id, signature_valid, source_identical, all_acceptance_passed: all, reproducible: signature_valid && source_identical && all, checks: checks.map((c) => ({ check: c.check, passed: c.passed, exit_code: c.exit_code })), files_checked: att.statement.predicate.generated.length };
   }
 
-  function launchUrl(rec) {
-    // Inline local js/css into the entry html, serve as a blob (the browser IS the runtime).
+  function buildAppHtml(rec) {
+    // Inline local js/css into the entry html. The result is UNTRUSTED model output: it
+    // is rendered ONLY inside a sandbox="allow-scripts" iframe (opaque origin — no
+    // access to this page's localStorage/keys). Never a same-origin blob/tab (review B1).
     let html = (rec.files && rec.files["app/index.html"]) || "<h1>no app/index.html</h1>";
     html = html.replace(/<script[^>]*src=["']\.?\/?([^"']+)["'][^>]*><\/script>/g, (m, p) => {
       const c = rec.files["app/" + p.replace(/^app\//, "")]; return c != null ? `<script>\n${c}\n</script>` : m;
     }).replace(/<link[^>]*href=["']\.?\/?([^"']+\.css)["'][^>]*>/g, (m, p) => {
       const c = rec.files["app/" + p.replace(/^app\//, "")]; return c != null ? `<style>\n${c}\n</style>` : m;
     });
-    return URL.createObjectURL(new Blob([html], { type: "text/html" }));
+    return html;
   }
 
   async function artifacts(id) {
@@ -232,7 +234,7 @@ const OpsBrowser = (() => {
     if (seg[1] === "runs" && seg[3] === "reject") { const r = await loadRec(seg[2]); r.status = "rejected"; await putRun(r); return { run_id: r.run_id, status: r.status }; }
     if (seg[1] === "runs" && seg[3] === "reproduce") return reproduce(seg[2]);
     if (seg[1] === "runs" && seg[3] === "verify") { const rep = await reproduce(seg[2]); const r = await loadRec(seg[2]); return { conformant: rep.reproducible, accepted: r.accepted, checks: rep.checks.map((c, i) => ({ id: `c${i + 1}`, passed: c.passed, detail: c.check })) }; }
-    if (seg[1] === "runs" && seg[3] === "launch") { const r = await loadRec(seg[2]); return { kind: "web", url: launchUrl(r) }; }
+    if (seg[1] === "runs" && seg[3] === "launch") { const r = await loadRec(seg[2]); return { kind: "web-sandbox", html: buildAppHtml(r) }; }
     if (seg[1] === "runs" && seg[3] === "stop") return { stopped: true }; // blob apps have no process
     if (seg[1] === "runs" && seg[3] === "feedback") { const prior = await loadRec(seg[2]); return startRun({ intent: `${prior.intent}\n\nRevision requested by the human: ${body.note}`, gate: prior.gate, mode: body.mode || prior.mode, parent: prior }); }
     if (seg[1] === "runs" && seg[3] === "promote") { const d = await loadRec(seg[2]); if (!d.acceptance_passed) throw new Error("draft failed acceptance — no vacuous promotion"); return startRun({ intent: d.intent, gate: d.gate, mode: "release", parent: { run_id: d.run_id, version: d.version - 1 } }); }
@@ -243,5 +245,5 @@ const OpsBrowser = (() => {
     const e = new Error(`browser mode: no handler for ${method} ${p}`); e.status = 501; throw e;
   }
 
-  return { dispatch, loadRec, launchUrl };
+  return { dispatch, loadRec };
 })();

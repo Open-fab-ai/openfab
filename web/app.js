@@ -289,7 +289,7 @@ async function showPhase(step) {
         ? `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ show the exact generation prompt</summary><pre class="code" style="margin-top:8px; white-space:pre-wrap; max-height:260px; overflow:auto">${escapeHtml(a.prompt)}</pre><div class="muted" style="margin-top:4px">Local run-state — the signed BOM stores only its sha256 (privacy/portability).</div></details>`
         : "") +
       (a.files.length
-        ? a.files.map((f) => `<div class="file-h">${f.path} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${f.author}">${f.author}</span></div>`).join("")
+        ? a.files.map((f) => `<div class="file-h">${escapeHtml(f.path)} · sha256 ${f.sha256.slice(0,16)}… · author <span class="tag-${escapeHtml(f.author)}">${escapeHtml(f.author)}</span></div>`).join("")
         : `<div class="muted">Files are committed to the draft branch <span class="mono">${a.run.branch}</span>. The signed file manifest (sha256 + author per file) is produced on release.</div>`) +
       `<div class="muted">Run it in “Run the app”.</div>`;
   } else if (step === "verify") {
@@ -362,7 +362,9 @@ async function runDraftApp() {
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…';
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
-    if (r.kind === "web") {
+    if (r.kind === "web-sandbox") {
+      renderSandboxedApp(frame, r.html);
+    } else if (r.kind === "web") {
       window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
       frame.innerHTML =
         `<div class="hint">🌐 running in a new tab → <a href="${r.url}" target="_blank" rel="noopener">${r.url}</a> · <a href="#" id="dreopen">re-open</a> · <a href="#" id="dstopapp">stop</a></div>`;
@@ -514,6 +516,17 @@ function toggleDrawer(open) {
   $("#drawerscrim").classList.toggle("hidden", !open);
 }
 
+// Render untrusted generated HTML in a sandbox="allow-scripts" iframe: scripts run, but
+// with an opaque (null) origin — no cookies, no localStorage/IndexedDB of this page.
+function renderSandboxedApp(container, html) {
+  const fr = document.createElement("iframe");
+  fr.className = "appsandbox";
+  fr.setAttribute("sandbox", "allow-scripts");
+  fr.srcdoc = html;
+  container.innerHTML = "";
+  container.appendChild(fr);
+}
+
 // ---------- browser mode: LLM provider card + publish exits ----------
 function wireLlmCard() {
   const sel = $("#llmprovider"); if (!sel || typeof FabEngine === "undefined") return;
@@ -586,7 +599,13 @@ async function runApp() {
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> starting…'; msg.innerHTML = "";
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
-    if (r.kind === "web") {
+    if (r.kind === "web-sandbox") {
+      // Browser mode: the generated app is UNTRUSTED model output — render it only in a
+      // sandboxed iframe with an opaque origin (no allow-same-origin), so it can never
+      // read this page's storage (LLM key, signing keys). Never a same-origin tab/blob.
+      renderSandboxedApp($("#appframe"), r.html);
+      msg.innerHTML = "🌐 running below in a sandboxed frame — opaque origin, no access to this page's keys or storage";
+    } else if (r.kind === "web") {
       // Open the running app in a SEPARATE browser tab (keeps the OpenFab tab clean for
       // the demo), with controls to re-open or stop it.
       window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
@@ -664,7 +683,7 @@ function viewToggle(detail, prettyFn, rawText) {
 
 function renderFile(f) {
   const d = $("#artdetail"); d.innerHTML = "";
-  d.appendChild(el("div", "file-h", `${f.path}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${f.author}">${f.author}</span>`));
+  d.appendChild(el("div", "file-h", `${escapeHtml(f.path)}  ·  sha256 ${f.sha256.slice(0, 16)}…  ·  author: <span class="tag-${escapeHtml(f.author)}">${escapeHtml(f.author)}</span>`));
   const ext = (f.path.split(".").pop() || "").toLowerCase();
   if (ext === "md") {
     viewToggle(d, () => { const m = el("div", "md"); m.innerHTML = mdToHtml(f.contents); return m; }, f.contents);
@@ -712,7 +731,8 @@ function mdToHtml(src) {
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/\*([^*]+)\*/g, "<i>$1</i>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) =>
+      /^(https?:|mailto:)/i.test(u.trim()) ? `<a href="${u.trim()}" target="_blank" rel="noopener">${t}</a>` : `${t} (${u})`);
   let html = "", list = null;
   for (const ln of esc(src).split("\n")) {
     let m;

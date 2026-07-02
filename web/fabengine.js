@@ -48,12 +48,26 @@ const FabEngine = (() => {
 
   function parseJson(text) {
     let t = String(text).trim();
+    // Reasoning models sometimes emit <think>…</think> before the answer — drop it.
+    t = t.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
     const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
     if (fence) t = fence[1].trim();
     try { return JSON.parse(t); } catch (_) { /* fall through */ }
     const i = t.indexOf("{"), j = t.lastIndexOf("}");
     if (i >= 0 && j > i) { try { return JSON.parse(t.slice(i, j + 1)); } catch (_) { /* fall through */ } }
     throw new Error("could not parse JSON from the model reply");
+  }
+
+  // Parse, or ask the model once to re-emit as strict JSON (models occasionally wrap or
+  // truncate). A second failure throws — we never fabricate a result (R14).
+  async function chatJson(system, user) {
+    const first = await chat(system, user);
+    try { return { obj: parseJson(first.text), model: first.model }; }
+    catch (_) {
+      const retry = await chat("Return ONLY the corrected JSON object — no prose, no code fences, no <think> blocks.",
+        `The following was supposed to be a single JSON object but did not parse. Re-emit it as strict, complete JSON:\n\n${first.text.slice(0, 12000)}`);
+      return { obj: parseJson(retry.text), model: first.model };
+    }
   }
 
   // ---- spec authoring (browser targets + js: checks only — honestly runnable here) ----
@@ -92,10 +106,10 @@ ${intent}`;
   async function generate(spec, intent, onEvent) {
     const tb = taskBlock(spec, intent);
     onEvent("🤖", "browser swarm: coder generating (in-tab LLM call)");
-    const coder = await chat(
+    const coder = await chatJson(
       "You are a senior CODER agent. Produce a complete, working, client-side web app. Use only vanilla HTML/CSS/JS.",
       `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`);
-    let out = parseJson(coder.text);
+    let out = coder.obj;
     let files = out.files || {};
     onEvent("🧐", "browser swarm: reviewer critiquing");
     let review = { ok: true, issues: [] };
@@ -119,15 +133,55 @@ ${intent}`;
     return { files: norm, model: coder.model, prompt: tb };
   }
 
-  // ---- acceptance: js: expressions run for real against the files map ----
-  function runChecks(spec, files) {
-    return (spec.acceptance || []).map((a) => {
-      let passed = false, detail = "";
-      const expr = String(a.check || "").replace(/^js:/, "");
-      try { passed = !!Function("files", `"use strict"; return (${expr});`)(files); }
-      catch (e) { passed = false; detail = e.message; }
-      return { id: a.id, check: a.check, passed, exit_code: passed ? 0 : 1, detail };
+  // ---- acceptance: js: expressions run for real, but NEVER in this page's realm ----
+  // The checks are LLM-authored (untrusted). They execute inside a sandboxed iframe
+  // WITHOUT allow-same-origin: an opaque (null) origin with no access to this page's
+  // localStorage/IndexedDB (where the user's LLM key and signing keys live). The
+  // evaluator only ever returns {passed, detail} booleans back via postMessage.
+  let evalFrame = null, evalReady = null, evalSeq = 0;
+  const EVAL_SRC = `<script>
+    window.onmessage = function (e) {
+      var d = e.data || {};
+      var passed = false, detail = "";
+      try { passed = !!Function("files", '"use strict"; return (' + d.expr + ');')(d.files); }
+      catch (err) { detail = String((err && err.message) || err); }
+      e.source.postMessage({ __fabcheck: d.id, passed: passed, detail: detail }, "*");
+    };
+  <\/script>`;
+  function evaluator() {
+    if (evalReady) return evalReady;
+    evalReady = new Promise((res) => {
+      evalFrame = document.createElement("iframe");
+      evalFrame.setAttribute("sandbox", "allow-scripts"); // opaque origin: no storage, no cookies
+      evalFrame.style.display = "none";
+      evalFrame.srcdoc = EVAL_SRC;
+      evalFrame.onload = () => res(evalFrame);
+      document.body.appendChild(evalFrame);
     });
+    return evalReady;
+  }
+  function runOneCheck(expr, files) {
+    return new Promise(async (res) => {
+      const frame = await evaluator();
+      const id = "c" + (++evalSeq);
+      const timer = setTimeout(() => { window.removeEventListener("message", on); res({ passed: false, detail: "check timed out (3s)" }); }, 3000);
+      function on(e) {
+        if (!e.data || e.data.__fabcheck !== id || e.source !== frame.contentWindow) return;
+        clearTimeout(timer); window.removeEventListener("message", on);
+        res({ passed: !!e.data.passed, detail: e.data.detail || "" });
+      }
+      window.addEventListener("message", on);
+      frame.contentWindow.postMessage({ id, expr, files }, "*");
+    });
+  }
+  async function runChecks(spec, files) {
+    const out = [];
+    for (const a of spec.acceptance || []) {
+      const expr = String(a.check || "").replace(/^js:/, "");
+      const r = await runOneCheck(expr, files);
+      out.push({ id: a.id, check: a.check, passed: r.passed, exit_code: r.passed ? 0 : 1, detail: r.detail });
+    }
+    return out;
   }
 
   return { PROVIDERS, llmConfig, saveLlmConfig, chat, authorSpec, generate, runChecks };

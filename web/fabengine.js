@@ -38,7 +38,10 @@ const FabEngine = (() => {
     });
     if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text().catch(() => "")).slice(0, 180)}`);
     const j = await r.json();
-    const content = j?.choices?.[0]?.message?.content;
+    const msg = j?.choices?.[0]?.message || {};
+    // Reasoning models (e.g. qwen3) sometimes return an empty `content` with the real
+    // output in a reasoning/thinking field — fall back before failing.
+    const content = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking;
     if (!content) throw new Error("LLM response missing choices[0].message.content");
     return { text: content, model: j.model || cfg.model };
   }

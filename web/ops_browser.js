@@ -38,6 +38,17 @@ const OpsBrowser = (() => {
     rec.events.push({ seq: rec.events.length + 1, icon, msg, t: new Date().toISOString().slice(11, 19) });
   }
 
+  // Canonical bytes of a statement, mirroring Rust's serde attributes: empty
+  // `signoffs`/`acceptance` vectors are OMITTED (skip_serializing_if = "Vec::is_empty"),
+  // so browser and Rust canonicalizations are byte-identical.
+  function canonicalStatement(stmt, signoffsSlice) {
+    const s = JSON.parse(JSON.stringify(stmt));
+    if (signoffsSlice !== undefined) s.predicate.signoffs = signoffsSlice;
+    if (!s.predicate.signoffs || !s.predicate.signoffs.length) delete s.predicate.signoffs;
+    if (!s.predicate.acceptance || !s.predicate.acceptance.length) delete s.predicate.acceptance;
+    return FabCrypto.canonicalJson(s);
+  }
+
   // ---- attestation (same shape + canonicalization as src/core/provenance.rs) ----
   async function buildAttestation(rec, files, checks, model, prompt) {
     const fab = await identity("fab");
@@ -63,7 +74,7 @@ const OpsBrowser = (() => {
         signoffs: [],
       },
     };
-    const canonical = FabCrypto.canonicalJson(statement);
+    const canonical = canonicalStatement(statement);
     return {
       payload_type: "application/vnd.in-toto+json",
       payload_sha256: await FabCrypto.sha256Hex(canonical),
@@ -123,7 +134,8 @@ const OpsBrowser = (() => {
     if (!rec || !rec.attestation) throw new Error("no attested run to sign");
     if (!rec.acceptance_passed) throw new Error("acceptance failed — a human cannot sign past a failed contract");
     const signer = await identity(as || "me");
-    const canonical = FabCrypto.canonicalJson(rec.attestation.statement);
+    // Sign the statement state BEFORE this sign-off is recorded (Rust add_signoff rule).
+    const canonical = canonicalStatement(rec.attestation.statement);
     rec.attestation.statement.predicate.signoffs.push({ did: signer.did, name: as || "me", timestamp: new Date().toISOString().replace(/\.\d+Z$/, "Z") });
     rec.attestation.signatures.push({ keyid: signer.did, sig: await FabCrypto.signB64(signer, canonical), algo: "ed25519", role: "human-signoff" });
     const need = rec.gate === "none" ? 0 : rec.gate === "team" ? 2 : 1;
@@ -143,17 +155,15 @@ const OpsBrowser = (() => {
     // Mirror Rust verify_signatures: the fab signed the statement WITHOUT signoffs (and
     // payload_sha256 pins that build-time payload); human sign-off #n signed the state
     // with the signoffs recorded before theirs.
-    const atBuild = JSON.parse(JSON.stringify(att.statement)); atBuild.predicate.signoffs = [];
-    const buildPayload = FabCrypto.canonicalJson(atBuild);
+    const buildPayload = canonicalStatement(att.statement, []);
     let signature_valid = (await FabCrypto.sha256Hex(buildPayload)) === att.payload_sha256;
     let nth = 0;
     for (const s of att.signatures) {
       if (s.role === "fab") {
         if (!(await FabCrypto.verifyB64(s.keyid, s.sig, buildPayload))) signature_valid = false;
       } else {
-        const atSign = JSON.parse(JSON.stringify(att.statement));
-        atSign.predicate.signoffs = att.statement.predicate.signoffs.slice(0, nth);
-        if (!(await FabCrypto.verifyB64(s.keyid, s.sig, FabCrypto.canonicalJson(atSign)))) signature_valid = false;
+        const atSign = canonicalStatement(att.statement, att.statement.predicate.signoffs.slice(0, nth));
+        if (!(await FabCrypto.verifyB64(s.keyid, s.sig, atSign))) signature_valid = false;
         nth++;
       }
     }

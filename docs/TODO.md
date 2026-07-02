@@ -85,11 +85,17 @@ reuse the existing UI and swap `/api/*` calls for client-side LLM + WebCrypto.
   fabcrypto/fabengine/ops_browser/forgepush, LLM provider Settings card, publish row
   (Download zip / GitHub one-commit push), Pages workflow. Verified end-to-end in a real
   static-page browser mode incl. a one-byte tamper -> reproducible:false.
-  **Remaining:** (a) cross-verify a browser attestation with the Rust `openfab
-  verify-file` (canonicalization is designed byte-compatible; not yet proven); (b) real
-  browser-LLM run with an OpenRouter key (pipeline proven with a mocked LLM; crypto/
-  checks/gate were real); (c) Gitea/Forgejo push; (d) enable Pages in repo settings +
-  DNS CNAME for app.open-fab.ai; (e) R4: app.js still over budget — split session.
+  **PROVEN (2026-07-01):** (a) cross-verification — the Rust `openfab verify-file`
+  validated a browser-signed attestation: signatures valid + source bit-identical
+  (required mirroring serde's skip_serializing_if: empty signoffs/acceptance are OMITTED
+  from canonical bytes); (b) real cloud-LLM run — GLM 5.2 on Ollama Cloud via the local
+  Ollama daemon as CORS gateway (direct ollama.com has no CORS) generated a stopwatch
+  app end-to-end: spec -> code -> 4 js: checks pass -> signed -> gate -> sign-off ->
+  merged, browser reproduce fully green. Known boundary: js: checks cannot re-run under
+  bash, so Rust verify reports acceptance FAIL honestly -> check-runtime tagging belongs
+  in predicate v0.2.
+  **Remaining:** (c) Gitea/Forgejo push; (d) enable Pages in repo settings + DNS CNAME
+  for app.open-fab.ai; (e) R4: app.js still over budget — split session.
 - **Sequencing (R8/R4):** `app.js` is already over the 300-line budget, so this lands as
   (1) a pure refactor session extracting the ops port (zero behavior change), then
   (2) a feature session adding `ops_browser.js` + the Pages deploy workflow.

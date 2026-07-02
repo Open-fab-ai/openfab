@@ -228,7 +228,7 @@ function resetFlow() {
   $("#draftcard").classList.add("hidden"); $("#draftframe").innerHTML = "";
   $("#phasedetail").classList.add("hidden"); $("#phasedetail").innerHTML = "";
   $("#appframe").innerHTML = ""; $("#runappmsg").innerHTML = "";
-  document.querySelectorAll(".step").forEach((s) => s.classList.remove("done", "active"));
+  document.querySelectorAll(".step").forEach((s) => s.classList.remove("done", "active", "inspecting"));
   STATE.artifacts = null; STATE.verify = null;
   setCollapsed("#buildcard", null); setCollapsed("#flowcard", null); setCollapsed("#productcard", null);
 }
@@ -276,6 +276,8 @@ function markPriorDone(steps, cur) { let hit = false; steps.forEach((s) => { if 
 
 // Click a workflow step → inspect exactly what that phase produced.
 async function showPhase(step) {
+  // Mark which step is being inspected (independent of the live done/active progress).
+  document.querySelectorAll(".step").forEach((s) => s.classList.toggle("inspecting", s.dataset.step === step));
   const pd = $("#phasedetail"); pd.classList.remove("hidden");
   if (!STATE.artifacts) { pd.innerHTML = `<div class="ph-h">${step}</div><div class="muted">Run a fabrication first — then each step reveals exactly what it produced.</div>`; return; }
   const a = STATE.artifacts;

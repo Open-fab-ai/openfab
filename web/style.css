@@ -188,6 +188,7 @@ textarea:focus, input:focus, select:focus { outline: none; border-color: var(--a
 .step { font-size: 11px; color: var(--faint); padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line); }
 .step.done { color: var(--ok); border-color: #1f5e4b; }
 .step.active { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.step.inspecting { color: var(--ink); border-color: var(--accent2); background: rgba(76,201,240,.14); box-shadow: 0 0 0 1px var(--accent2) inset; }
 
 /* timeline */
 .timeline { max-height: 360px; overflow-y: auto; padding-right: 6px; }

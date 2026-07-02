@@ -41,21 +41,26 @@
         <label class="fld">Describe it in plain English — the Base (LLM) writes the spec &amp; acceptance</label>
         <textarea id="intent" placeholder="e.g. a command-line tool that converts temperatures between Celsius, Fahrenheit and Kelvin, with a --selftest flag that verifies all conversions"></textarea>
 
-        <div class="selectrow" style="margin-top:14px">
-          <div>
-            <label class="fld">Agent base <span class="muted">(the swarm)</span> <span id="basebadge"></span></label>
-            <select id="base"></select>
-            <div class="hint" id="basehint"></div>
+        <details class="adv" id="basemode" style="margin-top:12px">
+          <summary>Base &amp; mode <span class="muted" id="basemodesum"></span></summary>
+          <div class="advbody">
+            <div class="selectrow">
+              <div>
+                <label class="fld">Agent base <span class="muted">(the swarm)</span> <span id="basebadge"></span></label>
+                <select id="base"></select>
+                <div class="hint" id="basehint"></div>
+              </div>
+              <div>
+                <label class="fld">Mode</label>
+                <select id="mode">
+                  <option value="release" selected>Release — sign + gate + provenance</option>
+                  <option value="draft">Draft — fast, un-attested</option>
+                </select>
+                <div class="hint" id="modehint"></div>
+              </div>
+            </div>
           </div>
-          <div>
-            <label class="fld">Mode</label>
-            <select id="mode">
-              <option value="release" selected>Release — sign + gate + provenance</option>
-              <option value="draft">Draft — fast, un-attested</option>
-            </select>
-            <div class="hint" id="modehint"></div>
-          </div>
-        </div>
+        </details>
 
         <details class="adv" style="margin-top:12px">
           <summary>Advanced — forge · models · approval policy</summary>

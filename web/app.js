@@ -575,11 +575,16 @@ function wireLlmCard() {
   sel.innerHTML = "";
   FabEngine.PROVIDERS.forEach((p) => { const o = el("option"); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
   const cur = FabEngine.llmConfig();
+  const fillModels = (id) => {
+    const dl = $("#modellist"); if (!dl) return;
+    dl.innerHTML = FabEngine.suggestedModels(id).map((m) => `<option value="${escapeHtml(m)}">`).join("");
+  };
   const fill = (p) => {
     $("#llmbaseurl").value = (cur && cur.providerId === p.id ? cur.baseUrl : p.baseUrl) || "";
     $("#llmproviderhint").textContent = p.browser
       ? "browser-callable (CORS OK)"
       : "⚠ this provider does not answer browser CORS today — calls from a page will be blocked; use OpenRouter or a proxy";
+    fillModels(p.id);
   };
   sel.onchange = () => fill(FabEngine.PROVIDERS.find((p) => p.id === sel.value));
   if (cur) { sel.value = cur.providerId || "custom"; $("#llmkey").value = cur.apiKey || ""; $("#llmmodel").value = cur.model || ""; }
@@ -590,6 +595,15 @@ function wireLlmCard() {
     toast("LLM provider saved");
     updateFirstRun();
     if (MODE === "browser") { loadBases(); loadModels(); }
+  };
+  $("#llmtest").onclick = async () => {
+    const cfg = { providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim() };
+    const s = $("#llmstatus"); const btn = $("#llmtest");
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span> testing…'; s.textContent = "";
+    const r = await FabEngine.probe(cfg);
+    s.innerHTML = r.ok ? `✅ connected — model responded as <b>${escapeHtml(r.model)}</b>` : `✖ ${escapeHtml(r.error)}`;
+    s.style.color = r.ok ? "var(--ai)" : "#ff6b6b";
+    btn.disabled = false; btn.textContent = "Test connection";
   };
   if (MODE === "server") $("#llmstatus").textContent = "server mode uses the server's OPENFAB_LLM config — this card applies when running as a static page (browser mode).";
 }

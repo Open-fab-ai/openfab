@@ -364,7 +364,8 @@ async function runDraftApp() {
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
     if (r.kind === "web-sandbox") {
-      renderSandboxedApp(frame, r.html);
+      if (openSandboxedTab(r.html)) { frame.innerHTML = '<div class="hint">🌐 running in a new tab — sandboxed (opaque origin, no key access)</div>'; }
+      else renderSandboxedApp(frame, r.html);
     } else if (r.kind === "web") {
       window.open(r.url + "?t=" + Date.now(), "_blank", "noopener");
       frame.innerHTML =
@@ -528,6 +529,26 @@ function renderSandboxedApp(container, html) {
   container.appendChild(fr);
 }
 
+// Open the generated app in a NEW TAB, still safely: the new tab is a blank page WE
+// control (same-origin, holds nothing) that hosts the untrusted app inside a full-window
+// sandbox="allow-scripts" iframe (opaque origin → it cannot reach this page's or the new
+// tab's localStorage/keys). Returns false if the popup was blocked (caller falls back to
+// the inline sandboxed frame). Never window.open() the app HTML directly — a blob/data
+// tab would be same-origin and could read the keys.
+function openSandboxedTab(html) {
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  const d = w.document;
+  d.open();
+  d.write('<!doctype html><meta charset="utf-8"><title>OpenFab — generated app (sandboxed)</title><style>html,body{margin:0;height:100%}iframe{position:fixed;inset:0;width:100%;height:100%;border:0}</style>');
+  d.close();
+  const fr = d.createElement("iframe");
+  fr.setAttribute("sandbox", "allow-scripts"); // opaque origin: no access to keys/storage
+  fr.srcdoc = html;                              // property, not attribute → no escaping
+  d.body.appendChild(fr);
+  return true;
+}
+
 // ---------- browser mode: LLM provider card + publish exits ----------
 // First-run onboarding (browser mode only): show a welcome banner + auto-open Settings
 // once, until an LLM provider is configured. Server mode uses the server's config, so no
@@ -622,11 +643,17 @@ async function runApp() {
   try {
     const r = await api("POST", `/api/runs/${STATE.runId}/launch`);
     if (r.kind === "web-sandbox") {
-      // Browser mode: the generated app is UNTRUSTED model output — render it only in a
-      // sandboxed iframe with an opaque origin (no allow-same-origin), so it can never
-      // read this page's storage (LLM key, signing keys). Never a same-origin tab/blob.
-      renderSandboxedApp($("#appframe"), r.html);
-      msg.innerHTML = "🌐 running below in a sandboxed frame — opaque origin, no access to this page's keys or storage";
+      // Browser mode: the generated app is UNTRUSTED model output. Open it in a NEW TAB,
+      // hosted inside an opaque-origin sandboxed iframe (no access to this page's keys).
+      // Fall back to the inline sandboxed frame if the popup is blocked.
+      if (openSandboxedTab(r.html)) {
+        $("#appframe").innerHTML = "";
+        msg.innerHTML = "🌐 running in a new tab — sandboxed (opaque origin, no access to your keys). <a href='#' id='reopenapp'>open again</a>";
+        const re = $("#reopenapp"); if (re) re.onclick = (e) => { e.preventDefault(); openSandboxedTab(r.html); };
+      } else {
+        renderSandboxedApp($("#appframe"), r.html);
+        msg.innerHTML = "🌐 running below in a sandboxed frame (popup blocked) — opaque origin, no access to your keys";
+      }
     } else if (r.kind === "web") {
       // Open the running app in a SEPARATE browser tab (keeps the OpenFab tab clean for
       // the demo), with controls to re-open or stop it.

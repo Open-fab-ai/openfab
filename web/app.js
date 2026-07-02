@@ -123,6 +123,13 @@ function updateBaseBadge(bases) {
   $("#basebadge").innerHTML = b ? `<span class="badge ${b.runtime}">${b.runtime === "native" ? "● live" : "○ " + b.runtime}</span>` : "";
   $("#basehint").textContent = b ? b.note : "";
   $("#baseprompt").classList.add("hidden");
+  updateBaseModeSummary();
+}
+function updateBaseModeSummary() {
+  const s = $("#basemodesum"); if (!s) return;
+  const base = $("#base").options[$("#base").selectedIndex];
+  const mode = $("#mode").value;
+  s.textContent = `— ${base ? base.text : ""} · ${mode}`;
 }
 async function loadForges() {
   const forges = await api("GET", "/api/forges");
@@ -342,7 +349,7 @@ const MODE_HINTS = {
   release: "Full trust ceremony: author spec → build → run acceptance → sign an in-toto/SLSA attestation → open a gated PR → block on N-of-M sign-off. The trusted checkpoint.",
   draft: "Fast inner loop: generate + run acceptance only. NO signature, gate, PR or provenance — iterate freely, nothing heavy fires. Promote to a signed release when ready.",
 };
-function updateModeHint() { $("#modehint").textContent = MODE_HINTS[$("#mode").value] || ""; }
+function updateModeHint() { $("#modehint").textContent = MODE_HINTS[$("#mode").value] || ""; updateBaseModeSummary(); }
 
 function showDraft(run) {
   $("#productcard").classList.add("hidden");

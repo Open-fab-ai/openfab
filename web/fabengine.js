@@ -138,7 +138,7 @@ ${intent}`;
   // WITHOUT allow-same-origin: an opaque (null) origin with no access to this page's
   // localStorage/IndexedDB (where the user's LLM key and signing keys live). The
   // evaluator only ever returns {passed, detail} booleans back via postMessage.
-  let evalFrame = null, evalReady = null, evalSeq = 0;
+  let evalSeq = 0;
   const EVAL_SRC = `<script>
     window.onmessage = function (e) {
       var d = e.data || {};
@@ -148,30 +148,26 @@ ${intent}`;
       e.source.postMessage({ __fabcheck: d.id, passed: passed, detail: detail }, "*");
     };
   <\/script>`;
-  function evaluator() {
-    if (evalReady) return evalReady;
-    evalReady = new Promise((res) => {
-      evalFrame = document.createElement("iframe");
-      evalFrame.setAttribute("sandbox", "allow-scripts"); // opaque origin: no storage, no cookies
-      evalFrame.style.display = "none";
-      evalFrame.srcdoc = EVAL_SRC;
-      evalFrame.onload = () => res(evalFrame);
-      document.body.appendChild(evalFrame);
-    });
-    return evalReady;
-  }
+  // Each check runs in its OWN fresh opaque-origin iframe, discarded after — so a
+  // malicious js: check can never persist state or forge the result of a LATER check
+  // (it shares no realm with the others). The parent trusts a reply only when both the
+  // sender window identity (e.source) and the per-call id match (R14).
   function runOneCheck(expr, files) {
-    return new Promise(async (res) => {
-      const frame = await evaluator();
+    return new Promise((res) => {
       const id = "c" + (++evalSeq);
-      const timer = setTimeout(() => { window.removeEventListener("message", on); res({ passed: false, detail: "check timed out (3s)" }); }, 3000);
+      const frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts"); // opaque origin: no storage/cookies
+      frame.style.display = "none";
+      frame.srcdoc = EVAL_SRC;
+      const done = (r) => { clearTimeout(timer); window.removeEventListener("message", on); frame.remove(); res(r); };
+      const timer = setTimeout(() => done({ passed: false, detail: "check timed out (3s)" }), 3000);
       function on(e) {
-        if (!e.data || e.data.__fabcheck !== id || e.source !== frame.contentWindow) return;
-        clearTimeout(timer); window.removeEventListener("message", on);
-        res({ passed: !!e.data.passed, detail: e.data.detail || "" });
+        if (e.source !== frame.contentWindow || !e.data || e.data.__fabcheck !== id) return;
+        done({ passed: !!e.data.passed, detail: e.data.detail || "" });
       }
       window.addEventListener("message", on);
-      frame.contentWindow.postMessage({ id, expr, files }, "*");
+      frame.onload = () => frame.contentWindow.postMessage({ id, expr, files }, "*");
+      document.body.appendChild(frame);
     });
   }
   async function runChecks(spec, files) {

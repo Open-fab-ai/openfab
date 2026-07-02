@@ -282,7 +282,7 @@ async function showPhase(step) {
       <pre class="code">${escapeHtml(JSON.stringify(a.spec, null, 2))}</pre>`;
   } else if (step === "generate") {
     h = `<div class="ph-h">🤖 Generate — what the agent authored</div>
-      <div class="kv"><div class="k">base · model</div><div class="v">${p ? p.agent.base + " · " + p.agent.model : a.run.base_name}</div>
+      <div class="kv"><div class="k">base · model</div><div class="v">${p ? escapeHtml(p.agent.base + " · " + p.agent.model) : escapeHtml(a.run.base_name)}</div>
       <div class="k">runtime</div><div class="v">${a.run.base_runtime}</div>` +
       (p ? `<div class="k">prompt sha256</div><div class="v">${p.prompt_sha256}</div></div>` : `</div>`) +
       (a.prompt
@@ -791,13 +791,13 @@ function renderProvenance(att) {
     ? `<a href="${escapeHtml(pt)}" target="_blank" rel="noopener">${escapeHtml(pt)}</a>`
     : escapeHtml(pt));
   add("agent DID", (p.agent?.did) || "");
-  add("base · model", `${p.agent?.base || ""} · ${p.agent?.model || ""}`);
+  add("base · model", `${escapeHtml(p.agent?.base || "")} · ${escapeHtml(p.agent?.model || "")}`);
   add("prompt sha256", (p.prompt_sha256 || "").slice(0, 32) + "…");
   add("acceptance", p.acceptance_passed ? "✅ passed" : "❌ failed");
   add("payload sha256", (att.payload_sha256 || "").slice(0, 32) + "…");
   const sigs = (att.signatures || []).map((s) => `${s.role}:${shortDid(s.keyid)}`).join("  ·  ");
   add("signatures", sigs);
-  const auth = (p.generated || []).map((g) => `${g.path} [${g.lines}] <span class="tag-${g.author}">${g.author}</span>`).join("<br>");
+  const auth = (p.generated || []).map((g) => `${escapeHtml(g.path)} [${escapeHtml(g.lines)}] <span class="tag-${escapeHtml(g.author)}">${escapeHtml(g.author)}</span>`).join("<br>");
   add("attribution", auth);
   const so = (p.signoffs || []).map((s) => `${s.name} (${shortDid(s.did)})`).join("  ·  ") || "—";
   add("human sign-offs", so);
@@ -897,7 +897,11 @@ async function launchAppById(rid, btn) {
   const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
   try {
     const r = await api("POST", `/api/runs/${rid}/launch`);
-    if (r.kind === "web") { window.open(r.url, "_blank"); toast("launched → " + r.url); }
+    if (r.kind === "web-sandbox") {
+      // Open this app (loads its run) so its sandboxed frame renders in the product panel.
+      await openApp(rid, "");
+      toast("running in a sandboxed frame below");
+    } else if (r.kind === "web") { window.open(r.url, "_blank", "noopener"); toast("launched → " + r.url); }
     else if (r.kind === "web-failed") { toast(r.error, true); }
     else { toast("This app is a CLI (no web server)."); }
   } catch (e) { toast(e.message, true); }

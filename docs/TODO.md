@@ -141,6 +141,25 @@ code. This is a design task, not an implementation task, yet.
 
 ## Backlog (from the former ROADMAP)
 
+- **Generation predicate v0.2 (spec evolution — do not wait on any standards body).**
+  The spec is versioned precisely so it can evolve on its own clock; if a community
+  process (OpenSSF/TODO) later picks it up, the current draft is the input, not a blocker.
+  Candidate v0.2 items, drafted the same way as v0.1 (spec page on open-fab.ai +
+  reference implementation together):
+  - **Evidence classes:** formalize `observed` (generation-time: model, prompt hash,
+    checks at build, authorship as it happened) vs `notarized` (after-the-fact: digests,
+    checks run now, claimed authorship) as a first-class predicate field, instead of
+    leaving it implicit in `base`/`runtime` values.
+  - **Lineage chaining:** `parent_attestation_sha256` so v1→v2→v3 is cryptographically
+    provable (today lineage is local run-state only).
+  - **Split-hash disclosure:** hash the intent and the acceptance contract as separate
+    fields — prove "same intent, different checks".
+  - **Behavioral approval:** a signed record that a human viewed the *running* build and
+    approved (today the sign-off covers the artifact hash only).
+  Process: draft v0.2 alongside v0.1 (additive where possible), update the reference
+  implementation + verify-file, publish at /attestation/generation/v0.2, keep v0.1
+  verifiable forever.
+
 - **Browser attest of local files (OpenFab Web).** User points the page at a local folder
   (File System Access API); OpenFab notarizes it and pushes to their forge — same posture
   as the server-side `attest` base (`base: "attest"`, `runtime: "attested"`, model empty).
@@ -159,24 +178,13 @@ code. This is a design task, not an implementation task, yet.
   itself off as generation provenance. The only real fix for unobserved provenance is
   capture at generation time — which is the adoption pitch for the standard itself.
 
-- **Lineage chaining.** Embed `parent_attestation_sha256` in the generation predicate so a
-  release cryptographically links to the version it refined (provable v1→v2→v3), instead
-  of lineage living only in local run-state (`parent_run`). Lightweight; high audit value.
 - **"Use the repo's existing tests as the contract" mode.** Attach to an existing repo +
   test suite and run *those* as the acceptance contract (no authored spec). The OSPO
   gate-inbound-contributions case. **Partially delivered** by `openfab attest` (signs +
   gates existing files against a spec's checks); the remaining piece is auto-adopting a
   repo's own test suite as the contract.
-- **Behavioral approval as a first-class signed event.** Add a signed record that
-  "maintainer X viewed build Y's running output and approved," so the human's behavioral
-  "yes" is itself notarized (today the gate signs over the artifact hash only).
 - **OpenFab shows the live swarm.** Stream agent-chat's live agent activity into OpenFab's
   own timeline (today you watch the swarm on the agent-chat dashboard :8084).
-- **AI-BOM split-hash.** Hash the intent and the acceptance contract as separate predicate
-  fields rather than one blob, so you can prove "same intent, different checks."
-
-## Engineering debt
-
 - **File-size budget (R4, >300 lines).** `spec_cycle.rs`, `cli.rs`, `provenance.rs`,
   `ops.rs`, `trust.rs`, `server.rs`, `llm_backend.rs`, `base_framework.rs`, `runstate.rs`.
   `cli.rs` and `ops.rs` grew further with `attest`. Split each in its own refactor session

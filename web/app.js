@@ -48,6 +48,7 @@ async function init() {
   await detectMode();
   wireLlmCard();
   wirePublish();
+  wireFirstRun();
   $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
@@ -528,6 +529,26 @@ function renderSandboxedApp(container, html) {
 }
 
 // ---------- browser mode: LLM provider card + publish exits ----------
+// First-run onboarding (browser mode only): show a welcome banner + auto-open Settings
+// once, until an LLM provider is configured. Server mode uses the server's config, so no
+// banner. `updateFirstRun()` is called again after the LLM card saves.
+function updateFirstRun() {
+  const fr = $("#firstrun"); if (!fr) return;
+  const needs = MODE === "browser" && !FabEngine.llmConfig();
+  fr.classList.toggle("hidden", !needs);
+}
+function wireFirstRun() {
+  const fr = $("#firstrun"); if (!fr) return;
+  $("#fr-open").onclick = () => toggleDrawer(true);
+  updateFirstRun();
+  // On the very first visit with no config, open Settings automatically so the one
+  // required step is unmissable (only once — respect the returning user).
+  if (MODE === "browser" && !FabEngine.llmConfig() && !localStorage.getItem("openfab_seen_welcome")) {
+    localStorage.setItem("openfab_seen_welcome", "1");
+    setTimeout(() => toggleDrawer(true), 400);
+  }
+}
+
 function wireLlmCard() {
   const sel = $("#llmprovider"); if (!sel || typeof FabEngine === "undefined") return;
   sel.innerHTML = "";
@@ -546,6 +567,7 @@ function wireLlmCard() {
     FabEngine.saveLlmConfig({ providerId: sel.value, baseUrl: $("#llmbaseurl").value.trim(), apiKey: $("#llmkey").value.trim(), model: $("#llmmodel").value.trim() });
     $("#llmstatus").textContent = "saved — stored only in this browser";
     toast("LLM provider saved");
+    updateFirstRun();
     if (MODE === "browser") { loadBases(); loadModels(); }
   };
   if (MODE === "server") $("#llmstatus").textContent = "server mode uses the server's OPENFAB_LLM config — this card applies when running as a static page (browser mode).";

@@ -27,6 +27,14 @@
   <div class="grid">
     <!-- LEFT: input -->
     <div>
+      <div class="firstrun hidden" id="firstrun">
+        <div class="fr-title">👋 Welcome to OpenFab Web</div>
+        <div class="fr-body">This runs <b>entirely in your browser</b> — it generates a small app, checks it, and produces a <b>signed AI-BOM</b>, with nothing installed. First, add an LLM provider so OpenFab has a model to use. <b>Your API key stays in this browser</b> (it's only sent to the provider you choose).</div>
+        <div class="fr-actions">
+          <button class="btn ok sm" id="fr-open" type="button" style="width:auto">⚙ Configure LLM in Settings</button>
+          <span class="fr-hint">OpenRouter is the easiest zero-install option.</span>
+        </div>
+      </div>
       <div class="card collapsible" id="buildcard">
         <h2><span class="n">1</span> What do you want to build?</h2>
         <label class="fld">Describe it in plain English — the Base (LLM) writes the spec &amp; acceptance</label>

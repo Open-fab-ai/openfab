@@ -731,8 +731,14 @@ function mdToHtml(src) {
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/\*([^*]+)\*/g, "<i>$1</i>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) =>
-      /^(https?:|mailto:)/i.test(u.trim()) ? `<a href="${u.trim()}" target="_blank" rel="noopener">${t}</a>` : `${t} (${u})`);
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, t, u) => {
+      const url = u.trim();
+      // Strict allowlist: an http(s)/mailto URL with NO chars that could break out of the
+      // href="..." attribute (quotes, angle brackets, backtick, whitespace, control chars).
+      // Otherwise render as plain escaped text — the link text/url are LLM-controlled.
+      return /^(https?:|mailto:)[^\s"'<>` -]*$/i.test(url)
+        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${t}</a>` : `${t} (${u})`;
+    });
   let html = "", list = null;
   for (const ln of esc(src).split("\n")) {
     let m;
@@ -919,6 +925,12 @@ async function deleteApp(id, name) {
 
 // ---------- util ----------
 function shortDid(d) { return d && d.length > 22 ? d.slice(0, 14) + "…" + d.slice(-4) : (d || ""); }
-function escapeHtml(s) { return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+// Escapes for BOTH text and double/single-quoted attribute contexts (quotes included) —
+// so the same helper is safe wherever it is interpolated (R13: escapeHtml was used in
+// href="..."/title="..." attribute contexts but did not escape quotes → breakout).
+function escapeHtml(s) {
+  return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 
 init();

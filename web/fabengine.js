@@ -19,10 +19,43 @@ const FabEngine = (() => {
     { id: "custom", name: "Custom (OpenAI-compatible)", baseUrl: "", browser: true },
   ];
 
+  // A curated, cross-brand shortlist per provider — offered as an editable dropdown
+  // (the field stays free-text, so any model id still works). OpenRouter slugs verified live.
+  const SUGGESTED = {
+    openrouter: [
+      "z-ai/glm-4.7-flash", "z-ai/glm-5.2", "qwen/qwen3-coder",
+      "anthropic/claude-sonnet-4.5", "openai/gpt-5.1", "google/gemini-2.5-flash",
+      "google/gemini-2.5-pro", "deepseek/deepseek-chat-v3.1", "moonshotai/kimi-k2",
+      "meta-llama/llama-4-maverick",
+    ],
+    openai: ["gpt-5.1", "gpt-4.1", "o4-mini"],
+    anthropic: ["claude-sonnet-4-5", "claude-opus-4-1"],
+    "ollama-cloud": ["glm-5.2:cloud", "qwen3-coder:480b-cloud", "deepseek-v3.1:cloud"],
+    dashscope: ["qwen3-coder", "qwen-max", "qwen-plus"],
+    nvidia: ["deepseek-ai/deepseek-r1", "qwen/qwen3-coder"],
+    custom: [],
+  };
+  function suggestedModels(providerId) { return SUGGESTED[providerId] || []; }
+
   function llmConfig() {
     try { return JSON.parse(localStorage.getItem(LLM_KEY)) || null; } catch { return null; }
   }
   function saveLlmConfig(cfg) { localStorage.setItem(LLM_KEY, JSON.stringify(cfg)); }
+
+  // Test an (unsaved) config with a tiny completion — returns {ok, model} or {ok:false, error}.
+  async function probe(cfg) {
+    if (!cfg.baseUrl || !cfg.model) return { ok: false, error: "set a Base URL and Model first" };
+    const url = cfg.baseUrl.replace(/\/+$/, "") + "/chat/completions";
+    const headers = { "Content-Type": "application/json" };
+    if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+    if (cfg.providerId === "anthropic") headers["anthropic-dangerous-direct-browser-access"] = "true";
+    try {
+      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({ model: cfg.model, max_tokens: 5, messages: [{ role: "user", content: "ping" }] }) });
+      if (!r.ok) return { ok: false, error: `HTTP ${r.status}: ${(await r.text().catch(() => "")).slice(0, 120)}` };
+      const j = await r.json();
+      return { ok: true, model: j.model || cfg.model };
+    } catch (e) { return { ok: false, error: `${e.message} — the provider may not allow browser (CORS) calls` }; }
+  }
 
   async function chat(system, user) {
     const cfg = llmConfig();
@@ -185,5 +218,5 @@ ${intent}`;
     return out;
   }
 
-  return { PROVIDERS, llmConfig, saveLlmConfig, chat, authorSpec, generate, runChecks };
+  return { PROVIDERS, suggestedModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, generate, runChecks };
 })();

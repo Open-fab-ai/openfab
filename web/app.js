@@ -745,7 +745,18 @@ function renderExplorer() {
     `<span class="tag-${f.author}">${f.author}</span>`, true, () => renderFile(f)));
   if (a.attestation) artNode(tree, "aibom", "📄", "AI-BOM", "", false, () => renderAiBom(a.attestation));
   if (a.sbom) artNode(tree, "sbom", "📄", "SBOM", "", false, () => renderSbom(a.sbom));
-  artNode(tree, "audit", "📜", "Audit trail", "", false, () => { const d = $("#artdetail"); d.innerHTML = '<div class="empty">loading audit trail…</div>'; loadAudit(d); });
+  artNode(tree, "audit", "📜", "Audit trail", "", false, () => {
+    const d = $("#artdetail");
+    if (MODE === "browser") {
+      // No git in a browser → no commit-graph audit. Explain honestly instead of erroring,
+      // and point to what IS the portable record here (the signed attestation + AI-BOM).
+      d.innerHTML = '<div class="artclaim">The git commit-graph audit trail is a <b>server-mode</b> feature (browser mode has no git). '
+        + 'In browser mode the portable record is the <b>signed attestation</b> and <b>AI-BOM</b> — publish it (Download / push to GitHub) '
+        + 'and the pushed repo carries the same provenance, verifiable with <code>openfab verify-file</code>.</div>';
+      return;
+    }
+    d.innerHTML = '<div class="empty">loading audit trail…</div>'; loadAudit(d);
+  });
   artNode(tree, "log", "📋", "Decision log", "", false, () => renderLog(a.timeline));
   selectArt(a.files.length ? "file0" : "aibom");
 }

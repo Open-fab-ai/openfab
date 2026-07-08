@@ -98,34 +98,49 @@ const OpsBrowser = (() => {
     };
     LIVE.set(run_id, rec);
     (async () => {
-      try {
-        ev(rec, "📥", `NL intent received → "${intent.slice(0, 90)}"`);
-        rec.spec = await FabEngine.authorSpec(intent);
-        rec.spec_ref = `${rec.spec.id || slug}#v${version}`;
-        ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
-        if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.join("; ")}`);
-        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m));
-        rec.files = gen.files;
-        ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
-        rec.acceptance = await FabEngine.runChecks(rec.spec, rec.files);
-        rec.acceptance.forEach((c) => ev(rec, c.passed ? "✅" : "❌", `acceptance [${c.id}] ${c.check} → ${c.passed ? "pass" : "FAIL" + (c.detail ? ` (${c.detail})` : "")}`));
-        rec.acceptance_passed = rec.acceptance.every((c) => c.passed);
-        if (rec.mode === "draft") {
-          rec.status = rec.acceptance_passed ? "draft" : "failed";
-          ev(rec, "⚡", "draft complete — un-attested (promote to run the trust ceremony)");
-        } else {
-          rec.attestation = await buildAttestation(rec, rec.files, rec.acceptance, gen.model, gen.prompt);
-          ev(rec, "🔏", `signed in-toto attestation (openfab/generation) in-browser; fab DID ${rec.attestation.signatures[0].keyid.slice(0, 24)}…; payload sha256 ${rec.attestation.payload_sha256.slice(0, 16)}`);
-          rec.status = rec.acceptance_passed ? "blocked" : "failed";
-          ev(rec, "🛡️", rec.acceptance_passed ? "trust gate: BLOCKED — awaiting human sign-off" : "trust gate: acceptance failed — gate stays closed (honest failure)");
+      const maxAttempts = 1 + retries(); // e.g. retries()=2 → up to 3 attempts
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          // Fresh state each attempt (re-author + re-generate) so a self-correction is genuine.
+          rec.files = null; rec.acceptance = []; rec.acceptance_passed = false; rec.attestation = null; rec.status = "running";
+          if (attempt === 1) ev(rec, "📥", `NL intent received → "${intent.slice(0, 90)}"`);
+          rec.spec = await FabEngine.authorSpec(intent);
+          rec.spec_ref = `${rec.spec.id || slug}#v${version}`;
+          ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
+          if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.join("; ")}`);
+          const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m));
+          rec.files = gen.files;
+          ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
+          rec.acceptance = await FabEngine.runChecks(rec.spec, rec.files);
+          rec.acceptance.forEach((c) => ev(rec, c.passed ? "✅" : "❌", `acceptance [${c.id}] ${c.check} → ${c.passed ? "pass" : "FAIL" + (c.detail ? ` (${c.detail})` : "")}`));
+          rec.acceptance_passed = rec.acceptance.every((c) => c.passed);
+          if (rec.mode === "draft") {
+            rec.status = rec.acceptance_passed ? "draft" : "failed";
+            if (rec.acceptance_passed) ev(rec, "⚡", "draft complete — un-attested (promote to run the trust ceremony)");
+          } else if (rec.acceptance_passed) {
+            rec.attestation = await buildAttestation(rec, rec.files, rec.acceptance, gen.model, gen.prompt);
+            ev(rec, "🔏", `signed in-toto attestation (openfab/generation) in-browser; fab DID ${rec.attestation.signatures[0].keyid.slice(0, 24)}…; payload sha256 ${rec.attestation.payload_sha256.slice(0, 16)}`);
+            rec.status = "blocked";
+            ev(rec, "🛡️", "trust gate: BLOCKED — awaiting human sign-off");
+          } else {
+            rec.status = "failed"; // acceptance did not pass
+          }
+          if (rec.status !== "failed") break; // success (blocked / draft / merged-later)
+          // acceptance failed — retry the whole run if attempts remain
+          if (attempt < maxAttempts) { ev(rec, "🔁", `acceptance did not pass — auto-retrying (${attempt}/${maxAttempts - 1})`); continue; }
+          ev(rec, "⛔", `acceptance still failing after ${maxAttempts} attempt(s) — honest failure, not a vacuous pass`);
+        } catch (e) {
+          if (attempt < maxAttempts) { ev(rec, "🔁", `attempt failed (${e.message}) — auto-retrying (${attempt}/${maxAttempts - 1})`); await putRun(rec); continue; }
+          rec.status = "failed"; ev(rec, "✖", `run failed after ${maxAttempts} attempt(s): ${e.message}`);
         }
-      } catch (e) {
-        rec.status = "failed"; ev(rec, "✖", `run failed: ${e.message}`);
+        break;
       }
-      await putRun(rec); LIVE.delete(run_id) ; LIVE.set(run_id, rec); // keep latest visible
+      await putRun(rec); LIVE.delete(run_id); LIVE.set(run_id, rec); // keep latest visible
     })();
     return { run_id };
   }
+  // How many auto-retries on failure (Settings; default 2).
+  function retries() { const n = parseInt(localStorage.getItem("openfab_web_retries"), 10); return Number.isFinite(n) && n >= 0 ? n : 2; }
 
   async function loadRec(id) { return LIVE.get(id) || (await getRun(id)); }
 
@@ -198,7 +213,7 @@ const OpsBrowser = (() => {
       files.push({ path: p, contents: c, sha256: await FabCrypto.sha256Hex(c), author: "ai" });
     }
     const sbom = { spdxVersion: "SPDX-2.3", SPDXID: "SPDXRef-DOCUMENT", name: rec.spec_ref, creators: ["Tool: openfab-web/0.1"], files: files.map((f, i) => ({ SPDXID: `SPDXRef-File-${i}`, fileName: f.path, checksums: [{ algorithm: "SHA256", checksumValue: f.sha256 }] })) };
-    return { run: { run_id: rec.run_id, spec_ref: rec.spec_ref, status: rec.status, merged: rec.merged, base_name: rec.base_name, acceptance: rec.spec ? rec.spec.acceptance : [] }, files, attestation: rec.attestation, sbom, timeline: rec.events.map((e) => `[${e.t}] ${e.icon} ${e.msg}`).join("\n") };
+    return { run: { run_id: rec.run_id, spec_ref: rec.spec_ref, status: rec.status, merged: rec.merged, base_name: rec.base_name, base_runtime: rec.base_runtime, acceptance: rec.spec ? rec.spec.acceptance : [] }, spec: rec.spec, files, attestation: rec.attestation, sbom, timeline: rec.events.map((e) => `[${e.t}] ${e.icon} ${e.msg}`).join("\n") };
   }
 
   // ---- the route dispatcher: same contract as the Rust JSON API ----

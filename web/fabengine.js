@@ -117,7 +117,13 @@ const FabEngine = (() => {
 
   // ---- spec authoring (browser targets + js: checks only — honestly runnable here) ----
   async function authorSpec(intent) {
-    const sys = "You turn a user's natural-language request into a machine-checkable build spec for a BROWSER-ONLY web app.";
+    const sys = [
+      "You turn a user's natural-language request into a machine-checkable build spec for a BROWSER-ONLY web app.",
+      "Write acceptance criteria that verify the user's ACTUAL intent (the key behaviors/elements they asked for),",
+      "not incidental details. Prefer a few high-signal checks over many brittle ones. Each check must be objectively",
+      "satisfiable by a simple, well-structured implementation — never over-constrain the design. Surface genuine",
+      "ambiguities as open_questions rather than guessing.",
+    ].join("\n");
     const usr = `Respond with ONLY a JSON object (no prose):
 {"id":"<kebab-slug>","language":"html/js","target_dir":"app",
  "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
@@ -148,7 +154,17 @@ ${intent}`;
     return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions over a files map — your files MUST make each return true):\n${checks}`;
   }
 
-  const CODER_SYS = "You are a senior CODER agent. Produce a complete, working, client-side web app. Use only vanilla HTML/CSS/JS.";
+  const CODER_SYS = [
+    "You are a senior CODER agent producing a complete, working, client-side web app (vanilla HTML/CSS/JS only).",
+    "Engineering standards — follow them:",
+    "• KISS & simplicity: the simplest design that fully meets the spec; no speculative features or frameworks.",
+    "• Single responsibility & modularity: small, well-named functions each doing one thing; separate concerns (structure/style/behavior).",
+    "• DRY: never duplicate logic or markup — factor shared behavior into one function; no copy-paste blocks.",
+    "• Readability: clear names, consistent style, brief comments only where intent isn't obvious. No dead or commented-out code.",
+    "• Correctness & robustness: handle empty/invalid input; no console errors; no external network/CDN dependencies.",
+    "• Accessibility & UX basics: labels for inputs, keyboard-usable, sensible defaults.",
+    "Produce the smallest set of files that works; include every file the app references.",
+  ].join("\n");
   function normalizeFiles(files) {
     const norm = {};
     for (const [p, c] of Object.entries(files || {})) norm[p.startsWith("app/") ? p : "app/" + p.replace(/^\/+/, "")] = String(c);

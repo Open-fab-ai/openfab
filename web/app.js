@@ -49,6 +49,7 @@ async function init() {
   wireLlmCard();
   wirePublish();
   wireFirstRun();
+  wireRetriesPref();
   $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
@@ -116,6 +117,16 @@ function renderDefaultBaseSetting(bases, current) {
     localStorage.setItem("openfab_default_base", ds.value);
     const sel = $("#base"); sel.value = ds.value; updateBaseBadge(bases);
     toast(`default base set to ${ds.options[ds.selectedIndex].text}`);
+  };
+}
+function wireRetriesPref() {
+  const el = $("#prefretries"); if (!el) return;
+  const n = parseInt(localStorage.getItem("openfab_web_retries"), 10);
+  el.value = Number.isFinite(n) && n >= 0 ? n : 2;
+  el.onchange = () => {
+    let v = parseInt(el.value, 10); if (!Number.isFinite(v) || v < 0) v = 2; if (v > 5) v = 5;
+    el.value = v; localStorage.setItem("openfab_web_retries", String(v));
+    toast(`auto-retry set to ${v}`);
   };
 }
 function updateBaseBadge(bases) {
@@ -287,9 +298,23 @@ async function showPhase(step) {
   const draftNote = `<div class="muted">This is a <b>draft</b> — the trust ceremony (sign + gate) hasn't run yet. <b>Promote to a signed release</b> to produce in-toto/SLSA provenance.</div>`;
   let h = "";
   if (step === "spec") {
-    h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div>
-      <div class="muted">Your intent becomes a versioned, machine-checkable spec. This exact spec was dispatched to the base and is committed with the run.</div>
-      <pre class="code">${escapeHtml(JSON.stringify(a.spec, null, 2))}</pre>`;
+    const sp = a.spec;
+    if (!sp) {
+      h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div><div class="muted">No spec recorded for this run.</div>`;
+    } else {
+      const checks = (sp.acceptance || []).map((c) => `<div class="file-h">✓ <b>${escapeHtml(c.id)}</b> — <span class="mono">${escapeHtml(c.check)}</span></div>`).join("") || `<div class="muted">(none)</div>`;
+      const list = (arr) => (arr && arr.length) ? "<ul style='margin:4px 0 0 18px'>" + arr.map((x) => `<li>${escapeHtml(x)}</li>`).join("") + "</ul>" : "<div class='muted'>(none)</div>";
+      h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div>
+        <div class="muted">Your intent becomes a versioned, machine-checkable spec. This exact spec is what the base built against and what gets signed.</div>
+        <div class="kv" style="margin-top:8px"><div class="k">spec id</div><div class="v">${escapeHtml(sp.id || a.run.spec_ref || "")}</div>
+        <div class="k">language</div><div class="v">${escapeHtml(sp.language || "")}</div>
+        <div class="k">target</div><div class="v">${escapeHtml(sp.target_dir || "app")}/</div></div>
+        <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(the machine-checkable contract)</span></div>
+        ${checks}
+        <div class="panel-h" style="margin-top:10px">Assumptions</div>${list(sp.assumptions)}
+        <div class="panel-h" style="margin-top:10px">Open questions <span class="muted">(surfaced to you)</span></div>${list(sp.open_questions)}
+        <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ raw spec JSON</summary><pre class="code" style="margin-top:6px">${escapeHtml(JSON.stringify(sp, null, 2))}</pre></details>`;
+    }
   } else if (step === "generate") {
     h = `<div class="ph-h">🤖 Generate — what the agent authored</div>
       <div class="kv"><div class="k">base · model</div><div class="v">${p ? escapeHtml(p.agent.base + " · " + p.agent.model) : escapeHtml(a.run.base_name)}</div>

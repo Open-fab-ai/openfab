@@ -123,6 +123,11 @@ header.top {
 .oqopt { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .oqopt input[type="radio"] { width: auto; margin: 0; }
 .oqopt .oqother { flex: 1; }
+
+/* Live model-thinking pane */
+details.think { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); padding: 8px 12px; }
+details.think > summary { cursor: pointer; }
+.think-pre { margin: 8px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono, monospace); font-size: 11.5px; color: var(--muted); line-height: 1.5; }
 .card h2 .n { color: var(--accent); margin-right: 6px; }
 
 label.fld { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }

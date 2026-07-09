@@ -57,6 +57,23 @@ function startGenTimer() {
 }
 function stopGenTimer() { if (STATE.genTimer) { clearInterval(STATE.genTimer); STATE.genTimer = null; } }
 
+// Live "model thinking" pane (opt-in streaming). Shows the model's reasoning trace
+// under the current phase panel; auto-created on first token, auto-scrolls to newest.
+function renderThinking(text) {
+  if (!text) return;
+  const pd = $("#phasedetail"); pd.classList.remove("hidden");
+  let pre = $("#thinkpane");
+  if (!pre) {
+    const wrap = el("details", "think"); wrap.open = true;
+    wrap.innerHTML = `<summary class="muted">🧠 model thinking (live)</summary><pre id="thinkpane" class="think-pre"></pre>`;
+    pd.appendChild(wrap);
+    pre = $("#thinkpane");
+  }
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 30;
+  pre.textContent = text;
+  if (atBottom) pre.scrollTop = pre.scrollHeight; // follow newest unless the user scrolled up
+}
+
 // ---------- init ----------
 async function init() {
   await detectMode();
@@ -149,6 +166,14 @@ function wireRetriesPref() {
     pause.onchange = () => {
       localStorage.setItem("openfab_web_spec_pause", pause.checked ? "1" : "0");
       toast(pause.checked ? "spec review pause: on" : "spec review pause: off");
+    };
+  }
+  const stream = $("#prefstream");
+  if (stream) {
+    stream.checked = localStorage.getItem("openfab_web_stream_think") === "1";
+    stream.onchange = () => {
+      localStorage.setItem("openfab_web_stream_think", stream.checked ? "1" : "0");
+      toast(stream.checked ? "live model thinking: on" : "live model thinking: off");
     };
   }
 }
@@ -332,6 +357,11 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
+    // Live thinking only exists in browser mode (the LLM runs in this tab). Server
+    // mode has no /thinking route, so don't poll it there.
+    if (run.status === "running" && MODE !== "server" && FabEngine.willStream()) {
+      try { const t = await api("GET", `/api/runs/${STATE.runId}/thinking`); renderThinking(t.thinking); } catch (_) { /* thinking is best-effort */ }
+    }
     if (run.status === "awaiting-spec") {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       await openSpecReview();

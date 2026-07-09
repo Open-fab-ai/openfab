@@ -38,6 +38,15 @@ const OpsBrowser = (() => {
     rec.events.push({ seq: rec.events.length + 1, icon, msg, t: new Date().toISOString().slice(11, 19) });
   }
 
+  // "Show model thinking": returns an onThink(kind, piece) that accumulates the model's
+  // REASONING deltas into rec.thinking (live, capped) for the UI to poll. Content deltas
+  // (the JSON answer) are skipped — only the reasoning trace is human-useful here. Resets
+  // per phase so each call shows its own thinking. rec is the LIVE object → no putRun churn.
+  function mkThink(rec) {
+    rec.thinking = "";
+    return (kind, piece) => { if (kind === "reasoning" && piece) rec.thinking = (rec.thinking + piece).slice(-8000); };
+  }
+
   // Canonical bytes of a statement, mirroring Rust's serde attributes: empty
   // `signoffs`/`acceptance` vectors are OMITTED (skip_serializing_if = "Vec::is_empty"),
   // so browser and Rust canonicalizations are byte-identical.
@@ -100,7 +109,7 @@ const OpsBrowser = (() => {
     (async () => {
       try {
         ev(rec, "📥", `NL intent received → "${intent.slice(0, 90)}"`);
-        rec.spec = await FabEngine.authorSpec(intent);
+        rec.spec = await FabEngine.authorSpec(intent, mkThink(rec));
         rec.spec_ref = `${rec.spec.id || slug}#v${version}`;
         ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
         if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.join("; ")}`);
@@ -130,7 +139,7 @@ const OpsBrowser = (() => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         rec.files = null; rec.acceptance = []; rec.acceptance_passed = false; rec.attestation = null; rec.status = "running";
-        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m));
+        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m), mkThink(rec));
         rec.files = gen.files;
         ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
         rec.acceptance = await FabEngine.runChecks(rec.spec, rec.files);
@@ -171,7 +180,7 @@ const OpsBrowser = (() => {
     if (action === "regenerate") {
       ev(rec, "✏️", `human asked the model to re-author the spec${decLines.length ? ` (${decLines.length} decision(s) chosen)` : ""}${feedback ? `: "${feedback.slice(0, 120)}"` : ""}`);
       const note = [decBlock, feedback].filter(Boolean).join("\n\n");
-      rec.spec = await FabEngine.reauthorSpec(rec.intent, rec.spec, note);
+      rec.spec = await FabEngine.reauthorSpec(rec.intent, rec.spec, note, mkThink(rec));
       rec.spec_ref = `${rec.spec.id || rec.spec_ref.split("#")[0]}#${rec.spec_ref.split("#")[1] || "v1"}`;
       ev(rec, "🧾", `spec re-authored (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria — review again`);
       rec.status = "awaiting-spec"; // pause again so the human reviews the new draft
@@ -301,6 +310,7 @@ const OpsBrowser = (() => {
     if (p === "/api/run" && method === "POST") return startRun({ intent: body.intent, gate: body.gate, mode: body.mode });
     if (seg[1] === "runs" && seg.length === 3 && method === "GET") { const r = await loadRec(seg[2]); if (!r) { const e = new Error("run not found"); e.status = 404; throw e; } return { run_id: r.run_id, status: r.status, spec_ref: r.spec_ref, acceptance_passed: r.acceptance_passed, accepted: r.accepted, merged: r.merged, base_name: r.base_name, gate_mode: r.gate }; }
     if (seg[1] === "runs" && seg[3] === "events") { const r = await loadRec(seg[2]); const since = Number(q.get("since") || 0); return (r ? r.events : []).filter((e) => e.seq > since); }
+    if (seg[1] === "runs" && seg[3] === "thinking") { const r = await loadRec(seg[2]); return { thinking: (r && r.thinking) || "", active: !!r && r.status === "running" }; }
     if (seg[1] === "runs" && seg[3] === "artifacts") return artifacts(seg[2]);
     if (seg[1] === "runs" && seg[3] === "spec" && method === "POST") return reviseSpec(seg[2], body || {});
     if (seg[1] === "runs" && seg[3] === "signoff") return signoff(seg[2], body && body.as);

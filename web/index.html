@@ -290,6 +290,10 @@
       <input type="checkbox" id="prefspecpause" style="width:auto; margin:0" /> Pause for spec review <span class="muted">(before any code is generated)</span>
     </label>
     <div class="hint" style="margin-top:4px">When on, a run stops after the spec is authored so you can edit the acceptance criteria or ask the model to regenerate — then Continue to build.</div>
+    <label class="fld" style="margin-top:12px; display:flex; align-items:center; gap:8px; cursor:pointer">
+      <input type="checkbox" id="prefstream" style="width:auto; margin:0" /> Always show model thinking (live) <span class="muted">(streaming)</span>
+    </label>
+    <div class="hint" style="margin-top:4px">Reasoning models (e.g. <code>deepseek-r1</code>, <code>o3</code>) auto-stream their thinking under the live workflow. Tick this to force streaming for other models too (they may show nothing but the elapsed timer). Slightly slower.</div>
     </div>
   </details>
   <details class="card scard">

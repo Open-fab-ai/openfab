@@ -357,7 +357,9 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
-    if (run.status === "running" && FabEngine.willStream()) {
+    // Live thinking only exists in browser mode (the LLM runs in this tab). Server
+    // mode has no /thinking route, so don't poll it there.
+    if (run.status === "running" && MODE !== "server" && FabEngine.willStream()) {
       try { const t = await api("GET", `/api/runs/${STATE.runId}/thinking`); renderThinking(t.thinking); } catch (_) { /* thinking is best-effort */ }
     }
     if (run.status === "awaiting-spec") {

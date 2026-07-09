@@ -189,24 +189,26 @@ const FabEngine = (() => {
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "", content = "", reasoning = "", model = null;
+    const handleLine = (line) => {
+      line = line.trim();
+      if (!line.startsWith("data:")) return;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") return;
+      let j; try { j = JSON.parse(data); } catch (_) { return; }
+      model = model || j.model;
+      const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
+      const rc = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
+      if (rc) { reasoning += rc; try { onThink("reasoning", rc); } catch (_) { /* UI hook must not break the run */ } }
+      if (d.content) { content += d.content; try { onThink("content", d.content); } catch (_) { /* ditto */ } }
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data === "[DONE]") continue;
-        let j; try { j = JSON.parse(data); } catch (_) { continue; }
-        model = model || j.model;
-        const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
-        const rc = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
-        if (rc) { reasoning += rc; try { onThink("reasoning", rc); } catch (_) { /* UI hook must not break the run */ } }
-        if (d.content) { content += d.content; try { onThink("content", d.content); } catch (_) { /* ditto */ } }
-      }
+      while ((nl = buf.indexOf("\n")) >= 0) { handleLine(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
     }
+    if (buf) handleLine(buf); // flush a final line that arrived without a trailing newline
     const text = content || reasoning;
     if (!text) throw new Error("LLM stream produced no content");
     return { text, model: model || fallbackModel };

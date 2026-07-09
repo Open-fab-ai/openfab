@@ -143,19 +143,25 @@ const FabEngine = (() => {
     return (await r.json()).data.map((m) => m.id).sort();
   }
 
-  async function chat(system, user, modelOverride) {
+  // Live "show model thinking" preference (Settings). Streams tokens when a caller
+  // passes an onThink callback; falls back to a normal (buffered) request otherwise.
+  function streamThink() { return localStorage.getItem("openfab_web_stream_think") === "1"; }
+
+  async function chat(system, user, modelOverride, onThink) {
     const cfg = llmConfig();
     if (!cfg || !cfg.baseUrl || !cfg.model) throw new Error("no LLM configured — open ⚙ Settings and set a provider, key and model");
     const url = cfg.baseUrl.replace(/\/+$/, "") + "/chat/completions";
     const headers = { "Content-Type": "application/json" };
     if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
     if (cfg.providerId === "anthropic") headers["anthropic-dangerous-direct-browser-access"] = "true";
+    const streaming = !!onThink && streamThink();
     const r = await fetch(url, {
       method: "POST", headers,
-      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: false, max_tokens: 6000,
+      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: streaming, max_tokens: 6000,
         messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
     });
     if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text().catch(() => "")).slice(0, 180)}`);
+    if (streaming) return readStream(r, modelOverride || cfg.model, onThink);
     const j = await r.json();
     const msg = j?.choices?.[0]?.message || {};
     // Reasoning models (e.g. qwen3) sometimes return an empty `content` with the real
@@ -163,6 +169,36 @@ const FabEngine = (() => {
     const content = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking;
     if (!content) throw new Error("LLM response missing choices[0].message.content");
     return { text: content, model: j.model || cfg.model };
+  }
+
+  // Parse an OpenAI-compatible SSE stream. Calls onThink("reasoning"|"content", piece)
+  // per delta so the UI can show the model working live; returns {text, model} like chat.
+  // `text` is the answer content (reasoning is a fallback when a model emits only that).
+  async function readStream(r, fallbackModel, onThink) {
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", content = "", reasoning = "", model = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let j; try { j = JSON.parse(data); } catch (_) { continue; }
+        model = model || j.model;
+        const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
+        const rc = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
+        if (rc) { reasoning += rc; try { onThink("reasoning", rc); } catch (_) { /* UI hook must not break the run */ } }
+        if (d.content) { content += d.content; try { onThink("content", d.content); } catch (_) { /* ditto */ } }
+      }
+    }
+    const text = content || reasoning;
+    if (!text) throw new Error("LLM stream produced no content");
+    return { text, model: model || fallbackModel };
   }
 
   function parseJson(text) {
@@ -179,8 +215,8 @@ const FabEngine = (() => {
 
   // Parse, or ask the model once to re-emit as strict JSON (models occasionally wrap or
   // truncate). A second failure throws — we never fabricate a result (R14).
-  async function chatJson(system, user, modelOverride) {
-    const first = await chat(system, user, modelOverride);
+  async function chatJson(system, user, modelOverride, onThink) {
+    const first = await chat(system, user, modelOverride, onThink);
     try { return { obj: parseJson(first.text), model: first.model }; }
     catch (_) {
       const retry = await chat("Return ONLY the corrected JSON object — no prose, no code fences, no <think> blocks.",
@@ -207,7 +243,7 @@ const FabEngine = (() => {
   name), never a whole tag with attributes; never over-constrain the design.
 - Each open_question is an object with 2 to 4 concrete "options", a "suggested" one (matching an option
   exactly), and a one-line "why" — so the human can pick or override, never just an open-ended question.`;
-  async function authorSpec(intent) {
+  async function authorSpec(intent, onThink) {
     await loadShippedSlices();
     // System prompt = shared slice + spec slice, read live from openfab-agent.md /
     // Settings (see slice()). The BROWSER-ONLY target + JSON shape are call plumbing.
@@ -218,7 +254,7 @@ ${SPEC_SHAPE}
 ${SPEC_RULES}
 USER REQUEST:
 ${intent}`;
-    const out = await chat(sys, usr, roleModel("spec"));
+    const out = await chat(sys, usr, roleModel("spec"), onThink);
     const a = parseJson(out.text);
     a.model = out.model;
     return a;
@@ -226,7 +262,7 @@ ${intent}`;
 
   // Re-author a spec from human feedback (used by the spec-review pause). Same
   // output shape as authorSpec; the model sees the prior spec + the human's ask.
-  async function reauthorSpec(intent, prevSpec, feedback) {
+  async function reauthorSpec(intent, prevSpec, feedback, onThink) {
     await loadShippedSlices();
     const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
     const usr = `Revise the spec below per the human's feedback. Respond with ONLY the updated JSON object, same shape:
@@ -241,7 +277,7 @@ ${JSON.stringify(prevSpec, null, 2)}
 
 HUMAN FEEDBACK (apply this):
 ${feedback || "(no free-text feedback — tighten/clarify the spec while preserving intent)"}`;
-    const out = await chat(sys, usr, roleModel("spec"));
+    const out = await chat(sys, usr, roleModel("spec"), onThink);
     const a = parseJson(out.text);
     a.model = out.model;
     return a;
@@ -272,13 +308,13 @@ ${feedback || "(no free-text feedback — tighten/clarify the spec while preserv
   // deterministic checks themselves — the acceptance contract IS the reviewer. Common apps
   // pass on the first try, so most runs make just ONE code-gen call (faster + more honest:
   // the revise is grounded in the actual failing checks, not a model's opinion).
-  async function generate(spec, intent, onEvent) {
+  async function generate(spec, intent, onEvent, onThink) {
     await loadShippedSlices();
     const sys = coderSys(); // live slice; frozen for both passes of this one run
     const tb = taskBlock(spec, intent);
     onEvent("🤖", "coder: generating the app (in-tab LLM call)");
     const coder = await chatJson(sys,
-      `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"));
+      `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"), onThink);
     let files = normalizeFiles(coder.obj.files);
 
     onEvent("🧪", "checking against the acceptance contract");

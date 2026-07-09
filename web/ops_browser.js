@@ -136,10 +136,11 @@ const OpsBrowser = (() => {
   async function buildFromSpec(rec, intent) {
     const run_id = rec.run_id;
     const maxAttempts = 1 + retries(); // e.g. retries()=2 → up to 3 attempts
+    let prior = null; // {files, failed} from the previous cycle — fed forward so a retry revises, not regenerates blind
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         rec.files = null; rec.acceptance = []; rec.acceptance_passed = false; rec.attestation = null; rec.status = "running";
-        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m), mkThink(rec));
+        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m), mkThink(rec), prior);
         rec.files = gen.files;
         ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
         rec.acceptance = await FabEngine.runChecks(rec.spec, rec.files);
@@ -157,7 +158,9 @@ const OpsBrowser = (() => {
           rec.status = "failed"; // acceptance did not pass
         }
         if (rec.status !== "failed") break; // success (blocked / draft / merged-later)
-        if (attempt < maxAttempts) { ev(rec, "🔁", `acceptance did not pass — auto-retrying (${attempt}/${maxAttempts - 1})`); continue; }
+        // Feed this cycle's files + failing checks into the next attempt (not a blind restart).
+        prior = { files: rec.files, failed: rec.acceptance.filter((c) => !c.passed) };
+        if (attempt < maxAttempts) { ev(rec, "🔁", `acceptance did not pass — auto-retrying with the failures fed back (${attempt}/${maxAttempts - 1})`); continue; }
         ev(rec, "⛔", `acceptance still failing after ${maxAttempts} attempt(s) — honest failure, not a vacuous pass`);
       } catch (e) {
         if (attempt < maxAttempts) { ev(rec, "🔁", `attempt failed (${e.message}) — auto-retrying (${attempt}/${maxAttempts - 1})`); await putRun(rec); continue; }

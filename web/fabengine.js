@@ -316,31 +316,48 @@ ${feedback || "(no free-text feedback — tighten/clarify the spec while preserv
     return Object.entries(files).map(([p, c]) => `--- ${p} ---\n${c}`).join("\n\n").slice(0, 24000);
   }
 
+  // The revision prompt: current files + the checks that FAILED, asking for a complete
+  // corrected file set. One source (R3) — used both for the in-call revision and to feed
+  // a prior attempt's failures forward into the next retry cycle.
+  function revisePrompt(tb, files, failed) {
+    return `${tb}\n\nCURRENT FILES:\n${dumpFiles(files)}\n\nThese acceptance checks FAILED — change the files so EVERY one passes verbatim:\n` +
+      failed.map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}${c.detail ? " → " + c.detail : ""}`).join("\n") +
+      `\n\nReturn the COMPLETE corrected file set. ${FILES_SHAPE}`;
+  }
+
   // coder → run the REAL acceptance checks → revise ONLY on a real failure. This replaces
   // a separate "reviewer" LLM call (which only *guessed* whether the checks pass) with the
   // deterministic checks themselves — the acceptance contract IS the reviewer. Common apps
   // pass on the first try, so most runs make just ONE code-gen call (faster + more honest:
   // the revise is grounded in the actual failing checks, not a model's opinion).
-  async function generate(spec, intent, onEvent, onThink) {
+  // `prior` (optional) carries the PREVIOUS retry cycle's {files, failed} so a retry revises
+  // that attempt instead of regenerating blind — the failures are fed forward across cycles.
+  async function generate(spec, intent, onEvent, onThink, prior) {
     await loadShippedSlices();
     const sys = coderSys(); // live slice; frozen for both passes of this one run
     const tb = taskBlock(spec, intent);
-    onEvent("🤖", "coder: generating the app (in-tab LLM call)");
-    const coder = await chatJson(sys,
-      `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"), onThink);
-    let files = normalizeFiles(coder.obj.files);
+    let files, model;
+    if (prior && prior.files && (prior.failed || []).length) {
+      onEvent("🔧", `coder: revising the previous attempt — feeding back ${prior.failed.length} failed check(s)`);
+      const rev = await chatJson(sys, revisePrompt(tb, prior.files, prior.failed), roleModel("coder"), onThink);
+      files = normalizeFiles(rev.obj.files && Object.keys(rev.obj.files).length ? rev.obj.files : prior.files);
+      model = rev.model;
+    } else {
+      onEvent("🤖", "coder: generating the app (in-tab LLM call)");
+      const coder = await chatJson(sys,
+        `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"), onThink);
+      files = normalizeFiles(coder.obj.files);
+      model = coder.model;
+    }
 
     onEvent("🧪", "checking against the acceptance contract");
     const failed = (await runChecks(spec, files)).filter((c) => !c.passed);
     if (failed.length) {
       onEvent("🔧", `coder: ${failed.length} acceptance check(s) failed — one revision pass`);
-      const rev = await chatJson(sys,
-        `${tb}\n\nCURRENT FILES:\n${dumpFiles(files)}\n\nThese acceptance checks FAILED — change the files so EVERY one passes verbatim:\n` +
-        failed.map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}${c.detail ? " → " + c.detail : ""}`).join("\n") +
-        `\n\nReturn the COMPLETE corrected file set. ${FILES_SHAPE}`, roleModel("coder"));
+      const rev = await chatJson(sys, revisePrompt(tb, files, failed), roleModel("coder"), onThink);
       if (rev.obj.files && Object.keys(rev.obj.files).length) files = normalizeFiles(rev.obj.files);
     }
-    return { files, model: coder.model, prompt: tb };
+    return { files, model, prompt: tb };
   }
 
   // ---- acceptance: js: expressions run for real, but NEVER in this page's realm ----

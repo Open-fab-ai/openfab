@@ -112,7 +112,7 @@ const OpsBrowser = (() => {
         rec.spec = await FabEngine.authorSpec(intent, mkThink(rec));
         rec.spec_ref = `${rec.spec.id || slug}#v${version}`;
         ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
-        if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.join("; ")}`);
+        if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.map((q) => typeof q === "string" ? q : q.q).join("; ")}`);
         if (specPause()) {
           // Human-in-the-loop: stop here so the human can edit the spec/criteria or
           // ask the model to regenerate before any code is written. Resumed by reviseSpec.

@@ -39,6 +39,9 @@ const FABCRYPTO_JS: &str = include_str!("../web/fabcrypto.js");
 const FABENGINE_JS: &str = include_str!("../web/fabengine.js");
 const OPS_BROWSER_JS: &str = include_str!("../web/ops_browser.js");
 const FORGEPUSH_JS: &str = include_str!("../web/forgepush.js");
+// Agent-guidance file: the LLM system-prompt slices. Served so browser mode can
+// fetch it live (Settings seeds from it); the fab reads it as the source of truth.
+const OPENFAB_AGENT_MD: &str = include_str!("../web/openfab-agent.md");
 
 struct State {
     repo: PathBuf,
@@ -113,6 +116,9 @@ fn route(
         (Method::Get, ["fabengine.js"]) => Ok(asset(FABENGINE_JS, "application/javascript")),
         (Method::Get, ["ops_browser.js"]) => Ok(asset(OPS_BROWSER_JS, "application/javascript")),
         (Method::Get, ["forgepush.js"]) => Ok(asset(FORGEPUSH_JS, "application/javascript")),
+        (Method::Get, ["openfab-agent.md"]) => {
+            Ok(asset(OPENFAB_AGENT_MD, "text/markdown; charset=utf-8"))
+        }
 
         // --- catalog ---
         (Method::Get, ["api", "bases"]) => Ok(json_resp(200, &json!(registry::list_bases()))),
@@ -763,4 +769,38 @@ fn asset(s: &str, ct: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn ctype(ct: &str) -> Header {
     Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FABENGINE_JS, OPENFAB_AGENT_MD};
+
+    /// Extract the text between `<!-- inject:NAME -->` and `<!-- /inject:NAME -->`.
+    fn inject_block<'a>(md: &'a str, name: &str) -> &'a str {
+        let open = format!("<!-- inject:{name} -->");
+        let close = format!("<!-- /inject:{name} -->");
+        let start = md.find(&open).expect("open marker present") + open.len();
+        let end = md[start..].find(&close).expect("close marker present") + start;
+        md[start..end].trim()
+    }
+
+    /// R3 drift guard: openfab-agent.md is the canonical source for the LLM system-prompt
+    /// slices; fabengine.js carries an embedded SLICE_FALLBACK for offline/server use. If
+    /// someone edits one and not the other, offline users silently get stale prompts. This
+    /// asserts every line of every inject block still appears verbatim in fabengine.js, so
+    /// drift fails CI instead of shipping. (Line-based to tolerate JS string concatenation.)
+    #[test]
+    fn agent_md_slices_are_mirrored_in_fabengine_fallback() {
+        for name in ["shared", "spec", "coder"] {
+            let block = inject_block(OPENFAB_AGENT_MD, name);
+            assert!(!block.is_empty(), "inject:{name} block is empty");
+            for line in block.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                assert!(
+                    FABENGINE_JS.contains(line),
+                    "R3 drift: inject:{name} line is not mirrored in fabengine.js SLICE_FALLBACK:\n  {line}\n\
+                     Update SLICE_FALLBACK in web/fabengine.js to match web/openfab-agent.md."
+                );
+            }
+        }
+    }
 }

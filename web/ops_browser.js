@@ -175,8 +175,10 @@ const OpsBrowser = (() => {
       return { run_id: id, status: rec.status };
     }
     // action === "continue": adopt the human-edited spec, then build against it.
+    // The human reviewed the spec, so clear the model's open_questions/assumptions —
+    // otherwise the signed AI-BOM would show questions the human already resolved.
     if (spec && Array.isArray(spec.acceptance) && spec.acceptance.length) {
-      rec.spec = { ...rec.spec, ...spec, acceptance: spec.acceptance, model: rec.spec.model };
+      rec.spec = { ...rec.spec, ...spec, acceptance: spec.acceptance, model: rec.spec.model, open_questions: [], assumptions: [] };
     }
     if (!rec.spec.acceptance || !rec.spec.acceptance.length) throw new Error("a spec needs at least one acceptance criterion");
     ev(rec, "👤", "human approved the spec — proceeding to code generation");

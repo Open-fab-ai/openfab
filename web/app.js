@@ -162,6 +162,21 @@ async function wireAgentGuidance() {
     a.href = URL.createObjectURL(blob); a.download = "openfab-agent.slices.json"; a.click();
     URL.revokeObjectURL(a.href);
   };
+  document.querySelectorAll(".sliceimprove").forEach((a) => {
+    a.onclick = async (e) => {
+      e.preventDefault();
+      const name = a.dataset.slice, field = SLICE_FIELDS[name];
+      if (!FabEngine.llmConfig()) { $("#slicestatus").textContent = "set an LLM provider first (above)."; return; }
+      const prev = a.textContent; a.textContent = "✨ improving…"; a.style.pointerEvents = "none";
+      try {
+        const improved = await FabEngine.improveSlice(name, $(field).value);
+        if (improved) { $(field).value = improved; $("#slicestatus").textContent = `${name}: improved — review, then Save to apply.`; }
+        else $("#slicestatus").textContent = `${name}: model returned nothing — kept your text.`;
+      } catch (err) {
+        $("#slicestatus").textContent = `improve failed: ${err.message}`; // surface, don't swallow (R5)
+      } finally { a.textContent = prev; a.style.pointerEvents = ""; }
+    };
+  });
   $("#sliceimport").onclick = () => $("#sliceimportfile").click();
   $("#sliceimportfile").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;

@@ -258,11 +258,11 @@
     <div class="hint" style="margin-bottom:8px">
       These slices are the <b>only</b> text sent to the model, and only the slice each call needs — so edits are cheap and take effect on your <b>next</b> run of that role. The shared slice is paid on every call; keep it short. Runtime guardrails (sandbox, signing, N-of-M sign-off) are enforced by the fab and never injected. <a href="openfab-agent.md" target="_blank" rel="noopener">read the full file →</a>
     </div>
-    <label class="fld">Shared <span class="muted">(every call)</span></label>
+    <label class="fld">Shared <span class="muted">(every call)</span> <a href="#" class="sliceimprove" data-slice="shared" style="margin-left:6px">✨ improve with LLM</a></label>
     <textarea id="sliceshared" rows="3" spellcheck="false"></textarea>
-    <label class="fld" style="margin-top:8px">Spec-author <span class="muted">(spec call — WHAT/WHY, not HOW)</span></label>
+    <label class="fld" style="margin-top:8px">Spec-author <span class="muted">(spec call — WHAT/WHY, not HOW)</span> <a href="#" class="sliceimprove" data-slice="spec" style="margin-left:6px">✨ improve with LLM</a></label>
     <textarea id="slicespec" rows="6" spellcheck="false"></textarea>
-    <label class="fld" style="margin-top:8px">Coder <span class="muted">(code-gen call — engineering bar)</span></label>
+    <label class="fld" style="margin-top:8px">Coder <span class="muted">(code-gen call — engineering bar)</span> <a href="#" class="sliceimprove" data-slice="coder" style="margin-left:6px">✨ improve with LLM</a></label>
     <textarea id="slicecoder" rows="9" spellcheck="false"></textarea>
     <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
       <button class="btn sm" id="slicesave" type="button" style="width:auto">Save</button>

@@ -67,6 +67,20 @@ const FabEngine = (() => {
     const o = JSON.parse(json); // throws on bad input — surfaced to the caller (Settings)
     for (const k of Object.keys(SLICE_KEY)) if (typeof o[k] === "string") setSlice(k, o[k]);
   }
+  // Ask the LLM to improve one guidance slice. Returns the improved text (the
+  // human reviews + saves it — it is never applied silently). `role` labels what
+  // the slice governs so the model keeps it scoped and concise.
+  const SLICE_ROLE = {
+    shared: "the shared preamble injected into EVERY LLM call (keep it very short — it is paid on every call)",
+    spec: "the spec-author's guidance (turning intent into machine-checkable acceptance criteria; WHAT/WHY, never HOW)",
+    coder: "the coder's guidance (engineering standards for generating a client-side web app: KISS, DRY, SRP, readability, robustness)",
+  };
+  async function improveSlice(name, current) {
+    const sys = "You are a prompt engineer improving one section of a system prompt. Return ONLY the improved section text — no preamble, no markdown fences, no commentary. Keep it concise and high-signal; preserve the original intent and scope; do not add rules the section wasn't about.";
+    const usr = `This section is ${SLICE_ROLE[name] || name}.\n\nImprove it (clarity, specificity, concision). Return only the replacement text.\n\nCURRENT:\n${current}`;
+    const out = await chat(sys, usr, roleModel("spec"));
+    return (out.text || "").trim();
+  }
 
   // Presets. `browser` = CORS verified/known; Ollama Cloud tested 2026-07: no CORS.
   const PROVIDERS = [
@@ -325,5 +339,5 @@ ${feedback || "(no free-text feedback — tighten/clarify the spec while preserv
   }
 
   return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, reauthorSpec, generate, runChecks,
-    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices };
+    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices, improveSlice };
 })();

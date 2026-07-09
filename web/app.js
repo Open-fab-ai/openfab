@@ -49,6 +49,8 @@ async function init() {
   wireLlmCard();
   wirePublish();
   wireFirstRun();
+  wireRetriesPref();
+  wireAgentGuidance();
   $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
@@ -116,6 +118,76 @@ function renderDefaultBaseSetting(bases, current) {
     localStorage.setItem("openfab_default_base", ds.value);
     const sel = $("#base"); sel.value = ds.value; updateBaseBadge(bases);
     toast(`default base set to ${ds.options[ds.selectedIndex].text}`);
+  };
+}
+function wireRetriesPref() {
+  const el = $("#prefretries"); if (!el) return;
+  const n = parseInt(localStorage.getItem("openfab_web_retries"), 10);
+  el.value = Number.isFinite(n) && n >= 0 ? n : 2;
+  el.onchange = () => {
+    let v = parseInt(el.value, 10); if (!Number.isFinite(v) || v < 0) v = 2; if (v > 5) v = 5;
+    el.value = v; localStorage.setItem("openfab_web_retries", String(v));
+    toast(`auto-retry set to ${v}`);
+  };
+  const pause = $("#prefspecpause");
+  if (pause) {
+    pause.checked = localStorage.getItem("openfab_web_spec_pause") === "1";
+    pause.onchange = () => {
+      localStorage.setItem("openfab_web_spec_pause", pause.checked ? "1" : "0");
+      toast(pause.checked ? "spec review pause: on" : "spec review pause: off");
+    };
+  }
+}
+// Agent-guidance editor (openfab-agent.md slices). Loads current values (user
+// override or shipped default), saves to localStorage so the NEXT LLM call of
+// that role uses them. See FabEngine.slice/setSlice.
+const SLICE_FIELDS = { shared: "#sliceshared", spec: "#slicespec", coder: "#slicecoder" };
+async function wireAgentGuidance() {
+  const card = $("#agentcard"); if (!card) return;
+  await FabEngine.loadShippedSlices(); // so sliceDefault() reflects the shipped file
+  const fill = (fn) => { for (const k of Object.keys(SLICE_FIELDS)) $(SLICE_FIELDS[k]).value = fn(k); };
+  fill((k) => FabEngine.slice(k));
+  $("#slicesave").onclick = () => {
+    for (const k of Object.keys(SLICE_FIELDS)) FabEngine.setSlice(k, $(SLICE_FIELDS[k]).value);
+    $("#slicestatus").textContent = "Saved — your next Fabricate uses these.";
+  };
+  $("#slicereset").onclick = () => {
+    for (const k of Object.keys(SLICE_FIELDS)) FabEngine.setSlice(k, null);
+    fill((k) => FabEngine.sliceDefault(k));
+    $("#slicestatus").textContent = "Reset to the shipped openfab-agent.md defaults.";
+  };
+  $("#sliceexport").onclick = () => {
+    const blob = new Blob([FabEngine.exportSlices()], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "openfab-agent.slices.json"; a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  document.querySelectorAll(".sliceimprove").forEach((a) => {
+    a.onclick = async (e) => {
+      e.preventDefault();
+      const name = a.dataset.slice, field = SLICE_FIELDS[name];
+      if (!FabEngine.llmConfig()) { $("#slicestatus").textContent = "set an LLM provider first (above)."; return; }
+      const prev = a.textContent; a.textContent = "✨ improving…"; a.style.pointerEvents = "none";
+      try {
+        const improved = await FabEngine.improveSlice(name, $(field).value);
+        if (improved) { $(field).value = improved; $("#slicestatus").textContent = `${name}: improved — review, then Save to apply.`; }
+        else $("#slicestatus").textContent = `${name}: model returned nothing — kept your text.`;
+      } catch (err) {
+        $("#slicestatus").textContent = `improve failed: ${err.message}`; // surface, don't swallow (R5)
+      } finally { a.textContent = prev; a.style.pointerEvents = ""; }
+    };
+  });
+  $("#sliceimport").onclick = () => $("#sliceimportfile").click();
+  $("#sliceimportfile").onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      FabEngine.importSlices(await file.text());
+      fill((k) => FabEngine.slice(k));
+      $("#slicestatus").textContent = "Imported — your next Fabricate uses these.";
+    } catch (err) {
+      $("#slicestatus").textContent = `Import failed: ${err.message}`; // surface, don't swallow (R5)
+    }
+    e.target.value = "";
   };
 }
 function updateBaseBadge(bases) {
@@ -246,11 +318,64 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
+    if (run.status === "awaiting-spec") {
+      clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
+      await openSpecReview();
+      return;
+    }
     if (["blocked", "accepted", "merged", "failed", "draft"].includes(run.status)) {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       onRunDone(run);
     }
   } catch (e) { /* transient while files are written */ }
+}
+
+// Human-in-the-loop spec review: the run paused after authoring. Show the spec
+// with EDITABLE acceptance criteria + a feedback box, then Continue (build with
+// the edits) or Regenerate (model re-authors from feedback, re-pauses).
+async function openSpecReview() {
+  STATE.artifacts = await api("GET", `/api/runs/${STATE.runId}/artifacts`);
+  const sp = STATE.artifacts.spec || {};
+  document.querySelectorAll(".step").forEach((s) => s.classList.toggle("inspecting", s.dataset.step === "spec"));
+  const criteria = (sp.acceptance || []).map((c) => c.check).join("\n");
+  const oq = (sp.open_questions || []).length ? `<div class="hint" style="margin-top:6px">Open questions from the model: ${escapeHtml(sp.open_questions.join("; "))}</div>` : "";
+  const pd = $("#phasedetail"); pd.classList.remove("hidden");
+  pd.innerHTML = `<div class="ph-h">⏸️ Spec review — edit the contract before any code is written</div>
+    <div class="muted">These acceptance criteria are what the coder must satisfy and what gets signed. Edit them (one <span class="mono">js:</span> check per line), or ask the model to re-author from your feedback.</div>
+    ${oq}
+    <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(one js: expression per line)</span></div>
+    <textarea id="specedit" rows="6" spellcheck="false" style="width:100%; font-family:var(--mono,monospace); font-size:12px">${escapeHtml(criteria)}</textarea>
+    <div class="panel-h" style="margin-top:10px">Feedback for the model <span class="muted">(used by Regenerate)</span></div>
+    <textarea id="specfeedback" rows="3" spellcheck="false" placeholder="e.g. also require a dark-mode toggle; drop the localStorage check" style="width:100%"></textarea>
+    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
+      <button class="btn sm" id="speccontinue" type="button" style="width:auto">Continue with this spec →</button>
+      <button class="btn ghost sm" id="specregen" type="button" style="width:auto">↻ Regenerate from feedback</button>
+    </div>
+    <div class="hint" id="specreviewstatus" style="margin-top:6px"></div>`;
+  $("#speccontinue").onclick = () => submitSpecReview("continue");
+  $("#specregen").onclick = () => submitSpecReview("regenerate");
+}
+async function submitSpecReview(action) {
+  const st = $("#specreviewstatus");
+  const btns = [$("#speccontinue"), $("#specregen")]; btns.forEach((b) => b && (b.disabled = true));
+  try {
+    if (action === "regenerate") {
+      st.textContent = "asking the model to re-author the spec…";
+      await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "regenerate", feedback: $("#specfeedback").value.trim() });
+      await openSpecReview(); // re-render with the new spec, still paused
+      return;
+    }
+    // continue: turn the edited lines back into acceptance criteria
+    const lines = $("#specedit").value.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) { st.textContent = "add at least one acceptance criterion."; return; }
+    const acceptance = lines.map((l, i) => ({ id: `a${i + 1}`, check: l.startsWith("js:") ? l : "js:" + l }));
+    st.textContent = "spec approved — generating…";
+    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { acceptance } });
+    startPolling(); // resume the live workflow
+  } catch (e) {
+    st.textContent = `error: ${e.message}`; // surface, don't swallow (R5)
+    btns.forEach((b) => b && (b.disabled = false));
+  }
 }
 
 function addEvent(ev) {
@@ -287,9 +412,23 @@ async function showPhase(step) {
   const draftNote = `<div class="muted">This is a <b>draft</b> — the trust ceremony (sign + gate) hasn't run yet. <b>Promote to a signed release</b> to produce in-toto/SLSA provenance.</div>`;
   let h = "";
   if (step === "spec") {
-    h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div>
-      <div class="muted">Your intent becomes a versioned, machine-checkable spec. This exact spec was dispatched to the base and is committed with the run.</div>
-      <pre class="code">${escapeHtml(JSON.stringify(a.spec, null, 2))}</pre>`;
+    const sp = a.spec;
+    if (!sp) {
+      h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div><div class="muted">No spec recorded for this run.</div>`;
+    } else {
+      const checks = (sp.acceptance || []).map((c) => `<div class="file-h">✓ <b>${escapeHtml(c.id)}</b> — <span class="mono">${escapeHtml(c.check)}</span></div>`).join("") || `<div class="muted">(none)</div>`;
+      const list = (arr) => (arr && arr.length) ? "<ul style='margin:4px 0 0 18px'>" + arr.map((x) => `<li>${escapeHtml(x)}</li>`).join("") + "</ul>" : "<div class='muted'>(none)</div>";
+      h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div>
+        <div class="muted">Your intent becomes a versioned, machine-checkable spec. This exact spec is what the base built against and what gets signed.</div>
+        <div class="kv" style="margin-top:8px"><div class="k">spec id</div><div class="v">${escapeHtml(sp.id || a.run.spec_ref || "")}</div>
+        <div class="k">language</div><div class="v">${escapeHtml(sp.language || "")}</div>
+        <div class="k">target</div><div class="v">${escapeHtml(sp.target_dir || "app")}/</div></div>
+        <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(the machine-checkable contract)</span></div>
+        ${checks}
+        <div class="panel-h" style="margin-top:10px">Assumptions</div>${list(sp.assumptions)}
+        <div class="panel-h" style="margin-top:10px">Open questions <span class="muted">(surfaced to you)</span></div>${list(sp.open_questions)}
+        <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ raw spec JSON</summary><pre class="code" style="margin-top:6px">${escapeHtml(JSON.stringify(sp, null, 2))}</pre></details>`;
+    }
   } else if (step === "generate") {
     h = `<div class="ph-h">🤖 Generate — what the agent authored</div>
       <div class="kv"><div class="k">base · model</div><div class="v">${p ? escapeHtml(p.agent.base + " · " + p.agent.model) : escapeHtml(a.run.base_name)}</div>
@@ -745,7 +884,18 @@ function renderExplorer() {
     `<span class="tag-${f.author}">${f.author}</span>`, true, () => renderFile(f)));
   if (a.attestation) artNode(tree, "aibom", "📄", "AI-BOM", "", false, () => renderAiBom(a.attestation));
   if (a.sbom) artNode(tree, "sbom", "📄", "SBOM", "", false, () => renderSbom(a.sbom));
-  artNode(tree, "audit", "📜", "Audit trail", "", false, () => { const d = $("#artdetail"); d.innerHTML = '<div class="empty">loading audit trail…</div>'; loadAudit(d); });
+  artNode(tree, "audit", "📜", "Audit trail", "", false, () => {
+    const d = $("#artdetail");
+    if (MODE === "browser") {
+      // No git in a browser → no commit-graph audit. Explain honestly instead of erroring,
+      // and point to what IS the portable record here (the signed attestation + AI-BOM).
+      d.innerHTML = '<div class="artclaim">The git commit-graph audit trail is a <b>server-mode</b> feature (browser mode has no git). '
+        + 'In browser mode the portable record is the <b>signed attestation</b> and <b>AI-BOM</b> — publish it (Download / push to GitHub) '
+        + 'and the pushed repo carries the same provenance, verifiable with <code>openfab verify-file</code>.</div>';
+      return;
+    }
+    d.innerHTML = '<div class="empty">loading audit trail…</div>'; loadAudit(d);
+  });
   artNode(tree, "log", "📋", "Decision log", "", false, () => renderLog(a.timeline));
   selectArt(a.files.length ? "file0" : "aibom");
 }

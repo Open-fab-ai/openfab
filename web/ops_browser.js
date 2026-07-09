@@ -104,6 +104,32 @@ const OpsBrowser = (() => {
         rec.spec_ref = `${rec.spec.id || slug}#v${version}`;
         ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
         if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.join("; ")}`);
+        if (specPause()) {
+          // Human-in-the-loop: stop here so the human can edit the spec/criteria or
+          // ask the model to regenerate before any code is written. Resumed by reviseSpec.
+          rec.status = "awaiting-spec";
+          ev(rec, "⏸️", "paused for human spec review — edit the contract, then Continue or Regenerate");
+          await putRun(rec); LIVE.set(run_id, rec);
+          return;
+        }
+        await buildFromSpec(rec, intent);
+      } catch (e) {
+        rec.status = "failed"; ev(rec, "✖", `spec authoring failed: ${e.message}`);
+        await putRun(rec); LIVE.delete(run_id); LIVE.set(run_id, rec);
+      }
+    })();
+    return { run_id };
+  }
+
+  // Build phase: generate → run the acceptance contract → sign/gate, with auto-retry.
+  // Retries RE-GENERATE code against the SAME (possibly human-edited) spec — the honest
+  // self-correction is fixing the code to meet a fixed contract, not moving the goalposts.
+  async function buildFromSpec(rec, intent) {
+    const run_id = rec.run_id;
+    const maxAttempts = 1 + retries(); // e.g. retries()=2 → up to 3 attempts
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        rec.files = null; rec.acceptance = []; rec.acceptance_passed = false; rec.attestation = null; rec.status = "running";
         const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m));
         rec.files = gen.files;
         ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
@@ -112,20 +138,59 @@ const OpsBrowser = (() => {
         rec.acceptance_passed = rec.acceptance.every((c) => c.passed);
         if (rec.mode === "draft") {
           rec.status = rec.acceptance_passed ? "draft" : "failed";
-          ev(rec, "⚡", "draft complete — un-attested (promote to run the trust ceremony)");
-        } else {
+          if (rec.acceptance_passed) ev(rec, "⚡", "draft complete — un-attested (promote to run the trust ceremony)");
+        } else if (rec.acceptance_passed) {
           rec.attestation = await buildAttestation(rec, rec.files, rec.acceptance, gen.model, gen.prompt);
           ev(rec, "🔏", `signed in-toto attestation (openfab/generation) in-browser; fab DID ${rec.attestation.signatures[0].keyid.slice(0, 24)}…; payload sha256 ${rec.attestation.payload_sha256.slice(0, 16)}`);
-          rec.status = rec.acceptance_passed ? "blocked" : "failed";
-          ev(rec, "🛡️", rec.acceptance_passed ? "trust gate: BLOCKED — awaiting human sign-off" : "trust gate: acceptance failed — gate stays closed (honest failure)");
+          rec.status = "blocked";
+          ev(rec, "🛡️", "trust gate: BLOCKED — awaiting human sign-off");
+        } else {
+          rec.status = "failed"; // acceptance did not pass
         }
+        if (rec.status !== "failed") break; // success (blocked / draft / merged-later)
+        if (attempt < maxAttempts) { ev(rec, "🔁", `acceptance did not pass — auto-retrying (${attempt}/${maxAttempts - 1})`); continue; }
+        ev(rec, "⛔", `acceptance still failing after ${maxAttempts} attempt(s) — honest failure, not a vacuous pass`);
       } catch (e) {
-        rec.status = "failed"; ev(rec, "✖", `run failed: ${e.message}`);
+        if (attempt < maxAttempts) { ev(rec, "🔁", `attempt failed (${e.message}) — auto-retrying (${attempt}/${maxAttempts - 1})`); await putRun(rec); continue; }
+        rec.status = "failed"; ev(rec, "✖", `run failed after ${maxAttempts} attempt(s): ${e.message}`);
       }
-      await putRun(rec); LIVE.delete(run_id) ; LIVE.set(run_id, rec); // keep latest visible
-    })();
-    return { run_id };
+      break;
+    }
+    await putRun(rec); LIVE.delete(run_id); LIVE.set(run_id, rec); // keep latest visible
   }
+
+  // Resume a run paused at awaiting-spec: accept the human's edited spec ("continue"),
+  // or ask the model to re-author it from feedback ("regenerate", re-pauses for review).
+  async function reviseSpec(id, { action, spec, feedback }) {
+    const rec = await loadRec(id);
+    if (!rec) { const e = new Error("run not found"); e.status = 404; throw e; }
+    if (rec.status !== "awaiting-spec") throw new Error("run is not awaiting spec review");
+    if (action === "regenerate") {
+      ev(rec, "✏️", `human asked the model to re-author the spec${feedback ? `: "${feedback.slice(0, 120)}"` : ""}`);
+      rec.spec = await FabEngine.reauthorSpec(rec.intent, rec.spec, feedback || "");
+      rec.spec_ref = `${rec.spec.id || rec.spec_ref.split("#")[0]}#${rec.spec_ref.split("#")[1] || "v1"}`;
+      ev(rec, "🧾", `spec re-authored (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria — review again`);
+      rec.status = "awaiting-spec"; // pause again so the human reviews the new draft
+      await putRun(rec); LIVE.set(id, rec);
+      return { run_id: id, status: rec.status };
+    }
+    // action === "continue": adopt the human-edited spec, then build against it.
+    // The human reviewed the spec, so clear the model's open_questions/assumptions —
+    // otherwise the signed AI-BOM would show questions the human already resolved.
+    if (spec && Array.isArray(spec.acceptance) && spec.acceptance.length) {
+      rec.spec = { ...rec.spec, ...spec, acceptance: spec.acceptance, model: rec.spec.model, open_questions: [], assumptions: [] };
+    }
+    if (!rec.spec.acceptance || !rec.spec.acceptance.length) throw new Error("a spec needs at least one acceptance criterion");
+    ev(rec, "👤", "human approved the spec — proceeding to code generation");
+    rec.status = "running";
+    await putRun(rec); LIVE.set(id, rec);
+    buildFromSpec(rec, rec.intent); // fire-and-forget; UI resumes polling
+    return { run_id: id, status: "running" };
+  }
+  // How many auto-retries on failure (Settings; default 2).
+  function retries() { const n = parseInt(localStorage.getItem("openfab_web_retries"), 10); return Number.isFinite(n) && n >= 0 ? n : 2; }
+  // Pause after spec authoring for human review? (Settings; default off.)
+  function specPause() { return localStorage.getItem("openfab_web_spec_pause") === "1"; }
 
   async function loadRec(id) { return LIVE.get(id) || (await getRun(id)); }
 
@@ -198,7 +263,7 @@ const OpsBrowser = (() => {
       files.push({ path: p, contents: c, sha256: await FabCrypto.sha256Hex(c), author: "ai" });
     }
     const sbom = { spdxVersion: "SPDX-2.3", SPDXID: "SPDXRef-DOCUMENT", name: rec.spec_ref, creators: ["Tool: openfab-web/0.1"], files: files.map((f, i) => ({ SPDXID: `SPDXRef-File-${i}`, fileName: f.path, checksums: [{ algorithm: "SHA256", checksumValue: f.sha256 }] })) };
-    return { run: { run_id: rec.run_id, spec_ref: rec.spec_ref, status: rec.status, merged: rec.merged, base_name: rec.base_name, acceptance: rec.spec ? rec.spec.acceptance : [] }, files, attestation: rec.attestation, sbom, timeline: rec.events.map((e) => `[${e.t}] ${e.icon} ${e.msg}`).join("\n") };
+    return { run: { run_id: rec.run_id, spec_ref: rec.spec_ref, status: rec.status, merged: rec.merged, base_name: rec.base_name, base_runtime: rec.base_runtime, acceptance: rec.spec ? rec.spec.acceptance : [] }, spec: rec.spec, files, attestation: rec.attestation, sbom, timeline: rec.events.map((e) => `[${e.t}] ${e.icon} ${e.msg}`).join("\n") };
   }
 
   // ---- the route dispatcher: same contract as the Rust JSON API ----
@@ -230,6 +295,7 @@ const OpsBrowser = (() => {
     if (seg[1] === "runs" && seg.length === 3 && method === "GET") { const r = await loadRec(seg[2]); if (!r) { const e = new Error("run not found"); e.status = 404; throw e; } return { run_id: r.run_id, status: r.status, spec_ref: r.spec_ref, acceptance_passed: r.acceptance_passed, accepted: r.accepted, merged: r.merged, base_name: r.base_name, gate_mode: r.gate }; }
     if (seg[1] === "runs" && seg[3] === "events") { const r = await loadRec(seg[2]); const since = Number(q.get("since") || 0); return (r ? r.events : []).filter((e) => e.seq > since); }
     if (seg[1] === "runs" && seg[3] === "artifacts") return artifacts(seg[2]);
+    if (seg[1] === "runs" && seg[3] === "spec" && method === "POST") return reviseSpec(seg[2], body || {});
     if (seg[1] === "runs" && seg[3] === "signoff") return signoff(seg[2], body && body.as);
     if (seg[1] === "runs" && seg[3] === "reject") { const r = await loadRec(seg[2]); r.status = "rejected"; await putRun(r); return { run_id: r.run_id, status: r.status }; }
     if (seg[1] === "runs" && seg[3] === "reproduce") return reproduce(seg[2]);

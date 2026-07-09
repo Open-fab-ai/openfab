@@ -339,8 +339,8 @@ async function openSpecReview() {
   const sp = STATE.artifacts.spec || {};
   document.querySelectorAll(".step").forEach((s) => s.classList.toggle("inspecting", s.dataset.step === "spec"));
   const oq = (sp.open_questions || []).length
-    ? `<div class="panel-h" style="margin-top:12px">Questions &amp; suggestions <span class="muted">(the model's recommendation — accept or tell it otherwise below)</span></div>
-       <ul class="oq">${sp.open_questions.map((q) => `<li>${escapeHtml(q)}</li>`).join("")}</ul>`
+    ? `<div class="panel-h" style="margin-top:12px">Decisions to confirm <span class="muted">(the suggested option is pre-selected — change any you like)</span></div>
+       <div id="specoq">${sp.open_questions.map((q, i) => specOqItem(q, i)).join("")}</div>`
     : "";
   const rows = (sp.acceptance || []).map((c, i) => specCritRow(c, i)).join("");
   const pd = $("#phasedetail"); pd.classList.remove("hidden");
@@ -363,6 +363,33 @@ async function openSpecReview() {
   $("#specregen").onclick = () => submitSpecReview("regenerate");
   $("#specaddcrit").onclick = () => { $("#speccrit").insertAdjacentHTML("beforeend", specCritRow({ desc: "", check: "" }, $("#speccrit").children.length)); };
 }
+// One open question as a pick-list: the model's options as radios (suggested
+// pre-selected) plus a free-text "other". Legacy string questions render read-only.
+function specOqItem(q, i) {
+  if (typeof q === "string") return `<div class="oqitem" data-q="${escapeHtml(q)}"><div class="oqq">${escapeHtml(q)}</div></div>`;
+  const opts = Array.isArray(q.options) ? q.options : [];
+  const radios = opts.map((o, j) => {
+    const sug = o === q.suggested;
+    return `<label class="oqopt"><input type="radio" name="oq${i}" value="${escapeHtml(o)}"${sug ? " checked" : ""}/> ${escapeHtml(o)}${sug ? ' <span class="muted">(suggested)</span>' : ""}</label>`;
+  }).join("");
+  return `<div class="oqitem" data-q="${escapeHtml(q.q || "")}">
+    <div class="oqq">${escapeHtml(q.q || "")}</div>
+    <div class="oqopts">${radios}
+      <label class="oqopt"><input type="radio" name="oq${i}" value="__other"/> other: <input class="oqother" type="text" placeholder="your answer" /></label>
+    </div>
+    ${q.why ? `<div class="hint">${escapeHtml(q.why)}</div>` : ""}
+  </div>`;
+}
+// Read the chosen answer for each question → ["<question> → <answer>", …].
+function collectDecisions() {
+  return [...document.querySelectorAll("#specoq .oqitem")].map((it) => {
+    const q = it.dataset.q || "";
+    const picked = it.querySelector("input[type=radio]:checked");
+    if (!picked) return null;
+    const ans = picked.value === "__other" ? (it.querySelector(".oqother")?.value.trim() || "") : picked.value;
+    return ans ? `${q} → ${ans}` : null;
+  }).filter(Boolean);
+}
 // One editable criterion: plain-English description up front; the js: machine
 // check (what actually runs + gets signed) tucked into an advanced disclosure.
 function specCritRow(c, i) {
@@ -378,9 +405,11 @@ async function submitSpecReview(action) {
   const st = $("#specreviewstatus");
   const btns = [$("#speccontinue"), $("#specregen")]; btns.forEach((b) => b && (b.disabled = true));
   try {
+    const decisions = collectDecisions(); // the human's answers to the open questions
+    const feedback = $("#specfeedback").value.trim();
     if (action === "regenerate") {
       st.textContent = "asking the model to re-author the spec…";
-      await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "regenerate", feedback: $("#specfeedback").value.trim() });
+      await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "regenerate", feedback, decisions });
       await openSpecReview(); // re-render with the new spec, still paused
       return;
     }
@@ -392,8 +421,10 @@ async function submitSpecReview(action) {
       return { id: `a${i + 1}`, desc, check };
     }).filter((c) => c.check); // a criterion needs a machine check to be enforceable
     if (!acceptance.length) { st.textContent = "each criterion needs a machine check (open “machine check”). Add one or Regenerate."; btns.forEach((b) => b && (b.disabled = false)); return; }
-    st.textContent = "spec approved — generating…";
-    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { summary: $("#specsummary").value.trim(), acceptance } });
+    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { summary: $("#specsummary").value.trim(), acceptance }, decisions });
+    // clear the review editor — the workflow resumes; the user watches it live.
+    const pd = $("#phasedetail");
+    pd.innerHTML = `<div class="ph-h">⚙️ Generating from the approved spec</div><div class="muted">Your decisions were passed to the coder. Watch the live workflow above; click any step to inspect what it produced.</div>`;
     startPolling(); // resume the live workflow
   } catch (e) {
     st.textContent = `error: ${e.message}`; // surface, don't swallow (R5)
@@ -451,7 +482,8 @@ async function showPhase(step) {
         <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(plain-English, with the machine check beneath)</span></div>
         ${checks}
         <div class="panel-h" style="margin-top:10px">Assumptions</div>${list(sp.assumptions)}
-        <div class="panel-h" style="margin-top:10px">Open questions <span class="muted">(surfaced to you)</span></div>${list(sp.open_questions)}
+        ${(sp.decisions && sp.decisions.length) ? `<div class="panel-h" style="margin-top:10px">Decisions <span class="muted">(chosen by the human)</span></div>${list(sp.decisions)}` : ""}
+        <div class="panel-h" style="margin-top:10px">Open questions</div>${list((sp.open_questions || []).map((q) => typeof q === "string" ? q : `${q.q}${q.suggested ? ` — suggested: ${q.suggested}` : ""}`))}
         <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ raw spec JSON</summary><pre class="code" style="margin-top:6px">${escapeHtml(JSON.stringify(sp, null, 2))}</pre></details>`;
     }
   } else if (step === "generate") {

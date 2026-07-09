@@ -161,13 +161,17 @@ const OpsBrowser = (() => {
 
   // Resume a run paused at awaiting-spec: accept the human's edited spec ("continue"),
   // or ask the model to re-author it from feedback ("regenerate", re-pauses for review).
-  async function reviseSpec(id, { action, spec, feedback }) {
+  async function reviseSpec(id, { action, spec, feedback, decisions }) {
     const rec = await loadRec(id);
     if (!rec) { const e = new Error("run not found"); e.status = 404; throw e; }
     if (rec.status !== "awaiting-spec") throw new Error("run is not awaiting spec review");
+    // The human's answers to the open questions — fold into the model's instructions.
+    const decLines = Array.isArray(decisions) ? decisions.filter(Boolean) : [];
+    const decBlock = decLines.length ? `Resolved decisions (the human chose these):\n- ${decLines.join("\n- ")}` : "";
     if (action === "regenerate") {
-      ev(rec, "✏️", `human asked the model to re-author the spec${feedback ? `: "${feedback.slice(0, 120)}"` : ""}`);
-      rec.spec = await FabEngine.reauthorSpec(rec.intent, rec.spec, feedback || "");
+      ev(rec, "✏️", `human asked the model to re-author the spec${decLines.length ? ` (${decLines.length} decision(s) chosen)` : ""}${feedback ? `: "${feedback.slice(0, 120)}"` : ""}`);
+      const note = [decBlock, feedback].filter(Boolean).join("\n\n");
+      rec.spec = await FabEngine.reauthorSpec(rec.intent, rec.spec, note);
       rec.spec_ref = `${rec.spec.id || rec.spec_ref.split("#")[0]}#${rec.spec_ref.split("#")[1] || "v1"}`;
       ev(rec, "🧾", `spec re-authored (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria — review again`);
       rec.status = "awaiting-spec"; // pause again so the human reviews the new draft
@@ -181,10 +185,13 @@ const OpsBrowser = (() => {
       rec.spec = { ...rec.spec, ...spec, acceptance: spec.acceptance, model: rec.spec.model, open_questions: [], assumptions: [] };
     }
     if (!rec.spec.acceptance || !rec.spec.acceptance.length) throw new Error("a spec needs at least one acceptance criterion");
-    ev(rec, "👤", "human approved the spec — proceeding to code generation");
+    if (decLines.length) rec.spec.decisions = decLines; // record the human's choices in the signed spec
+    ev(rec, "👤", `human approved the spec${decLines.length ? ` with ${decLines.length} decision(s)` : ""} — proceeding to code generation`);
     rec.status = "running";
     await putRun(rec); LIVE.set(id, rec);
-    buildFromSpec(rec, rec.intent); // fire-and-forget; UI resumes polling
+    // Pass the decisions to the coder by augmenting the build task (not stored in intent).
+    const buildIntent = decBlock ? `${rec.intent}\n\n${decBlock}` : rec.intent;
+    buildFromSpec(rec, buildIntent); // fire-and-forget; UI resumes polling
     return { run_id: id, status: "running" };
   }
   // How many auto-retries on failure (Settings; default 2).

@@ -20,7 +20,7 @@ const FabEngine = (() => {
   const SLICE_KEY = { shared: "openfab_web_slice_shared", spec: "openfab_web_slice_spec", coder: "openfab_web_slice_coder" };
   const SLICE_FALLBACK = {
     shared: "You are the pair-programming partner inside an OpenFab fab: the human owns intent and judgment, you own the draft. Never guess to fill a gap — surface it as an open question. Empty, skipped, or failing output is a failure, never a pass.",
-    spec: "You turn a user's natural-language request into a build spec a non-technical human can read and confirm. Start with a short plain-English summary of what will be built and why (WHAT/WHY, no technology or file layout). Then give each acceptance criterion a plain-English description of what it guarantees for the user, paired with the machine check that verifies it — cover the user's ACTUAL intent (the key behaviors/elements they asked for), not incidental details; prefer a few high-signal criteria over many brittle ones, and never over-constrain the design. Do not just raise open questions: for each one, propose a recommended default answer and a one-line reason, so the human can accept or override at a glance.",
+    spec: "You turn a user's natural-language request into a build spec a non-technical human can read and confirm. Start with a short plain-English summary of what will be built and why (WHAT/WHY, no technology or file layout). Then give each acceptance criterion a plain-English description of what it guarantees for the user, paired with the machine check that verifies it — cover the user's ACTUAL intent (the key behaviors/elements they asked for), not incidental details; prefer a few high-signal criteria over many brittle ones, and never over-constrain the design. Do not just raise open questions: for each one, offer 2–4 concrete answer options, mark the recommended one, and give a one-line reason — so the human can pick or override at a glance.",
     coder: [
       "You are a senior CODER agent producing a complete, working, client-side web app (vanilla HTML/CSS/JS only). Engineering standards — follow them, in priority order:",
       "• Correctness & robustness first: pass every acceptance check; handle empty/invalid/boundary input; no console errors; no external network/CDN dependencies.",
@@ -197,7 +197,7 @@ const FabEngine = (() => {
  "summary":"<one short paragraph, plain English: what the app does and for whom>",
  "acceptance":[{"id":"a1-<slug>","desc":"<plain-English: what this guarantees for the user>","check":"js:<expression>"}, ...],
  "assumptions":["..."],
- "open_questions":["<question> — Suggested: <recommended answer> (<one-line reason>)"]}`;
+ "open_questions":[{"q":"<the decision to make>","options":["<answer choice>","<another choice>"],"suggested":"<the recommended choice — must exactly match one option>","why":"<one-line reason>"}]}`;
   const SPEC_RULES = `Rules:
 - Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
 - Each "desc" is plain English a non-technical user understands. Each "check" is a JavaScript EXPRESSION
@@ -205,7 +205,8 @@ const FabEngine = (() => {
   Examples: "js:!!files['app/index.html']" · "js:files['app/index.html'].includes('id=\\"add-btn\\"')"
 - 2 to 4 criteria that GENUINELY verify the request. Assert the smallest stable token (an id= or function
   name), never a whole tag with attributes; never over-constrain the design.
-- Every open_question MUST include a "Suggested:" answer and a one-line reason in parentheses.`;
+- Each open_question is an object with 2 to 4 concrete "options", a "suggested" one (matching an option
+  exactly), and a one-line "why" — so the human can pick or override, never just an open-ended question.`;
   async function authorSpec(intent) {
     await loadShippedSlices();
     // System prompt = shared slice + spec slice, read live from openfab-agent.md /

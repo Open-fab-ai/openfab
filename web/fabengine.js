@@ -8,6 +8,80 @@
 const FabEngine = (() => {
   const LLM_KEY = "openfab_web_llm"; // { providerId, baseUrl, apiKey, model }
 
+  // ---- Agent-guidance slices (openfab-agent.md) ---------------------------
+  // The system prompts are NOT hardcoded here. They are the injectable slices
+  // of openfab-agent.md — read LIVE on every call so editing a slice changes the
+  // NEXT call of that role with no rebuild. Resolution order per slice:
+  //   1. user override in localStorage (Settings → Agent guidance)
+  //   2. the shipped openfab-agent.md, fetched once and parsed
+  //   3. the embedded fallback below (used only if the fetch fails, e.g. offline)
+  // The embedded fallbacks MIRROR the <!-- inject:* --> blocks of
+  // web/openfab-agent.md (the single canonical source); keep them in sync.
+  const SLICE_KEY = { shared: "openfab_web_slice_shared", spec: "openfab_web_slice_spec", coder: "openfab_web_slice_coder" };
+  const SLICE_FALLBACK = {
+    shared: "You are the pair-programming partner inside an OpenFab fab: the human owns intent and judgment, you own the draft. Never guess to fill a gap — surface it as an open question. Empty, skipped, or failing output is a failure, never a pass.",
+    spec: "You turn a user's natural-language request into a machine-checkable build spec. Write acceptance criteria that verify the user's ACTUAL intent (the key behaviors/elements they asked for), not incidental details. Prefer a few high-signal checks over many brittle ones. Each check must be objectively satisfiable by a simple, well-structured implementation — never over-constrain the design. Stay at the WHAT/WHY level: no technology choices, file names, or algorithms. Surface genuine ambiguities as open_questions rather than guessing.",
+    coder: [
+      "You are a senior CODER agent producing a complete, working, client-side web app (vanilla HTML/CSS/JS only). Engineering standards — follow them, in priority order:",
+      "• Correctness & robustness first: pass every acceptance check; handle empty/invalid/boundary input; no console errors; no external network/CDN dependencies.",
+      "• KISS & simplicity: the simplest design that fully meets the spec; no speculative features or frameworks (YAGNI).",
+      "• Single responsibility & modularity: small, well-named functions each doing one thing; separate structure/style/behavior.",
+      "• DRY: never duplicate logic or markup — factor shared behavior into one place; no copy-paste blocks; any value used twice lives once.",
+      "• Readability: clear names (functions are verbs, types are nouns), no magic numbers, brief comments only where intent isn't obvious; no dead or commented-out code.",
+      "• Accessibility & UX basics: labels for inputs, keyboard-usable, sensible defaults.",
+      "Produce the smallest set of files that works; include every file the app references.",
+    ].join("\n"),
+  };
+  // Defaults parsed from the shipped openfab-agent.md (populated by loadShippedSlices).
+  const shippedSlices = { shared: null, spec: null, coder: null };
+  function parseInjectBlock(md, name) {
+    const m = md.match(new RegExp("<!--\\s*inject:" + name + "\\s*-->([\\s\\S]*?)<!--\\s*/inject:" + name + "\\s*-->"));
+    return m ? m[1].trim() : null;
+  }
+  let shippedPromise = null;
+  function loadShippedSlices() {
+    // Fetch + parse once; on failure the embedded fallbacks are used. Not fatal:
+    // guidance drives quality, and a stale/missing file must not block a run.
+    if (!shippedPromise) {
+      shippedPromise = fetch("openfab-agent.md")
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((md) => { for (const k of Object.keys(shippedSlices)) shippedSlices[k] = parseInjectBlock(md, k); })
+        .catch(() => { /* offline / server mode: embedded fallbacks apply */ });
+    }
+    return shippedPromise;
+  }
+  function slice(name) {
+    const override = localStorage.getItem(SLICE_KEY[name]);
+    if (override != null && override.trim()) return override;
+    return shippedSlices[name] || SLICE_FALLBACK[name];
+  }
+  function sliceDefault(name) { return shippedSlices[name] || SLICE_FALLBACK[name]; } // for the Settings editor
+  function setSlice(name, text) {
+    if (text == null || text === sliceDefault(name)) localStorage.removeItem(SLICE_KEY[name]);
+    else localStorage.setItem(SLICE_KEY[name], text);
+  }
+  function exportSlices() {
+    return JSON.stringify({ shared: slice("shared"), spec: slice("spec"), coder: slice("coder") }, null, 2);
+  }
+  function importSlices(json) {
+    const o = JSON.parse(json); // throws on bad input — surfaced to the caller (Settings)
+    for (const k of Object.keys(SLICE_KEY)) if (typeof o[k] === "string") setSlice(k, o[k]);
+  }
+  // Ask the LLM to improve one guidance slice. Returns the improved text (the
+  // human reviews + saves it — it is never applied silently). `role` labels what
+  // the slice governs so the model keeps it scoped and concise.
+  const SLICE_ROLE = {
+    shared: "the shared preamble injected into EVERY LLM call (keep it very short — it is paid on every call)",
+    spec: "the spec-author's guidance (turning intent into machine-checkable acceptance criteria; WHAT/WHY, never HOW)",
+    coder: "the coder's guidance (engineering standards for generating a client-side web app: KISS, DRY, SRP, readability, robustness)",
+  };
+  async function improveSlice(name, current) {
+    const sys = "You are a prompt engineer improving one section of a system prompt. Return ONLY the improved section text — no preamble, no markdown fences, no commentary. Keep it concise and high-signal; preserve the original intent and scope; do not add rules the section wasn't about.";
+    const usr = `This section is ${SLICE_ROLE[name] || name}.\n\nImprove it (clarity, specificity, concision). Return only the replacement text.\n\nCURRENT:\n${current}`;
+    const out = await chat(sys, usr, roleModel("spec"));
+    return (out.text || "").trim();
+  }
+
   // Presets. `browser` = CORS verified/known; Ollama Cloud tested 2026-07: no CORS.
   const PROVIDERS = [
     { id: "openrouter", name: "OpenRouter (browser-ready ✓)", baseUrl: "https://openrouter.ai/api/v1", browser: true },
@@ -117,13 +191,10 @@ const FabEngine = (() => {
 
   // ---- spec authoring (browser targets + js: checks only — honestly runnable here) ----
   async function authorSpec(intent) {
-    const sys = [
-      "You turn a user's natural-language request into a machine-checkable build spec for a BROWSER-ONLY web app.",
-      "Write acceptance criteria that verify the user's ACTUAL intent (the key behaviors/elements they asked for),",
-      "not incidental details. Prefer a few high-signal checks over many brittle ones. Each check must be objectively",
-      "satisfiable by a simple, well-structured implementation — never over-constrain the design. Surface genuine",
-      "ambiguities as open_questions rather than guessing.",
-    ].join("\n");
+    await loadShippedSlices();
+    // System prompt = shared slice + spec slice, read live from openfab-agent.md /
+    // Settings (see slice()). The BROWSER-ONLY target + JSON shape are call plumbing.
+    const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
     const usr = `Respond with ONLY a JSON object (no prose):
 {"id":"<kebab-slug>","language":"html/js","target_dir":"app",
  "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
@@ -145,6 +216,34 @@ ${intent}`;
     return a;
   }
 
+  // Re-author a spec from human feedback (used by the spec-review pause). Same
+  // output shape as authorSpec; the model sees the prior spec + the human's ask.
+  async function reauthorSpec(intent, prevSpec, feedback) {
+    await loadShippedSlices();
+    const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
+    const usr = `Revise the spec below per the human's feedback. Respond with ONLY the updated JSON object, same shape:
+{"id":"<kebab-slug>","language":"html/js","target_dir":"app",
+ "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
+ "assumptions":["..."],"open_questions":["..."]}
+
+Each acceptance check is a JavaScript EXPRESSION prefixed "js:", evaluated with a variable \`files\`
+(a map of path -> file contents as strings), returning true when satisfied. Keep 2 to 4 high-signal checks
+that assert the smallest stable token; never over-constrain the design.
+
+ORIGINAL USER REQUEST:
+${intent}
+
+CURRENT SPEC:
+${JSON.stringify(prevSpec, null, 2)}
+
+HUMAN FEEDBACK (apply this):
+${feedback || "(no free-text feedback — tighten/clarify the spec while preserving intent)"}`;
+    const out = await chat(sys, usr, roleModel("spec"));
+    const a = parseJson(out.text);
+    a.model = out.model;
+    return a;
+  }
+
   // ---- the browser swarm: coder → reviewer (both real LLM calls in this tab) ----
   const FILES_SHAPE = `Respond with ONLY one JSON object, no prose:
 {"files": {"app/<relpath>": "<full file contents>", ...}, "notes": "<one line>"}`;
@@ -154,17 +253,8 @@ ${intent}`;
     return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions over a files map — your files MUST make each return true):\n${checks}`;
   }
 
-  const CODER_SYS = [
-    "You are a senior CODER agent producing a complete, working, client-side web app (vanilla HTML/CSS/JS only).",
-    "Engineering standards — follow them:",
-    "• KISS & simplicity: the simplest design that fully meets the spec; no speculative features or frameworks.",
-    "• Single responsibility & modularity: small, well-named functions each doing one thing; separate concerns (structure/style/behavior).",
-    "• DRY: never duplicate logic or markup — factor shared behavior into one function; no copy-paste blocks.",
-    "• Readability: clear names, consistent style, brief comments only where intent isn't obvious. No dead or commented-out code.",
-    "• Correctness & robustness: handle empty/invalid input; no console errors; no external network/CDN dependencies.",
-    "• Accessibility & UX basics: labels for inputs, keyboard-usable, sensible defaults.",
-    "Produce the smallest set of files that works; include every file the app references.",
-  ].join("\n");
+  // Coder system prompt = shared slice + coder slice, read LIVE per call (see slice()).
+  function coderSys() { return `${slice("shared")}\n\n${slice("coder")}`; }
   function normalizeFiles(files) {
     const norm = {};
     for (const [p, c] of Object.entries(files || {})) norm[p.startsWith("app/") ? p : "app/" + p.replace(/^\/+/, "")] = String(c);
@@ -180,9 +270,11 @@ ${intent}`;
   // pass on the first try, so most runs make just ONE code-gen call (faster + more honest:
   // the revise is grounded in the actual failing checks, not a model's opinion).
   async function generate(spec, intent, onEvent) {
+    await loadShippedSlices();
+    const sys = coderSys(); // live slice; frozen for both passes of this one run
     const tb = taskBlock(spec, intent);
     onEvent("🤖", "coder: generating the app (in-tab LLM call)");
-    const coder = await chatJson(CODER_SYS,
+    const coder = await chatJson(sys,
       `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"));
     let files = normalizeFiles(coder.obj.files);
 
@@ -190,7 +282,7 @@ ${intent}`;
     const failed = (await runChecks(spec, files)).filter((c) => !c.passed);
     if (failed.length) {
       onEvent("🔧", `coder: ${failed.length} acceptance check(s) failed — one revision pass`);
-      const rev = await chatJson(CODER_SYS,
+      const rev = await chatJson(sys,
         `${tb}\n\nCURRENT FILES:\n${dumpFiles(files)}\n\nThese acceptance checks FAILED — change the files so EVERY one passes verbatim:\n` +
         failed.map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}${c.detail ? " → " + c.detail : ""}`).join("\n") +
         `\n\nReturn the COMPLETE corrected file set. ${FILES_SHAPE}`, roleModel("coder"));
@@ -246,5 +338,6 @@ ${intent}`;
     return out;
   }
 
-  return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, generate, runChecks };
+  return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, reauthorSpec, generate, runChecks,
+    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices, improveSlice };
 })();

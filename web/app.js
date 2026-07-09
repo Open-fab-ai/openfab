@@ -41,7 +41,21 @@ async function detectMode() {
 }
 function toast(msg, err) { const t = el("div", "toast" + (err ? " err" : ""), msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
 
-let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null, verify: null, draft: null };
+let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null, verify: null, draft: null, genTimer: null };
+
+// Live elapsed timer for the "generating…" note (generation is a 10–60s blocking
+// LLM call; the ticking clock signals progress). Self-stops if its element is gone.
+function fmtDur(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`; }
+function startGenTimer() {
+  stopGenTimer();
+  const start = Date.now();
+  STATE.genTimer = setInterval(() => {
+    const el = document.querySelector("#genelapsed");
+    if (!el) return stopGenTimer();
+    el.textContent = fmtDur(Date.now() - start);
+  }, 1000);
+}
+function stopGenTimer() { if (STATE.genTimer) { clearInterval(STATE.genTimer); STATE.genTimer = null; } }
 
 // ---------- init ----------
 async function init() {
@@ -424,7 +438,8 @@ async function submitSpecReview(action) {
     await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { summary: $("#specsummary").value.trim(), acceptance }, decisions });
     // clear the review editor — the workflow resumes; the user watches it live.
     const pd = $("#phasedetail");
-    pd.innerHTML = `<div class="ph-h">⚙️ Generating from the approved spec</div><div class="muted">Your decisions were passed to the coder. Watch the live workflow above; click any step to inspect what it produced.</div>`;
+    pd.innerHTML = `<div class="ph-h">⚙️ Generating from the approved spec <span class="muted" style="font-weight:400">· elapsed <span id="genelapsed" class="mono">0s</span></span></div><div class="muted">Your decisions were passed to the coder. Watch the live workflow above; click any step to inspect what it produced.</div>`;
+    startGenTimer();
     startPolling(); // resume the live workflow
   } catch (e) {
     st.textContent = `error: ${e.message}`; // surface, don't swallow (R5)
@@ -532,6 +547,7 @@ function setStatus(st) {
 }
 
 async function onRunDone(run) {
+  stopGenTimer(); // freeze the generation clock at its last tick
   loadApps();   // refresh the app list whenever a build finishes
   if (run.status === "failed") { toast("run failed — see the timeline", true); return; }
   // Wizard: fold the finished workflow to a summary line so the product/approve step is the focus.

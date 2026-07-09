@@ -221,8 +221,9 @@
     <h2>Settings</h2>
     <button class="btn ghost sm" id="drawerclose" type="button">✕</button>
   </div>
-  <div class="card" id="llmcard">
-    <h2>LLM provider <span class="muted">(browser mode — your key stays in this browser)</span></h2>
+  <details class="card scard" id="llmcard" open>
+    <summary><h2>LLM provider <span class="muted">(browser mode — your key stays in this browser)</span></h2></summary>
+    <div class="scard-body">
     <label class="fld">Provider</label>
     <select id="llmprovider"></select>
     <div class="hint" id="llmproviderhint" style="margin-top:4px"></div>
@@ -252,9 +253,11 @@
       <button class="btn ghost sm" id="llmtest" type="button" style="width:auto">Test connection</button>
     </div>
     <div class="hint" id="llmstatus" style="margin-top:6px"></div>
-  </div>
-  <div class="card" id="agentcard">
-    <h2>Agent guidance <span class="muted">(openfab-agent.md — system prompts, injected per role)</span></h2>
+    </div>
+  </details>
+  <details class="card scard" id="agentcard">
+    <summary><h2>Agent guidance <span class="muted">(openfab-agent.md — system prompts, injected per role)</span></h2></summary>
+    <div class="scard-body">
     <div class="hint" style="margin-bottom:8px">
       These slices are the <b>only</b> text sent to the model, and only the slice each call needs — so edits are cheap and take effect on your <b>next</b> run of that role. The shared slice is paid on every call; keep it short. Runtime guardrails (sandbox, signing, N-of-M sign-off) are enforced by the fab and never injected. <a href="openfab-agent.md" target="_blank" rel="noopener">read the full file →</a>
     </div>
@@ -272,9 +275,11 @@
       <input type="file" id="sliceimportfile" accept="application/json,.json" class="hidden" />
     </div>
     <div class="hint" id="slicestatus" style="margin-top:6px"></div>
-  </div>
-  <div class="card">
-    <h2>Preferences</h2>
+    </div>
+  </details>
+  <details class="card scard">
+    <summary><h2>Preferences</h2></summary>
+    <div class="scard-body">
     <label class="fld">Default agent base <span class="muted">(pre-selected for new fabrications)</span></label>
     <select id="defaultbase"></select>
     <div class="hint" id="defaultbasehint" style="margin-top:6px">Saved in this browser.</div>
@@ -285,19 +290,24 @@
       <input type="checkbox" id="prefspecpause" style="width:auto; margin:0" /> Pause for spec review <span class="muted">(before any code is generated)</span>
     </label>
     <div class="hint" style="margin-top:4px">When on, a run stops after the spec is authored so you can edit the acceptance criteria or ask the model to regenerate — then Continue to build.</div>
-  </div>
-  <div class="card">
-    <h2>Maintainers <span class="muted">(N-of-M sign-off allowlist)</span></h2>
+    </div>
+  </details>
+  <details class="card scard">
+    <summary><h2>Maintainers <span class="muted">(N-of-M sign-off allowlist)</span></h2></summary>
+    <div class="scard-body">
     <div class="maintainers" id="maintainers"></div>
     <div style="display:flex; gap:8px; margin-top:10px">
       <input type="text" id="newmaint" placeholder="add maintainer (e.g. carol)" />
       <button class="btn ghost sm" id="addmaint" type="button">add</button>
     </div>
-  </div>
-  <div class="card">
-    <h2>Reputation <span class="muted">(from signed attestations)</span></h2>
+    </div>
+  </details>
+  <details class="card scard">
+    <summary><h2>Reputation <span class="muted">(from signed attestations)</span></h2></summary>
+    <div class="scard-body">
     <div id="reputation"><div class="empty">Run a fabrication to populate.</div></div>
-  </div>
+    </div>
+  </details>
 </aside>
 <script src="fabcrypto.js"></script>
 <script src="fabengine.js"></script>

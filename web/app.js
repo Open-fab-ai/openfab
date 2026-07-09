@@ -50,6 +50,7 @@ async function init() {
   wirePublish();
   wireFirstRun();
   wireRetriesPref();
+  wireAgentGuidance();
   $("#run").onclick = () => startRun(false);
   $("#addmaint").onclick = addMaintainer;
   $("#refine").onclick = refine;
@@ -127,6 +128,43 @@ function wireRetriesPref() {
     let v = parseInt(el.value, 10); if (!Number.isFinite(v) || v < 0) v = 2; if (v > 5) v = 5;
     el.value = v; localStorage.setItem("openfab_web_retries", String(v));
     toast(`auto-retry set to ${v}`);
+  };
+}
+// Agent-guidance editor (openfab-agent.md slices). Loads current values (user
+// override or shipped default), saves to localStorage so the NEXT LLM call of
+// that role uses them. See FabEngine.slice/setSlice.
+const SLICE_FIELDS = { shared: "#sliceshared", spec: "#slicespec", coder: "#slicecoder" };
+async function wireAgentGuidance() {
+  const card = $("#agentcard"); if (!card) return;
+  await FabEngine.loadShippedSlices(); // so sliceDefault() reflects the shipped file
+  const fill = (fn) => { for (const k of Object.keys(SLICE_FIELDS)) $(SLICE_FIELDS[k]).value = fn(k); };
+  fill((k) => FabEngine.slice(k));
+  $("#slicesave").onclick = () => {
+    for (const k of Object.keys(SLICE_FIELDS)) FabEngine.setSlice(k, $(SLICE_FIELDS[k]).value);
+    $("#slicestatus").textContent = "Saved — your next Fabricate uses these.";
+  };
+  $("#slicereset").onclick = () => {
+    for (const k of Object.keys(SLICE_FIELDS)) FabEngine.setSlice(k, null);
+    fill((k) => FabEngine.sliceDefault(k));
+    $("#slicestatus").textContent = "Reset to the shipped openfab-agent.md defaults.";
+  };
+  $("#sliceexport").onclick = () => {
+    const blob = new Blob([FabEngine.exportSlices()], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "openfab-agent.slices.json"; a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  $("#sliceimport").onclick = () => $("#sliceimportfile").click();
+  $("#sliceimportfile").onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      FabEngine.importSlices(await file.text());
+      fill((k) => FabEngine.slice(k));
+      $("#slicestatus").textContent = "Imported — your next Fabricate uses these.";
+    } catch (err) {
+      $("#slicestatus").textContent = `Import failed: ${err.message}`; // surface, don't swallow (R5)
+    }
+    e.target.value = "";
   };
 }
 function updateBaseBadge(bases) {

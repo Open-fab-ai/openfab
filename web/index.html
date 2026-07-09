@@ -253,6 +253,26 @@
     </div>
     <div class="hint" id="llmstatus" style="margin-top:6px"></div>
   </div>
+  <div class="card" id="agentcard">
+    <h2>Agent guidance <span class="muted">(openfab-agent.md — system prompts, injected per role)</span></h2>
+    <div class="hint" style="margin-bottom:8px">
+      These slices are the <b>only</b> text sent to the model, and only the slice each call needs — so edits are cheap and take effect on your <b>next</b> run of that role. The shared slice is paid on every call; keep it short. Runtime guardrails (sandbox, signing, N-of-M sign-off) are enforced by the fab and never injected. <a href="openfab-agent.md" target="_blank" rel="noopener">read the full file →</a>
+    </div>
+    <label class="fld">Shared <span class="muted">(every call)</span></label>
+    <textarea id="sliceshared" rows="3" spellcheck="false"></textarea>
+    <label class="fld" style="margin-top:8px">Spec-author <span class="muted">(spec call — WHAT/WHY, not HOW)</span></label>
+    <textarea id="slicespec" rows="6" spellcheck="false"></textarea>
+    <label class="fld" style="margin-top:8px">Coder <span class="muted">(code-gen call — engineering bar)</span></label>
+    <textarea id="slicecoder" rows="9" spellcheck="false"></textarea>
+    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
+      <button class="btn sm" id="slicesave" type="button" style="width:auto">Save</button>
+      <button class="btn ghost sm" id="slicereset" type="button" style="width:auto">Reset to default</button>
+      <button class="btn ghost sm" id="sliceexport" type="button" style="width:auto">Export</button>
+      <button class="btn ghost sm" id="sliceimport" type="button" style="width:auto">Import</button>
+      <input type="file" id="sliceimportfile" accept="application/json,.json" class="hidden" />
+    </div>
+    <div class="hint" id="slicestatus" style="margin-top:6px"></div>
+  </div>
   <div class="card">
     <h2>Preferences</h2>
     <label class="fld">Default agent base <span class="muted">(pre-selected for new fabrications)</span></label>

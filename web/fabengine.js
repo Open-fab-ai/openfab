@@ -20,7 +20,7 @@ const FabEngine = (() => {
   const SLICE_KEY = { shared: "openfab_web_slice_shared", spec: "openfab_web_slice_spec", coder: "openfab_web_slice_coder" };
   const SLICE_FALLBACK = {
     shared: "You are the pair-programming partner inside an OpenFab fab: the human owns intent and judgment, you own the draft. Never guess to fill a gap — surface it as an open question. Empty, skipped, or failing output is a failure, never a pass.",
-    spec: "You turn a user's natural-language request into a machine-checkable build spec. Write acceptance criteria that verify the user's ACTUAL intent (the key behaviors/elements they asked for), not incidental details. Prefer a few high-signal checks over many brittle ones. Each check must be objectively satisfiable by a simple, well-structured implementation — never over-constrain the design. Stay at the WHAT/WHY level: no technology choices, file names, or algorithms. Surface genuine ambiguities as open_questions rather than guessing.",
+    spec: "You turn a user's natural-language request into a build spec a non-technical human can read and confirm. Start with a short plain-English summary of what will be built and why (WHAT/WHY, no technology or file layout). Then give each acceptance criterion a plain-English description of what it guarantees for the user, paired with the machine check that verifies it — cover the user's ACTUAL intent (the key behaviors/elements they asked for), not incidental details; prefer a few high-signal criteria over many brittle ones, and never over-constrain the design. Do not just raise open questions: for each one, propose a recommended default answer and a one-line reason, so the human can accept or override at a glance.",
     coder: [
       "You are a senior CODER agent producing a complete, working, client-side web app (vanilla HTML/CSS/JS only). Engineering standards — follow them, in priority order:",
       "• Correctness & robustness first: pass every acceptance check; handle empty/invalid/boundary input; no console errors; no external network/CDN dependencies.",
@@ -190,24 +190,31 @@ const FabEngine = (() => {
   }
 
   // ---- spec authoring (browser targets + js: checks only — honestly runnable here) ----
+  // One source (R3) for the spec JSON shape + rules, shared by authorSpec and reauthorSpec.
+  // The spec is human-facing: a plain-English `summary` and per-criterion `desc` the user can
+  // read/edit in the spec-review pause; the `js:` check is the machine encoding behind each.
+  const SPEC_SHAPE = `{"id":"<kebab-slug>","language":"html/js","target_dir":"app",
+ "summary":"<one short paragraph, plain English: what the app does and for whom>",
+ "acceptance":[{"id":"a1-<slug>","desc":"<plain-English: what this guarantees for the user>","check":"js:<expression>"}, ...],
+ "assumptions":["..."],
+ "open_questions":["<question> — Suggested: <recommended answer> (<one-line reason>)"]}`;
+  const SPEC_RULES = `Rules:
+- Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
+- Each "desc" is plain English a non-technical user understands. Each "check" is a JavaScript EXPRESSION
+  prefixed "js:", evaluated with a variable \`files\` (a map of path -> contents), returning true when satisfied.
+  Examples: "js:!!files['app/index.html']" · "js:files['app/index.html'].includes('id=\\"add-btn\\"')"
+- 2 to 4 criteria that GENUINELY verify the request. Assert the smallest stable token (an id= or function
+  name), never a whole tag with attributes; never over-constrain the design.
+- Every open_question MUST include a "Suggested:" answer and a one-line reason in parentheses.`;
   async function authorSpec(intent) {
     await loadShippedSlices();
     // System prompt = shared slice + spec slice, read live from openfab-agent.md /
     // Settings (see slice()). The BROWSER-ONLY target + JSON shape are call plumbing.
     const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
     const usr = `Respond with ONLY a JSON object (no prose):
-{"id":"<kebab-slug>","language":"html/js","target_dir":"app",
- "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
- "assumptions":["..."],"open_questions":["..."]}
+${SPEC_SHAPE}
 
-Rules for acceptance (the contract the built app is verified against):
-- The app must be pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
-- Each check is a JavaScript EXPRESSION prefixed "js:", evaluated with a variable \`files\`
-  (a map of path -> file contents as strings). It must return true when satisfied.
-  Examples: "js:!!files['app/index.html']" · "js:files['app/index.html'].includes('id=\\"add-btn\\"')"
-  · "js:files['app/app.js'].includes('localStorage')"
-- 2 to 4 checks that GENUINELY verify the request. Assert the smallest stable token
-  (an id= or function name), never a whole tag with attributes.
+${SPEC_RULES}
 USER REQUEST:
 ${intent}`;
     const out = await chat(sys, usr, roleModel("spec"));
@@ -222,14 +229,9 @@ ${intent}`;
     await loadShippedSlices();
     const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
     const usr = `Revise the spec below per the human's feedback. Respond with ONLY the updated JSON object, same shape:
-{"id":"<kebab-slug>","language":"html/js","target_dir":"app",
- "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
- "assumptions":["..."],"open_questions":["..."]}
+${SPEC_SHAPE}
 
-Each acceptance check is a JavaScript EXPRESSION prefixed "js:", evaluated with a variable \`files\`
-(a map of path -> file contents as strings), returning true when satisfied. Keep 2 to 4 high-signal checks
-that assert the smallest stable token; never over-constrain the design.
-
+${SPEC_RULES}
 ORIGINAL USER REQUEST:
 ${intent}
 

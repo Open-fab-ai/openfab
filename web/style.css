@@ -101,6 +101,28 @@ header.top {
   padding: 16px 16px; margin-bottom: 16px;
 }
 .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
+
+/* Collapsible settings cards */
+.scard { padding: 0; }
+.scard > summary { list-style: none; cursor: pointer; padding: 14px 16px; display: flex; align-items: center; gap: 8px; color: inherit; }
+.scard > summary::-webkit-details-marker { display: none; }
+.scard > summary > h2 { margin: 0; flex: 1; }
+.scard > summary::after { content: "\25B8"; color: var(--muted); font-size: 12px; transition: transform .15s ease; }
+.scard[open] > summary::after { transform: rotate(90deg); }
+.scard > summary:hover { background: var(--bg2); }
+.scard-body { padding: 0 16px 16px; }
+
+/* Spec-review: editable criteria rows + questions-with-suggestions */
+.critrow { margin: 8px 0; }
+.critrow .critdesc { width: 100%; }
+.critrow > .adv { margin-top: 4px; }
+.critrow .critcheck { width: 100%; margin-top: 6px; font-size: 12px; }
+.oqitem { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); }
+.oqq { font-weight: 600; margin-bottom: 6px; }
+.oqopts { display: flex; flex-direction: column; gap: 4px; }
+.oqopt { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.oqopt input[type="radio"] { width: auto; margin: 0; }
+.oqopt .oqother { flex: 1; }
 .card h2 .n { color: var(--accent); margin-right: 6px; }
 
 label.fld { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }

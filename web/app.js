@@ -41,7 +41,21 @@ async function detectMode() {
 }
 function toast(msg, err) { const t = el("div", "toast" + (err ? " err" : ""), msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
 
-let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null, verify: null, draft: null };
+let STATE = { runId: null, poll: null, lastSeq: 0, status: null, artifacts: null, verify: null, draft: null, genTimer: null };
+
+// Live elapsed timer for the "generating…" note (generation is a 10–60s blocking
+// LLM call; the ticking clock signals progress). Self-stops if its element is gone.
+function fmtDur(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`; }
+function startGenTimer() {
+  stopGenTimer();
+  const start = Date.now();
+  STATE.genTimer = setInterval(() => {
+    const el = document.querySelector("#genelapsed");
+    if (!el) return stopGenTimer();
+    el.textContent = fmtDur(Date.now() - start);
+  }, 1000);
+}
+function stopGenTimer() { if (STATE.genTimer) { clearInterval(STATE.genTimer); STATE.genTimer = null; } }
 
 // ---------- init ----------
 async function init() {
@@ -331,46 +345,101 @@ async function tick() {
 }
 
 // Human-in-the-loop spec review: the run paused after authoring. Show the spec
-// with EDITABLE acceptance criteria + a feedback box, then Continue (build with
-// the edits) or Regenerate (model re-authors from feedback, re-pauses).
+// in plain English — a summary + one editable criterion per row (the machine
+// js: check lives behind an "advanced" toggle, not in the user's face). Continue
+// builds with the edits; Regenerate asks the model to re-author from feedback.
 async function openSpecReview() {
   STATE.artifacts = await api("GET", `/api/runs/${STATE.runId}/artifacts`);
   const sp = STATE.artifacts.spec || {};
   document.querySelectorAll(".step").forEach((s) => s.classList.toggle("inspecting", s.dataset.step === "spec"));
-  const criteria = (sp.acceptance || []).map((c) => c.check).join("\n");
-  const oq = (sp.open_questions || []).length ? `<div class="hint" style="margin-top:6px">Open questions from the model: ${escapeHtml(sp.open_questions.join("; "))}</div>` : "";
+  const oq = (sp.open_questions || []).length
+    ? `<div class="panel-h" style="margin-top:12px">Decisions to confirm <span class="muted">(the suggested option is pre-selected — change any you like)</span></div>
+       <div id="specoq">${sp.open_questions.map((q, i) => specOqItem(q, i)).join("")}</div>`
+    : "";
+  const rows = (sp.acceptance || []).map((c, i) => specCritRow(c, i)).join("");
   const pd = $("#phasedetail"); pd.classList.remove("hidden");
-  pd.innerHTML = `<div class="ph-h">⏸️ Spec review — edit the contract before any code is written</div>
-    <div class="muted">These acceptance criteria are what the coder must satisfy and what gets signed. Edit them (one <span class="mono">js:</span> check per line), or ask the model to re-author from your feedback.</div>
+  pd.innerHTML = `<div class="ph-h">⏸️ Spec review — confirm what will be built, before any code is written</div>
+    <div class="muted">This is the plain-English spec the app will be built and signed against. Edit anything, or tell the model what to change and Regenerate.</div>
+    <div class="panel-h" style="margin-top:12px">What we'll build</div>
+    <textarea id="specsummary" rows="3" spellcheck="false" style="width:100%" placeholder="one-paragraph summary of the app">${escapeHtml(sp.summary || "")}</textarea>
     ${oq}
-    <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(one js: expression per line)</span></div>
-    <textarea id="specedit" rows="6" spellcheck="false" style="width:100%; font-family:var(--mono,monospace); font-size:12px">${escapeHtml(criteria)}</textarea>
-    <div class="panel-h" style="margin-top:10px">Feedback for the model <span class="muted">(used by Regenerate)</span></div>
-    <textarea id="specfeedback" rows="3" spellcheck="false" placeholder="e.g. also require a dark-mode toggle; drop the localStorage check" style="width:100%"></textarea>
+    <div class="panel-h" style="margin-top:12px">Acceptance criteria <span class="muted">(what “done” means — in plain language)</span></div>
+    <div id="speccrit">${rows}</div>
+    <button class="btn ghost sm" id="specaddcrit" type="button" style="width:auto; margin-top:8px">+ add criterion</button>
+    <div class="panel-h" style="margin-top:12px">Tell the model what to change <span class="muted">(used by Regenerate)</span></div>
+    <textarea id="specfeedback" rows="3" spellcheck="false" placeholder="e.g. also support 和合本; preload Genesis 1 and John 1; keep notes as editable strokes" style="width:100%"></textarea>
     <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
-      <button class="btn sm" id="speccontinue" type="button" style="width:auto">Continue with this spec →</button>
-      <button class="btn ghost sm" id="specregen" type="button" style="width:auto">↻ Regenerate from feedback</button>
+      <button class="btn sm" id="speccontinue" type="button" style="width:auto">Looks good — build it →</button>
+      <button class="btn ghost sm" id="specregen" type="button" style="width:auto">↻ Regenerate from my notes</button>
     </div>
     <div class="hint" id="specreviewstatus" style="margin-top:6px"></div>`;
   $("#speccontinue").onclick = () => submitSpecReview("continue");
   $("#specregen").onclick = () => submitSpecReview("regenerate");
+  $("#specaddcrit").onclick = () => { $("#speccrit").insertAdjacentHTML("beforeend", specCritRow({ desc: "", check: "" }, $("#speccrit").children.length)); };
+}
+// One open question as a pick-list: the model's options as radios (suggested
+// pre-selected) plus a free-text "other". Legacy string questions render read-only.
+function specOqItem(q, i) {
+  if (typeof q === "string") return `<div class="oqitem" data-q="${escapeHtml(q)}"><div class="oqq">${escapeHtml(q)}</div></div>`;
+  const opts = Array.isArray(q.options) ? q.options : [];
+  const radios = opts.map((o, j) => {
+    const sug = o === q.suggested;
+    return `<label class="oqopt"><input type="radio" name="oq${i}" value="${escapeHtml(o)}"${sug ? " checked" : ""}/> ${escapeHtml(o)}${sug ? ' <span class="muted">(suggested)</span>' : ""}</label>`;
+  }).join("");
+  return `<div class="oqitem" data-q="${escapeHtml(q.q || "")}">
+    <div class="oqq">${escapeHtml(q.q || "")}</div>
+    <div class="oqopts">${radios}
+      <label class="oqopt"><input type="radio" name="oq${i}" value="__other"/> other: <input class="oqother" type="text" placeholder="your answer" /></label>
+    </div>
+    ${q.why ? `<div class="hint">${escapeHtml(q.why)}</div>` : ""}
+  </div>`;
+}
+// Read the chosen answer for each question → ["<question> → <answer>", …].
+function collectDecisions() {
+  return [...document.querySelectorAll("#specoq .oqitem")].map((it) => {
+    const q = it.dataset.q || "";
+    const picked = it.querySelector("input[type=radio]:checked");
+    if (!picked) return null;
+    const ans = picked.value === "__other" ? (it.querySelector(".oqother")?.value.trim() || "") : picked.value;
+    return ans ? `${q} → ${ans}` : null;
+  }).filter(Boolean);
+}
+// One editable criterion: plain-English description up front; the js: machine
+// check (what actually runs + gets signed) tucked into an advanced disclosure.
+function specCritRow(c, i) {
+  return `<div class="critrow">
+    <input class="critdesc" type="text" placeholder="what this guarantees for the user" value="${escapeHtml(c.desc || "")}" />
+    <details class="adv"><summary class="muted">machine check</summary>
+      <input class="critcheck mono" type="text" spellcheck="false" placeholder="js:…" value="${escapeHtml(c.check || "")}" />
+      <div class="hint">This js: expression is what actually runs and gets signed. Editing the plain-English line above only relabels it — change this, or Regenerate, to change what's verified.</div>
+    </details>
+  </div>`;
 }
 async function submitSpecReview(action) {
   const st = $("#specreviewstatus");
   const btns = [$("#speccontinue"), $("#specregen")]; btns.forEach((b) => b && (b.disabled = true));
   try {
+    const decisions = collectDecisions(); // the human's answers to the open questions
+    const feedback = $("#specfeedback").value.trim();
     if (action === "regenerate") {
       st.textContent = "asking the model to re-author the spec…";
-      await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "regenerate", feedback: $("#specfeedback").value.trim() });
+      await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "regenerate", feedback, decisions });
       await openSpecReview(); // re-render with the new spec, still paused
       return;
     }
-    // continue: turn the edited lines back into acceptance criteria
-    const lines = $("#specedit").value.split("\n").map((l) => l.trim()).filter(Boolean);
-    if (!lines.length) { st.textContent = "add at least one acceptance criterion."; return; }
-    const acceptance = lines.map((l, i) => ({ id: `a${i + 1}`, check: l.startsWith("js:") ? l : "js:" + l }));
-    st.textContent = "spec approved — generating…";
-    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { acceptance } });
+    // continue: collect the edited summary + criteria rows (desc + machine check)
+    const acceptance = [...document.querySelectorAll("#speccrit .critrow")].map((r, i) => {
+      const desc = r.querySelector(".critdesc").value.trim();
+      let check = r.querySelector(".critcheck").value.trim();
+      if (check && !check.startsWith("js:")) check = "js:" + check;
+      return { id: `a${i + 1}`, desc, check };
+    }).filter((c) => c.check); // a criterion needs a machine check to be enforceable
+    if (!acceptance.length) { st.textContent = "each criterion needs a machine check (open “machine check”). Add one or Regenerate."; btns.forEach((b) => b && (b.disabled = false)); return; }
+    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { summary: $("#specsummary").value.trim(), acceptance }, decisions });
+    // clear the review editor — the workflow resumes; the user watches it live.
+    const pd = $("#phasedetail");
+    pd.innerHTML = `<div class="ph-h">⚙️ Generating from the approved spec <span class="muted" style="font-weight:400">· elapsed <span id="genelapsed" class="mono">0s</span></span></div><div class="muted">Your decisions were passed to the coder. Watch the live workflow above; click any step to inspect what it produced.</div>`;
+    startGenTimer();
     startPolling(); // resume the live workflow
   } catch (e) {
     st.textContent = `error: ${e.message}`; // surface, don't swallow (R5)
@@ -416,17 +485,20 @@ async function showPhase(step) {
     if (!sp) {
       h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div><div class="muted">No spec recorded for this run.</div>`;
     } else {
-      const checks = (sp.acceptance || []).map((c) => `<div class="file-h">✓ <b>${escapeHtml(c.id)}</b> — <span class="mono">${escapeHtml(c.check)}</span></div>`).join("") || `<div class="muted">(none)</div>`;
+      const checks = (sp.acceptance || []).map((c) => `<div class="file-h">✓ ${escapeHtml(c.desc || c.id)}${c.check ? `<span class="mono muted" style="display:block; margin-left:16px; font-size:11px">${escapeHtml(c.check)}</span>` : ""}</div>`).join("") || `<div class="muted">(none)</div>`;
       const list = (arr) => (arr && arr.length) ? "<ul style='margin:4px 0 0 18px'>" + arr.map((x) => `<li>${escapeHtml(x)}</li>`).join("") + "</ul>" : "<div class='muted'>(none)</div>";
+      const summary = sp.summary ? `<div class="panel-h" style="margin-top:10px">What was built</div><div>${escapeHtml(sp.summary)}</div>` : "";
       h = `<div class="ph-h">📋 Spec — the contract compiled from your natural language</div>
         <div class="muted">Your intent becomes a versioned, machine-checkable spec. This exact spec is what the base built against and what gets signed.</div>
+        ${summary}
         <div class="kv" style="margin-top:8px"><div class="k">spec id</div><div class="v">${escapeHtml(sp.id || a.run.spec_ref || "")}</div>
         <div class="k">language</div><div class="v">${escapeHtml(sp.language || "")}</div>
         <div class="k">target</div><div class="v">${escapeHtml(sp.target_dir || "app")}/</div></div>
-        <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(the machine-checkable contract)</span></div>
+        <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(plain-English, with the machine check beneath)</span></div>
         ${checks}
         <div class="panel-h" style="margin-top:10px">Assumptions</div>${list(sp.assumptions)}
-        <div class="panel-h" style="margin-top:10px">Open questions <span class="muted">(surfaced to you)</span></div>${list(sp.open_questions)}
+        ${(sp.decisions && sp.decisions.length) ? `<div class="panel-h" style="margin-top:10px">Decisions <span class="muted">(chosen by the human)</span></div>${list(sp.decisions)}` : ""}
+        <div class="panel-h" style="margin-top:10px">Open questions</div>${list((sp.open_questions || []).map((q) => typeof q === "string" ? q : `${q.q}${q.suggested ? ` — suggested: ${q.suggested}` : ""}`))}
         <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">▸ raw spec JSON</summary><pre class="code" style="margin-top:6px">${escapeHtml(JSON.stringify(sp, null, 2))}</pre></details>`;
     }
   } else if (step === "generate") {
@@ -475,6 +547,7 @@ function setStatus(st) {
 }
 
 async function onRunDone(run) {
+  stopGenTimer(); // freeze the generation clock at its last tick
   loadApps();   // refresh the app list whenever a build finishes
   if (run.status === "failed") { toast("run failed — see the timeline", true); return; }
   // Wizard: fold the finished workflow to a summary line so the product/approve step is the focus.

@@ -143,9 +143,20 @@ const FabEngine = (() => {
     return (await r.json()).data.map((m) => m.id).sort();
   }
 
-  // Live "show model thinking" preference (Settings). Streams tokens when a caller
-  // passes an onThink callback; falls back to a normal (buffered) request otherwise.
+  // Live "show model thinking": stream tokens when a caller passes an onThink callback
+  // AND streaming is wanted — either the user forced it on (Settings), or the model
+  // looks like a reasoning model (which actually has a trace worth showing). Non-reasoning
+  // models stay on the fast buffered path unless the user explicitly opts in.
   function streamThink() { return localStorage.getItem("openfab_web_stream_think") === "1"; }
+  const REASONING_HINTS = [/deepseek-?r\d/i, /(^|[-/_:])o[134]([-_.]|$)/i, /qwq/i, /reason/i, /think/i, /\br1\b/i];
+  function looksReasoning(id) { return !!id && REASONING_HINTS.some((re) => re.test(String(id))); }
+  // True if a run would stream given the current config — the UI uses this to decide
+  // whether to poll for the live thinking trace.
+  function willStream() {
+    if (streamThink()) return true;
+    const c = llmConfig() || {};
+    return [c.model, c.specModel, c.coderModel].some(looksReasoning);
+  }
 
   async function chat(system, user, modelOverride, onThink) {
     const cfg = llmConfig();
@@ -154,7 +165,7 @@ const FabEngine = (() => {
     const headers = { "Content-Type": "application/json" };
     if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
     if (cfg.providerId === "anthropic") headers["anthropic-dangerous-direct-browser-access"] = "true";
-    const streaming = !!onThink && streamThink();
+    const streaming = !!onThink && (streamThink() || looksReasoning(modelOverride || cfg.model));
     const r = await fetch(url, {
       method: "POST", headers,
       body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: streaming, max_tokens: 6000,
@@ -378,5 +389,5 @@ ${feedback || "(no free-text feedback — tighten/clarify the spec while preserv
   }
 
   return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, reauthorSpec, generate, runChecks,
-    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices, improveSlice };
+    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices, improveSlice, willStream };
 })();

@@ -281,6 +281,10 @@
     <label class="fld" style="margin-top:12px">Auto-retry on failure <span class="muted">(browser mode)</span></label>
     <input type="number" id="prefretries" min="0" max="5" step="1" style="width:90px" />
     <div class="hint" style="margin-top:4px">If a run errors or acceptance doesn't pass, OpenFab re-attempts this many times before giving up. Default 2.</div>
+    <label class="fld" style="margin-top:12px; display:flex; align-items:center; gap:8px; cursor:pointer">
+      <input type="checkbox" id="prefspecpause" style="width:auto; margin:0" /> Pause for spec review <span class="muted">(before any code is generated)</span>
+    </label>
+    <div class="hint" style="margin-top:4px">When on, a run stops after the spec is authored so you can edit the acceptance criteria or ask the model to regenerate — then Continue to build.</div>
   </div>
   <div class="card">
     <h2>Maintainers <span class="muted">(N-of-M sign-off allowlist)</span></h2>

@@ -202,6 +202,34 @@ ${intent}`;
     return a;
   }
 
+  // Re-author a spec from human feedback (used by the spec-review pause). Same
+  // output shape as authorSpec; the model sees the prior spec + the human's ask.
+  async function reauthorSpec(intent, prevSpec, feedback) {
+    await loadShippedSlices();
+    const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
+    const usr = `Revise the spec below per the human's feedback. Respond with ONLY the updated JSON object, same shape:
+{"id":"<kebab-slug>","language":"html/js","target_dir":"app",
+ "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
+ "assumptions":["..."],"open_questions":["..."]}
+
+Each acceptance check is a JavaScript EXPRESSION prefixed "js:", evaluated with a variable \`files\`
+(a map of path -> file contents as strings), returning true when satisfied. Keep 2 to 4 high-signal checks
+that assert the smallest stable token; never over-constrain the design.
+
+ORIGINAL USER REQUEST:
+${intent}
+
+CURRENT SPEC:
+${JSON.stringify(prevSpec, null, 2)}
+
+HUMAN FEEDBACK (apply this):
+${feedback || "(no free-text feedback — tighten/clarify the spec while preserving intent)"}`;
+    const out = await chat(sys, usr, roleModel("spec"));
+    const a = parseJson(out.text);
+    a.model = out.model;
+    return a;
+  }
+
   // ---- the browser swarm: coder → reviewer (both real LLM calls in this tab) ----
   const FILES_SHAPE = `Respond with ONLY one JSON object, no prose:
 {"files": {"app/<relpath>": "<full file contents>", ...}, "notes": "<one line>"}`;
@@ -296,6 +324,6 @@ ${intent}`;
     return out;
   }
 
-  return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, generate, runChecks,
+  return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, reauthorSpec, generate, runChecks,
     loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices };
 })();

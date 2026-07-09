@@ -129,6 +129,14 @@ function wireRetriesPref() {
     el.value = v; localStorage.setItem("openfab_web_retries", String(v));
     toast(`auto-retry set to ${v}`);
   };
+  const pause = $("#prefspecpause");
+  if (pause) {
+    pause.checked = localStorage.getItem("openfab_web_spec_pause") === "1";
+    pause.onchange = () => {
+      localStorage.setItem("openfab_web_spec_pause", pause.checked ? "1" : "0");
+      toast(pause.checked ? "spec review pause: on" : "spec review pause: off");
+    };
+  }
 }
 // Agent-guidance editor (openfab-agent.md slices). Loads current values (user
 // override or shipped default), saves to localStorage so the NEXT LLM call of
@@ -295,11 +303,64 @@ async function tick() {
     if (evs.length) STATE.lastSeq = evs[evs.length - 1].seq;
     const run = await api("GET", `/api/runs/${STATE.runId}`);
     setStatus(run.status || "running");
+    if (run.status === "awaiting-spec") {
+      clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
+      await openSpecReview();
+      return;
+    }
     if (["blocked", "accepted", "merged", "failed", "draft"].includes(run.status)) {
       clearInterval(STATE.poll); STATE.poll = null; resetRunBtn();
       onRunDone(run);
     }
   } catch (e) { /* transient while files are written */ }
+}
+
+// Human-in-the-loop spec review: the run paused after authoring. Show the spec
+// with EDITABLE acceptance criteria + a feedback box, then Continue (build with
+// the edits) or Regenerate (model re-authors from feedback, re-pauses).
+async function openSpecReview() {
+  STATE.artifacts = await api("GET", `/api/runs/${STATE.runId}/artifacts`);
+  const sp = STATE.artifacts.spec || {};
+  document.querySelectorAll(".step").forEach((s) => s.classList.toggle("inspecting", s.dataset.step === "spec"));
+  const criteria = (sp.acceptance || []).map((c) => c.check).join("\n");
+  const oq = (sp.open_questions || []).length ? `<div class="hint" style="margin-top:6px">Open questions from the model: ${escapeHtml(sp.open_questions.join("; "))}</div>` : "";
+  const pd = $("#phasedetail"); pd.classList.remove("hidden");
+  pd.innerHTML = `<div class="ph-h">⏸️ Spec review — edit the contract before any code is written</div>
+    <div class="muted">These acceptance criteria are what the coder must satisfy and what gets signed. Edit them (one <span class="mono">js:</span> check per line), or ask the model to re-author from your feedback.</div>
+    ${oq}
+    <div class="panel-h" style="margin-top:10px">Acceptance criteria <span class="muted">(one js: expression per line)</span></div>
+    <textarea id="specedit" rows="6" spellcheck="false" style="width:100%; font-family:var(--mono,monospace); font-size:12px">${escapeHtml(criteria)}</textarea>
+    <div class="panel-h" style="margin-top:10px">Feedback for the model <span class="muted">(used by Regenerate)</span></div>
+    <textarea id="specfeedback" rows="3" spellcheck="false" placeholder="e.g. also require a dark-mode toggle; drop the localStorage check" style="width:100%"></textarea>
+    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
+      <button class="btn sm" id="speccontinue" type="button" style="width:auto">Continue with this spec →</button>
+      <button class="btn ghost sm" id="specregen" type="button" style="width:auto">↻ Regenerate from feedback</button>
+    </div>
+    <div class="hint" id="specreviewstatus" style="margin-top:6px"></div>`;
+  $("#speccontinue").onclick = () => submitSpecReview("continue");
+  $("#specregen").onclick = () => submitSpecReview("regenerate");
+}
+async function submitSpecReview(action) {
+  const st = $("#specreviewstatus");
+  const btns = [$("#speccontinue"), $("#specregen")]; btns.forEach((b) => b && (b.disabled = true));
+  try {
+    if (action === "regenerate") {
+      st.textContent = "asking the model to re-author the spec…";
+      await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "regenerate", feedback: $("#specfeedback").value.trim() });
+      await openSpecReview(); // re-render with the new spec, still paused
+      return;
+    }
+    // continue: turn the edited lines back into acceptance criteria
+    const lines = $("#specedit").value.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) { st.textContent = "add at least one acceptance criterion."; return; }
+    const acceptance = lines.map((l, i) => ({ id: `a${i + 1}`, check: l.startsWith("js:") ? l : "js:" + l }));
+    st.textContent = "spec approved — generating…";
+    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { acceptance } });
+    startPolling(); // resume the live workflow
+  } catch (e) {
+    st.textContent = `error: ${e.message}`; // surface, don't swallow (R5)
+    btns.forEach((b) => b && (b.disabled = false));
+  }
 }
 
 function addEvent(ev) {

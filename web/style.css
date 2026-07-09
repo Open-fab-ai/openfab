@@ -101,6 +101,16 @@ header.top {
   padding: 16px 16px; margin-bottom: 16px;
 }
 .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
+
+/* Collapsible settings cards */
+.scard { padding: 0; }
+.scard > summary { list-style: none; cursor: pointer; padding: 14px 16px; display: flex; align-items: center; gap: 8px; color: inherit; }
+.scard > summary::-webkit-details-marker { display: none; }
+.scard > summary > h2 { margin: 0; flex: 1; }
+.scard > summary::after { content: "\25B8"; color: var(--muted); font-size: 12px; transition: transform .15s ease; }
+.scard[open] > summary::after { transform: rotate(90deg); }
+.scard > summary:hover { background: var(--bg2); }
+.scard-body { padding: 0 16px 16px; }
 .card h2 .n { color: var(--accent); margin-right: 6px; }
 
 label.fld { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }

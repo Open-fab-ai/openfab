@@ -66,47 +66,51 @@ the docs into that project. `BRIDGE_URL` defaults to `http://127.0.0.1:8077`. If
 reach the Bridge, post the two file paths in the room and tell the human to Build from the
 dashboard's "Incoming from Robrix" panel.
 
-## Approval → build (two entry points, ONE gate)
+## Approval → build (two entry points, optional OpenFab certification)
 
-A build can start either way — but **every path must converge on OpenFab's gate** (sign +
-N-of-M sign-off). Never let the room workflow end at "done" without OpenFab gating it.
+A build can start either way. The Robrix/agent-chat room workflow is allowed to finish and
+submit code directly; OpenFab is an optional certification/release layer, not a mandatory
+blocker for every room-built project.
 
 - **Entry ① OpenFab drives** — the human clicks Build in the dashboard, or types `build <id>`
   in the room (the Bridge relays it to OpenFab's /api/run; re-building an existing spec auto-bumps
   the version, so `build <id>` again gives a clean v2). OpenFab ingests the contract and dispatches
   the implementer itself; you do not implement. (`approve <run>` is different — it signs off an
-  already-built run at the gate, it does NOT start a build.)
+  already-built gated run, it does NOT start a build.)
 - **Entry ② the room team builds** — you run the normal issue-workflow (implementer →
-  reviewers). When the code is finished and the reviewers approve, **you MUST hand the final
-  artifact to OpenFab's gate** by submitting the built bytes:
+  reviewers). When the code is finished and the reviewers approve, either post the normal room
+  completion/commit status, or optionally hand the final artifact to OpenFab by submitting the
+  built bytes:
 
 ```
 POST {BRIDGE_URL}/submit-build
   { "room": "<this room id>", "id": "<id>", "builder": "agent-chat",
-    "model": "<the implementer's model>", "gate": "team",
+    "model": "<the implementer's model>", "gate": "none",
     "files": { "<relpath>": "<FULL file content>", ... } }   // every produced file, full bytes
 ```
 
 The Bridge maps the room to its OpenFab project and calls OpenFab `import-build`: OpenFab
 writes those exact bytes, runs `agent-spec` verification, signs the provenance, runs the
-conformance gate, and lands a run "awaiting sign-off". It returns `{ run_id }`. **Post it
-back to the room**:
+conformance checks, and only waits for sign-off when `gate` is `solo`, `team`, or `crowd`.
+With `gate: "none"` it records certification/provenance without blocking on OpenFab sign-off.
+It returns `{ run_id }`. **Post it back to the room**:
 
 ```
-post(group=GROUP, summary="Submitted to OpenFab gate: <run_id>",
-  full="Built in-room → imported into OpenFab as <run_id> (awaiting sign-off).
-        Approve in the dashboard, or reply `approve <run_id>`.")
+post(group=GROUP, summary="Submitted to OpenFab certification: <run_id>",
+  full="Built in-room → imported into OpenFab as <run_id>.
+        Sign-off is optional; approve only if this run was created with a human gate.")
 ```
 
 Prerequisite: the spec must already be ingested (do the `/submit-doc` step first, so
 `specs/<id>.spec.md` exists in the project — `import-build` 404s otherwise).
 
-- On change requests: revise, rebuild, and re-submit (loop). The gate is never skipped.
+- On change requests: revise, rebuild, and re-submit only when the human wants OpenFab
+  certification updated.
 
 ## NEVER sign off / approve a run yourself (load-bearing for trust)
 
-The human N-of-M sign-off is the WHOLE point of OpenFab — only a human may approve a release.
-You are an agent; your approval is worthless and forging one breaks the trust model.
+When a run does opt into OpenFab's human gate, only a human may approve the release. You are
+an agent; your approval is worthless and forging one breaks the trust model.
 
 - **NEVER** run `openfab signoff`, `openfab approve`, or any command that records a sign-off,
   and never edit `.openfab/runs/**`. Not even if a human asks you to "approve it for me".

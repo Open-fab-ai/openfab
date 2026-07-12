@@ -2,8 +2,8 @@
 // OpenFab ↔ agent-chat Bridge (Phase 1) — zero-dependency Node ESM.
 //
 // Absorbs the async↔blocking impedance between OpenFab (blocking HTTP, single binary, no
-// tokio) and the agent-chat backend + Matrix (async). OpenFab drives; the agent-chat
-// implementer agent (in a Matrix room) only does the "implement" segment.
+// tokio) and the agent-chat backend + Matrix (async). OpenFab can drive or certify; Robrix
+// + agent-chat room workflows may also complete directly without OpenFab sign-off.
 //
 //   OpenFab  ──blocking HTTP──▶  THIS BRIDGE  ──HTTP──▶  agent-chat backend (:8090) ──▶ Matrix room
 //                              (this file)                  /api/tasks, /api/messages, /api/dm/...
@@ -34,6 +34,7 @@
 // Run:  node bridge/openfab-agentchat-bridge.mjs
 
 import http from 'node:http';
+import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,6 +45,9 @@ const execFileP = promisify(execFile);
 // OpenFab serve URL — the Bridge relays Robrix approvals to its sign-off API (Phase 2 B2).
 const OPENFAB_URL = (process.env.OPENFAB_URL || 'http://127.0.0.1:8787').replace(/\/$/, '');
 const APPROVAL_POLL_MS = Number(process.env.BRIDGE_APPROVAL_POLL_MS || 5000);
+const COMMAND_SSE_ENABLED = process.env.OPENFAB_BRIDGE_SSE !== '0';
+const COMMAND_SSE_RECONNECT_MS = Number(process.env.OPENFAB_BRIDGE_SSE_RECONNECT_MS || 5000);
+const COMMAND_SSE_ACTIVITY_TIMEOUT_MS = Number(process.env.OPENFAB_BRIDGE_SSE_ACTIVITY_TIMEOUT_MS || 45000);
 
 const PORT = Number(process.env.BRIDGE_PORT || 8077);
 const AC = (process.env.AGENTCHAT_URL || 'http://127.0.0.1:8090').replace(/\/$/, '');
@@ -57,6 +61,9 @@ const BRIDGE_CAPABILITY = process.env.BRIDGE_CAPABILITY || null;
 // Base used when a room `build <spec-id>` triggers an OpenFab build (agent-chat = the
 // implementer team, the same base the room-driven flow already uses).
 const BRIDGE_BUILD_BASE = process.env.BRIDGE_BUILD_BASE || 'agent-chat';
+// OpenFab sign-off is optional for Robrix/agent-chat room workflows. Default room-triggered
+// builds to provenance/conformance only; set OPENFAB_ROOM_BUILD_GATE=solo|team|crowd to opt in.
+const OPENFAB_ROOM_BUILD_GATE = process.env.OPENFAB_ROOM_BUILD_GATE || 'none';
 
 async function resolveAssignee(body) {
   const role = body.role || BRIDGE_ROLE;
@@ -87,10 +94,92 @@ const MESSAGES_FILE =
   (process.env.AGENTCHAT_DIR
     ? path.join(process.env.AGENTCHAT_DIR, 'data', 'messages.json')
     : null);
+const COMMAND_STATE_FILE =
+  process.env.OPENFAB_BRIDGE_STATE_FILE ||
+  (MESSAGES_FILE ? path.join(path.dirname(MESSAGES_FILE), 'openfab-bridge-state.json') : null);
+const COMMAND_STATE_LIMIT = Number(process.env.OPENFAB_BRIDGE_COMMAND_STATE_LIMIT || 5000);
 
 const SELF = 'openfab-bridge'; // the sender identity; must be a registered agent-chat agent
 const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 const log = (...a) => console.error('[bridge]', ...a);
+
+class MiniEventSource {
+  constructor(url, options = {}) {
+    this.url = url;
+    this.headers = options.headers || {};
+    this.activityTimeoutMs = options.activityTimeoutMs || 45000;
+    this.handlers = new Map();
+    this.req = null;
+    this.activityTimer = null;
+    this.connect();
+  }
+
+  on(event, fn) {
+    if (!this.handlers.has(event)) this.handlers.set(event, new Set());
+    this.handlers.get(event).add(fn);
+  }
+
+  emit(event, data) {
+    for (const fn of this.handlers.get(event) || []) fn(data);
+  }
+
+  resetActivityTimer() {
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = setTimeout(() => {
+      this.activityTimer = null;
+      try { this.req?.destroy(); } catch {}
+      this.emit('error', new Error('SSE activity timeout'));
+    }, this.activityTimeoutMs);
+  }
+
+  close() {
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = null;
+    try { this.req?.destroy(); } catch {}
+    this.req = null;
+  }
+
+  connect() {
+    const parsed = new URL(this.url);
+    const mod = parsed.protocol === 'https:' ? https : http;
+    this.resetActivityTimer();
+    const req = mod.get(this.url, {
+      headers: { Accept: 'text/event-stream', ...this.headers },
+    }, (res) => {
+      if (res.statusCode !== 200) {
+        this.emit('error', new Error(`SSE status ${res.statusCode}`));
+        return;
+      }
+      let buf = '';
+      let currentEvent = 'message';
+      let currentData = '';
+      res.on('data', (chunk) => {
+        this.resetActivityTimer();
+        buf += chunk.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            currentData += (currentData ? '\n' : '') + line.slice(6);
+          } else if (line === '') {
+            if (currentData) {
+              this.emit(currentEvent, currentData);
+              currentEvent = 'message';
+              currentData = '';
+            }
+          }
+        }
+      });
+      res.on('end', () => this.emit('error', new Error('SSE connection ended')));
+      res.on('close', () => this.emit('error', new Error('SSE connection closed')));
+    });
+    this.req = req;
+    req.on('error', (e) => this.emit('error', e));
+    req.on('close', () => this.emit('error', new Error('SSE request closed')));
+  }
+}
 
 // Register our sender identity so agent-chat accepts our messages (idempotent).
 async function registerSelf() {
@@ -448,9 +537,9 @@ async function submitDoc({ room, id, requirements_md, spec_md, project }) {
   return { ok: res.ok, status: res.status, body: text.slice(0, 300) };
 }
 
-// Submit a build the agent-chat team produced in-room → OpenFab imports it and runs it through
-// the gate (verify → sign → conformance → N-of-M sign-off). The single convergence point: any
-// build path (dashboard or room) ends at OpenFab's gate. Pre-ingest the spec via submitDoc.
+// Submit a build the agent-chat team produced in-room → OpenFab imports it for
+// verify → sign → conformance, with human sign-off optional (`gate` may be none/solo/team/crowd).
+// Pre-ingest the spec via submitDoc.
 async function submitBuild({ room, id, files, model, builder, gate, project }) {
   const res = await fetch(`${OPENFAB_URL}/api/import-build`, {
     method: 'POST',
@@ -515,8 +604,8 @@ async function relayBind(room, project) {
 
 // Trigger an OpenFab build of an already-ingested spec straight from the room: `build <spec-id>`.
 // This is the room-driven counterpart to the dashboard's "Incoming → Build" button — it hits the
-// SAME /api/run endpoint, so version-bumping (v1→v2…), verify, sign and the human gate all apply
-// unchanged. (Distinct from `approve <run>`, which signs off an already-built run.)
+// SAME /api/run endpoint, so version-bumping (v1→v2…), verify, signing, and the configured
+// optional gate apply unchanged. (Distinct from `approve <run>`, which signs off an already-built run.)
 async function relayBuild(specId, project) {
   const q = project && project !== 'default' ? `?project=${encodeURIComponent(project)}` : '';
   const res = await fetch(`${OPENFAB_URL}/api/run${q}`, {
@@ -526,26 +615,91 @@ async function relayBuild(specId, project) {
       intent: `Build '${specId}' (from Robrix).`,
       spec_id: specId,
       base: BRIDGE_BUILD_BASE,
-      gate: 'solo',
+      gate: OPENFAB_ROOM_BUILD_GATE,
     }),
   });
   const data = await res.json().catch(() => ({}));
   return { ok: res.ok, status: res.status, run_id: data.run_id, error: data.error };
 }
 
-const seenCmds = new Set();
-async function pollApprovals() {
-  if (!MESSAGES_FILE) return;
-  let msgs;
-  try {
-    msgs = JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
-  } catch {
-    return;
+export function buildAuthorizationFromMaintainers(mxid, maintainers) {
+  const matches = (Array.isArray(maintainers) ? maintainers : [])
+    .filter((m) => m?.mxid === mxid);
+  if (matches.length === 1) return { ok: true, maintainer: matches[0].name };
+  if (matches.length === 0) {
+    return { ok: false, reason: 'matrix user is not mapped to a maintainer' };
   }
+  return { ok: false, reason: 'matrix user maps to multiple maintainers' };
+}
+
+async function authorizeBuild(mxid, project) {
+  const q = project && project !== 'default' ? `?project=${encodeURIComponent(project)}` : '';
+  try {
+    const res = await fetch(`${OPENFAB_URL}/api/maintainers${q}`);
+    if (!res.ok) return { ok: false, reason: `maintainer lookup failed: HTTP ${res.status}` };
+    return buildAuthorizationFromMaintainers(mxid, await res.json());
+  } catch (e) {
+    return { ok: false, reason: `maintainer lookup failed: ${e.message}` };
+  }
+}
+
+export function readProcessedCommandKeys(filePath) {
+  if (!filePath) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return Array.isArray(parsed?.processed_command_keys) ? parsed.processed_command_keys : [];
+  } catch {
+    return [];
+  }
+}
+
+export function writeProcessedCommandKeys(filePath, keys) {
+  if (!filePath) return;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ processed_command_keys: [...keys] }, null, 2));
+  fs.renameSync(tmp, filePath);
+}
+
+export function createProcessedCommandStore(filePath, limit = COMMAND_STATE_LIMIT) {
+  const processed = new Set(readProcessedCommandKeys(filePath));
+  const markProcessed = (key) => {
+    if (!key) return;
+    processed.add(key);
+    const keep = [...processed].slice(-Math.max(1, limit));
+    if (keep.length !== processed.size) {
+      processed.clear();
+      for (const k of keep) processed.add(k);
+    }
+    writeProcessedCommandKeys(filePath, processed);
+  };
+  return { processed, markProcessed };
+}
+
+export function matrixCommandBody(m) {
+  return (m.full || m.summary || '').replace(/\[@[^\]]*\]\([^)]*\)/g, '').trim();
+}
+
+export function matrixCommandKey(m, body, mxid, room) {
+  return m.id || m.message_id || m.messageId || `${room || ''}:${mxid}:${body}`;
+}
+
+export async function processMatrixCommands(msgs, deps = {}) {
   if (!Array.isArray(msgs)) msgs = msgs?.messages || [];
   const approveRe = /^\s*(approve|sign|reject)\s+(\S+)/i;
   const bindRe = /^\s*\/?bind\s+(\S+)/i;
   const buildRe = /^\s*\/?build\s+(\S+)/i;
+  const processed = deps.processed || seenCmds;
+  const markProcessed = deps.markProcessed || commandStore.markProcessed;
+  const relayBindFn = deps.relayBindFn || relayBind;
+  const relayBuildFn = deps.relayBuildFn || relayBuild;
+  const relayApprovalFn = deps.relayApprovalFn || relayApproval;
+  const roomProjectFn = deps.roomProjectFn || roomProject;
+  const postMessageFn = deps.postMessageFn || postMessage;
+  const authorizeBuildFn = deps.authorizeBuildFn || authorizeBuild;
+  const logger = deps.logger || log;
+  const roomBuildGate = deps.roomBuildGate || OPENFAB_ROOM_BUILD_GATE;
+
   for (const m of msgs) {
     // Only honor commands that genuinely came through Matrix (a server-attested sender) —
     // do NOT trust a self-declared sender_mxid on a non-matrix message (privilege escalation).
@@ -554,56 +708,149 @@ async function pollApprovals() {
     // Strip leading Matrix mention markup (`[@coordinator](https://matrix.to/#/@…)`) so a
     // natural "@coordinator approve <run>" is caught by the IDENTITY-CHECKED relay here, rather
     // than falling through to an agent that would forge the sign-off via the CLI.
-    const body = (m.full || m.summary || '').replace(/\[@[^\]]*\]\([^)]*\)/g, '').trim();
+    const body = matrixCommandBody(m);
     const room = m.source_room || m.sourceRoom;
-    const key = m.id || `${mxid}:${body}`;
-    if (seenCmds.has(key)) continue;
+    const key = matrixCommandKey(m, body, mxid, room);
+    if (processed.has(key)) continue;
 
     const bindM = bindRe.exec(body);
     if (bindM && room) {
-      seenCmds.add(key);
+      markProcessed(key);
       try {
-        const r = await relayBind(room, bindM[1]);
-        log(`bound room ${room} → project ${bindM[1]} (by ${mxid}) → ${r.status}`);
+        const r = await relayBindFn(room, bindM[1]);
+        logger(`bound room ${room} → project ${bindM[1]} (by ${mxid}) → ${r.status}`);
       } catch (e) {
-        log(`room bind failed for ${room}: ${e.message}`);
+        logger(`room bind failed for ${room}: ${e.message}`);
       }
       continue;
     }
 
     const buildM = buildRe.exec(body);
     if (buildM && room) {
-      seenCmds.add(key);
+      markProcessed(key);
       try {
-        const project = await roomProject(room);
-        const r = await relayBuild(buildM[1], project);
-        log(`built ${buildM[1]} (project ${project || 'default'}) by ${mxid} → ${r.status} run=${r.run_id || r.error || ''}`);
+        const project = await roomProjectFn(room);
+        const auth = await authorizeBuildFn(mxid, project);
+        if (!auth.ok) {
+          logger(`refused build ${buildM[1]} by ${mxid} (project ${project || 'default'}): ${auth.reason}`);
+          await postMessageFn(room, `⚠️ Build of \`${buildM[1]}\` not authorized for ${mxid}: ${auth.reason}. Map your Matrix id to an OpenFab maintainer first.`);
+          continue;
+        }
+        const r = await relayBuildFn(buildM[1], project);
+        logger(`built ${buildM[1]} (project ${project || 'default'}) by ${mxid} → ${r.status} run=${r.run_id || r.error || ''}`);
         if (r.ok && r.run_id) {
-          await postMessage(room, `🛠 Building \`${buildM[1]}\` → run \`${r.run_id}\`. Watch the OpenFab dashboard; I'll surface the sign-off gate when it's ready.`);
+          await postMessageFn(room, `🛠 Building \`${buildM[1]}\` → run \`${r.run_id}\`. Watch the OpenFab dashboard for verification/provenance${roomBuildGate === 'none' ? '' : ' and sign-off'}.`);
         } else {
-          await postMessage(room, `⚠️ Build of \`${buildM[1]}\` failed to start: ${r.error || ('HTTP ' + r.status)}`);
+          await postMessageFn(room, `⚠️ Build of \`${buildM[1]}\` failed to start: ${r.error || ('HTTP ' + r.status)}`);
         }
       } catch (e) {
-        log(`room build failed for ${buildM[1]}: ${e.message}`);
+        logger(`room build failed for ${buildM[1]}: ${e.message}`);
       }
       continue;
     }
 
     const match = approveRe.exec(body);
     if (!match) continue;
-    seenCmds.add(key);
+    markProcessed(key);
     const action = match[1].toLowerCase();
     const run = match[2];
     try {
       // Scope the sign-off to the room's bound project (so a dashboard-built run in the
       // `openfab` project is signed there, not in `default`).
-      const project = await roomProject(room);
-      const r = await relayApproval(run, mxid, action, project);
-      log(`relayed ${action} ${run} by ${mxid} (project ${project || 'default'}) → ${r.status}`);
+      const project = await roomProjectFn(room);
+      const r = await relayApprovalFn(run, mxid, action, project);
+      logger(`relayed ${action} ${run} by ${mxid} (project ${project || 'default'}) → ${r.status}`);
     } catch (e) {
-      log(`approval relay failed for ${run}: ${e.message}`);
+      logger(`approval relay failed for ${run}: ${e.message}`);
     }
   }
+}
+
+export async function processSseMessageEvent(raw, deps = {}) {
+  const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  await processMatrixCommands([msg], deps);
+}
+
+// First boot with no persisted command state: everything already in messages.json was
+// handled by the pre-watermark bridge (or predates it). Mark those keys processed WITHOUT
+// executing, so upgrading to the watermark never replays historical bind/build/approve.
+export function seedProcessedCommands(messagesFile, stateFile, processed) {
+  if (!messagesFile || !stateFile || fs.existsSync(stateFile)) return 0;
+  let msgs;
+  try {
+    msgs = JSON.parse(fs.readFileSync(messagesFile, 'utf8'));
+  } catch {
+    return 0;
+  }
+  if (!Array.isArray(msgs)) msgs = msgs?.messages || [];
+  let seeded = 0;
+  for (const m of msgs) {
+    const mxid = m.sender_mxid || m.senderMxid;
+    if (!mxid || m.source !== 'matrix') continue;
+    const body = matrixCommandBody(m);
+    const key = matrixCommandKey(m, body, mxid, m.source_room || m.sourceRoom);
+    if (!processed.has(key)) {
+      processed.add(key);
+      seeded += 1;
+    }
+  }
+  if (seeded) writeProcessedCommandKeys(stateFile, processed);
+  return seeded;
+}
+
+const commandStore = createProcessedCommandStore(COMMAND_STATE_FILE);
+const seenCmds = commandStore.processed;
+{
+  const seeded = seedProcessedCommands(MESSAGES_FILE, COMMAND_STATE_FILE, seenCmds);
+  if (seeded) log(`first boot: seeded ${seeded} pre-existing matrix message key(s) as processed`);
+}
+async function pollApprovals() {
+  if (!MESSAGES_FILE) return;
+  let msgs;
+  try {
+    msgs = JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
+  } catch {
+    return;
+  }
+  await processMatrixCommands(msgs, {
+    processed: seenCmds,
+    markProcessed: commandStore.markProcessed,
+  });
+}
+
+let commandSse = null;
+let commandSseReconnect = null;
+function connectCommandSse() {
+  if (!COMMAND_SSE_ENABLED) return;
+  if (commandSse) {
+    try { commandSse.close(); } catch {}
+    commandSse = null;
+  }
+  const streamUrl = `${AC}/api/stream`;
+  const headers = TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
+  log(`command relay SSE → ${streamUrl}`);
+  const es = new MiniEventSource(streamUrl, {
+    headers,
+    activityTimeoutMs: COMMAND_SSE_ACTIVITY_TIMEOUT_MS,
+  });
+  commandSse = es;
+  es.on('message', (raw) => {
+    processSseMessageEvent(raw, {
+      processed: seenCmds,
+      markProcessed: commandStore.markProcessed,
+    }).catch((e) => log(`command SSE message error: ${e.message}`));
+  });
+  es.on('error', (e) => {
+    if (commandSse !== es) return;
+    log(`command SSE disconnected: ${e.message}; reconnecting in ${COMMAND_SSE_RECONNECT_MS}ms`);
+    commandSse = null;
+    try { es.close(); } catch {}
+    if (commandSseReconnect) return;
+    commandSseReconnect = setTimeout(() => {
+      commandSseReconnect = null;
+      connectCommandSse();
+    }, COMMAND_SSE_RECONNECT_MS);
+  });
 }
 
 function send(res, code, obj) {
@@ -671,7 +918,7 @@ const server = http.createServer(async (req, res) => {
       const r = await submitDoc(body);
       return send(res, r.ok ? 200 : 502, r);
     }
-    // Room-built code → OpenFab gate — POST /submit-build {room, id, files, model, gate} → {run_id}
+    // Room-built code → OpenFab certification — POST /submit-build {room, id, files, model, gate?} → {run_id}
     if (req.method === 'POST' && url.pathname === '/submit-build') {
       const body = await readBody(req);
       const r = await submitBuild(body);
@@ -754,14 +1001,17 @@ async function harvestCoordinatorSpecs() {
   }
 }
 
-server.listen(PORT, '127.0.0.1', () => {
-  log(`listening on http://127.0.0.1:${PORT}  → agent-chat ${AC}  assignee=${ASSIGNEE}`);
-  log(`approval relay → OpenFab ${OPENFAB_URL} (polling every ${APPROVAL_POLL_MS}ms)`);
-  if (!MESSAGES_FILE) log('WARNING: set AGENTCHAT_DIR (the agent-chat repo path) so the bridge can harvest implementer results');
-  if (COORD_WS.length) log(`spec harvest watching: ${COORD_WS.join(', ')}`);
-  registerSelf();
-  setInterval(() => {
-    pollApprovals().catch((e) => log(`approval poll error: ${e.message}`));
-    harvestCoordinatorSpecs().catch((e) => log(`harvest error: ${e.message}`));
-  }, APPROVAL_POLL_MS);
-});
+if (process.env.OPENFAB_BRIDGE_NO_SERVER !== '1') {
+  server.listen(PORT, '127.0.0.1', () => {
+    log(`listening on http://127.0.0.1:${PORT}  → agent-chat ${AC}  assignee=${ASSIGNEE}`);
+    log(`approval relay → OpenFab ${OPENFAB_URL} (polling every ${APPROVAL_POLL_MS}ms)`);
+    if (!MESSAGES_FILE) log('WARNING: set AGENTCHAT_DIR (the agent-chat repo path) so the bridge can harvest implementer results');
+    if (COORD_WS.length) log(`spec harvest watching: ${COORD_WS.join(', ')}`);
+    registerSelf();
+    connectCommandSse();
+    setInterval(() => {
+      pollApprovals().catch((e) => log(`approval poll error: ${e.message}`));
+      harvestCoordinatorSpecs().catch((e) => log(`harvest error: ${e.message}`));
+    }, APPROVAL_POLL_MS);
+  });
+}

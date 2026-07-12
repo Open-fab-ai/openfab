@@ -1,10 +1,10 @@
 # OpenFab ↔ agent-chat Bridge (Phase 1)
 
 A zero-dependency Node sidecar that lets OpenFab (blocking HTTP, single binary, no async
-runtime) drive the agent-chat multi-agent team running over Matrix. **OpenFab stays the
-source of truth and drives the workflow**; the agent-chat implementer agent in a Matrix
-room only does the *implement* segment. OpenFab then verifies (agent-spec lifecycle),
-signs (in-toto/SLSA), gates (conformance + N-of-M), and reproduces.
+runtime) drive or certify the agent-chat multi-agent team running over Matrix. Robrix +
+agent-chat can complete room workflows directly; OpenFab is an optional verification,
+provenance, and release-gate layer. When opted in, OpenFab verifies (agent-spec lifecycle),
+signs (in-toto/SLSA), optionally gates (conformance + N-of-M), and reproduces.
 
 ```
 OpenFab ──blocking HTTP──▶ Bridge ──HTTP──▶ agent-chat backend (:8090) ──▶ Matrix room (Palpo)
@@ -52,6 +52,11 @@ must also write tests matching the contract's `Test:` selectors so `agent-spec l
 | `AGENTCHAT_URL` | `http://127.0.0.1:8090` | agent-chat backend |
 | `AGENTCHAT_API_TOKEN` | — | operator Bearer token |
 | `BRIDGE_ASSIGNEE` | `wf_implementer` | implementer agent |
+| `OPENFAB_ROOM_BUILD_GATE` | `none` | gate for room `build <id>` commands: `none`, `solo`, `team`, or `crowd` |
+| `OPENFAB_BRIDGE_STATE_FILE` | next to `messages.json` | processed Matrix command ids; prevents replay after bridge restart |
+| `OPENFAB_BRIDGE_SSE` | `1` | subscribe to agent-chat `/api/stream` for near-real-time Matrix commands; `0` disables SSE |
+| `OPENFAB_BRIDGE_SSE_RECONNECT_MS` | `5000` | reconnect delay after SSE disconnect |
+| `OPENFAB_BRIDGE_SSE_ACTIVITY_TIMEOUT_MS` | `45000` | drop + reconnect the SSE stream after this long with no bytes |
 | `BRIDGE_OPERATOR` | `operator` | DM history owner to harvest results from |
 
 ## Run
@@ -62,6 +67,12 @@ node bridge/openfab-agentchat-bridge.mjs
 export OPENFAB_AGENTCHAT_URL=http://127.0.0.1:8077
 export OPENFAB_AGENTCHAT_ROOM='!demoboard:localhost'   # the Matrix room id
 openfab build "…" --base agent-chat --forge local …
+```
+
+## Test
+
+```bash
+node --test bridge/openfab-agentchat-bridge.test.mjs
 ```
 
 ## Status

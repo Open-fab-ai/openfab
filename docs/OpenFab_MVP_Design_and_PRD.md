@@ -74,6 +74,38 @@ pub trait BasePort {
 }
 ```
 
+### Enterprise agentd execution profile (proposed amendment)
+
+**Ratification status:** proposed on 2026-07-12; not part of the implemented
+v0.2 behavior until ADR 0003 is accepted and its conformance tests pass.
+
+The enterprise profile preserves `BasePort` as OpenFab's swappable execution
+seam while assigning durable execution ownership to agentd:
+
+- OpenFab continues to own an invoked spec cycle, its verification request,
+  provenance, trust policy result, certification state, and human gate.
+- The agentd `BasePort` adapter translates `dispatch` into one immutable
+  `ProjectExecutionSnapshot` plus a durable agentd run. It translates `result`
+  into immutable execution-artifact and audit references.
+- `AgentdControlPlane` owns run/task identity, queueing, leases, fencing,
+  runtime-session records, checkpoints, artifact index, execution audit, and
+  measured usage. OpenFab must not mirror these as a second mutable runtime
+  state machine.
+- `AgentdWorker` owns only disposable live process/PTY, workspace/cache, and
+  unacknowledged upload-spool state.
+- OpenFab certification never accepts a worker self-report as sufficient proof;
+  it consumes immutable evidence references and can independently re-run
+  project-policy-required checks.
+- A direct Robrix-to-agentd profile is selected by project policy and bypasses
+  OpenFab orchestration. It does not receive an OpenFab certification result
+  unless a separate certification request is made.
+
+OpenFab Core remains base-independent. Agentd identities, Matrix transport
+types, worker protocols, and runtime implementation details stay in the
+`BasePort` adapter or versioned evidence schemas. OpenFab stores the external
+agentd run/evidence references needed to resume its own spec cycle, not agentd's
+queue, lease, or process state.
+
 **Forge adapter.**
 
 ```rust

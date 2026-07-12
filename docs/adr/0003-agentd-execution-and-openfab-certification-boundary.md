@@ -1,9 +1,22 @@
 # ADR 0003: Agentd Execution and OpenFab Certification Boundary
 
-- Status: Proposed
+- Status: Proposed (maintainer design approval recorded 2026-07-12; acceptance
+  remains gated on the requirements below)
 - Date: 2026-07-12
 - Decision owners: OpenFab and agentd maintainers
 - Factory phases: FSF-1 / AD-E0
+
+## Approvals
+
+| Role | Decision | Date | Provenance |
+| --- | --- | --- | --- |
+| OpenFab maintainer | Design approved | 2026-07-12 | Decision delegated by AlexZ to Claude Fable 5 (openfab Claude session, 2026-07-12); reviewed against the factory role matrix, `ForgePort` clarification, and `command_id` idempotency semantics — no conflicts found |
+| agentd maintainer | Design approved | 2026-07-12 | Same delegated review; consistent with P264 ownership boundary and the canonical AD-E roadmap at `b6cfa03` |
+
+Maintainer approval satisfies only the first two Acceptance Requirements.
+Status becomes `Accepted` when the remaining mechanical requirements pass:
+idempotent dispatch/result contract tests, per-system outage failure tests, and
+the complete human-signed FSF-0 acceptance record.
 
 ## Context
 

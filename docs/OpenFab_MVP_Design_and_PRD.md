@@ -76,8 +76,10 @@ pub trait BasePort {
 
 ### Enterprise agentd execution profile (proposed amendment)
 
-**Ratification status:** proposed on 2026-07-12; not part of the implemented
-v0.2 behavior until ADR 0003 is accepted and its conformance tests pass.
+**Ratification status:** design approved by maintainers on 2026-07-12
+(decision delegated by AlexZ to Claude Fable 5; see ADR 0003 `Approvals`). Not
+part of the implemented v0.2 behavior until ADR 0003's remaining acceptance
+requirements pass and its status becomes `Accepted`.
 
 The enterprise profile preserves `BasePort` as OpenFab's swappable execution
 seam while assigning durable execution ownership to agentd:

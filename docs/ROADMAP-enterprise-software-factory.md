@@ -41,7 +41,10 @@ through `BasePort`. The enterprise target preserves that public contract:
 The proposed PRD amendment and ADR are recorded in
 `docs/OpenFab_MVP_Design_and_PRD.md` and
 `docs/adr/0003-agentd-execution-and-openfab-certification-boundary.md`. They do
-not become approved merely because the files exist.
+not become approved merely because the files exist. Maintainer design approval
+was recorded on 2026-07-12 (delegated decision; see ADR 0003 `Approvals`); ADR
+acceptance remains gated on its conformance tests and the signed FSF-0
+acceptance record.
 
 FSF-1 cannot exit until the PRD and relevant ADRs ratify this decomposition. Until
 then, this document is a proposed enterprise evolution, not a claim about current

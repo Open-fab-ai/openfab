@@ -8,6 +8,8 @@
 //!   verify         check an artifact against the OpenFab profile (signatures + acceptance)
 //!   reputation     project reputation from the signed attestations
 //!   list           show runs in a repo
+//!   identity-audit audit Matrix maintainer mappings
+//!   doctor         read-only workflow diagnostics
 
 use std::path::{Path, PathBuf};
 
@@ -134,6 +136,19 @@ enum Cmd {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Audit OpenFab maintainer ↔ Matrix identity mappings.
+    IdentityAudit {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Read-only diagnostics for the OpenFab ↔ agent-chat ↔ Robrix workflow.
+    Doctor {
+        #[arg(long)]
+        repo: PathBuf,
+        /// Directory holding projects.json and room-bindings.json; defaults to repo parent.
+        #[arg(long)]
+        projects_dir: Option<PathBuf>,
+    },
     /// Launch the OpenFab web UI + API (the end-to-end visual demo).
     Serve {
         /// Repo/workspace root the UI operates on (forges live under it).
@@ -218,6 +233,8 @@ pub fn run() -> Result<()> {
         Cmd::Verify { repo, run } => cmd_verify(&repo, &run),
         Cmd::Reputation { repo } => cmd_reputation(&repo),
         Cmd::List { repo } => cmd_list(&repo),
+        Cmd::IdentityAudit { repo } => cmd_identity_audit(&repo),
+        Cmd::Doctor { repo, projects_dir } => cmd_doctor(&repo, projects_dir.as_deref()),
         Cmd::Serve { repo, port, policy } => {
             let repo = abs(&repo)?;
             std::fs::create_dir_all(&repo)?;
@@ -418,17 +435,51 @@ fn cmd_list(repo: &Path) -> Result<()> {
     let runs = runstate::list_runs(&repo)?;
     println!("== OpenFab runs in {} ==", repo.display());
     for r in &runs {
+        let badge = ops::gate_badge_for_run(r);
         println!(
-            "{:<40} spec={:<22} base={:<10} accepted={} merged={}",
+            "{:<40} spec={:<22} base={:<10} gate={:<18} accepted={} merged={}",
             r.run_id,
             r.spec_ref,
             r.base_name,
+            badge.label,
             yn(r.accepted),
             yn(r.merged)
         );
     }
     if runs.is_empty() {
         println!("(none)");
+    }
+    Ok(())
+}
+
+fn cmd_identity_audit(repo: &Path) -> Result<()> {
+    let repo = abs(repo)?;
+    let audit = ops::identity_audit(&repo)?;
+    println!(
+        "identity audit: maintainers={} mapped_mxids={} ok={}",
+        audit.maintainers,
+        audit.mapped_mxids,
+        yn(audit.ok)
+    );
+    for f in audit.findings {
+        println!("- [{}] {} — {}", f.level, f.code, f.detail);
+    }
+    Ok(())
+}
+
+fn cmd_doctor(repo: &Path, projects_dir: Option<&Path>) -> Result<()> {
+    let repo = abs(repo)?;
+    let projects_dir = match projects_dir {
+        Some(p) => abs(p)?,
+        None => repo
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| repo.clone()),
+    };
+    let report = ops::doctor(&repo, &projects_dir)?;
+    println!("doctor: ok={}", yn(report.ok));
+    for c in report.checks {
+        println!("- [{}] {} — {}", c.status, c.name, c.detail);
     }
     Ok(())
 }

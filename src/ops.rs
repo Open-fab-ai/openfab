@@ -31,10 +31,9 @@ pub struct RunRequest {
     pub gate_mode: String,
     /// "provider · model" when the spec was LLM-authored (shown in the timeline).
     pub authored_by: Option<String>,
-    /// Import path (Robrix-built → OpenFab gate): when set, OpenFab does NOT dispatch the base
+    /// Import path (Robrix/agent-chat-built → OpenFab certification): when set, OpenFab does NOT dispatch the base
     /// to generate code — it imports these already-built files `(label, model, files)` and runs
-    /// the rest of the cycle (verify → sign → conformance → gate). So any build path converges
-    /// on the single OpenFab gate.
+    /// the rest of the cycle (verify → sign → conformance → optional gate).
     pub prebuilt: Option<(String, String, std::collections::BTreeMap<String, String>)>,
 }
 
@@ -198,11 +197,11 @@ pub fn build_with_spec_file(
     )
 }
 
-/// Import a build produced elsewhere (e.g. the agent-chat team in a Robrix room) and run it
-/// through OpenFab's gate: load the ingested `.spec.md`, write the supplied files via a
-/// PrebuiltBase (no dispatch), then verify → sign → conformance → N-of-M gate. The run lands
-/// "blocked / awaiting sign-off" like any other — the single convergence point for every build
-/// path.
+/// Import a build produced elsewhere (e.g. the agent-chat team in a Robrix room): load the
+/// ingested `.spec.md`, write the supplied files via a PrebuiltBase (no dispatch), then run
+/// verify → sign → conformance → optional gate. Use `gate_mode = "none"` for certification
+/// without human sign-off, or `solo`/`team`/`crowd` when this artifact should also be released
+/// through OpenFab's trust gate.
 #[allow(clippy::too_many_arguments)]
 pub fn import_build(
     repo: &Path,
@@ -377,6 +376,67 @@ pub fn board_lane(status: &str, accepted: bool, merged: bool) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GateBadge {
+    pub label: String,
+    pub class_name: String,
+    pub human_gate: bool,
+    pub threshold: String,
+}
+
+fn gate_threshold(mode: &str) -> &'static str {
+    match mode {
+        "solo" => "1-of-1",
+        "team" => "2-of-2",
+        "crowd" => "2-of-3",
+        "none" => "machine",
+        _ => "policy",
+    }
+}
+
+/// Human-readable gate strength for UI/API cards. This separates “accepted by machine
+/// checks + provenance” from runs that passed a human release gate.
+pub fn gate_badge(gate_mode: &str, status: &str, accepted: bool, merged: bool) -> GateBadge {
+    let mode = if gate_mode.trim().is_empty() {
+        "team"
+    } else {
+        gate_mode
+    };
+    let threshold = gate_threshold(mode).to_string();
+    let terminal_accept = accepted || merged || matches!(status, "accepted" | "merged");
+    let waiting = status == "blocked";
+    if mode == "none" {
+        let label = if terminal_accept {
+            "accepted·machine"
+        } else {
+            "machine·pending"
+        };
+        return GateBadge {
+            label: label.to_string(),
+            class_name: "machine".to_string(),
+            human_gate: false,
+            threshold,
+        };
+    }
+    let prefix = if terminal_accept {
+        "accepted"
+    } else if waiting {
+        "awaiting"
+    } else {
+        "gate"
+    };
+    GateBadge {
+        label: format!("{prefix}·{threshold}"),
+        class_name: "human-gate".to_string(),
+        human_gate: true,
+        threshold,
+    }
+}
+
+pub fn gate_badge_for_run(r: &RunRecord) -> GateBadge {
+    gate_badge(&r.gate_mode, &r.status, r.accepted, r.merged)
+}
+
 /// Render the multi-spec dependency graph (DOT) via `agent-spec graph` (D2).
 pub fn spec_graph(spec_dir: &Path) -> Result<String> {
     let bin = std::env::var("OPENFAB_AGENT_SPEC_BIN").unwrap_or_else(|_| "agent-spec".to_string());
@@ -451,6 +511,7 @@ pub struct BoardItem {
     pub base_name: String,
     pub pr_url: String,
     pub created: String,
+    pub gate_badge: GateBadge,
 }
 
 /// Project all runs onto the kanban board lanes.
@@ -459,6 +520,7 @@ pub fn board(repo: &Path) -> Result<Vec<BoardItem>> {
         .into_iter()
         .map(|r| BoardItem {
             lane: board_lane(&r.status, r.accepted, r.merged).to_string(),
+            gate_badge: gate_badge_for_run(&r),
             run_id: r.run_id,
             spec_ref: r.spec_ref,
             base_name: r.base_name,
@@ -466,6 +528,197 @@ pub fn board(repo: &Path) -> Result<Vec<BoardItem>> {
             created: r.created,
         })
         .collect())
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IdentityFinding {
+    pub level: String,
+    pub code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IdentityAudit {
+    pub ok: bool,
+    pub maintainers: usize,
+    pub mapped_mxids: usize,
+    pub findings: Vec<IdentityFinding>,
+}
+
+fn finding(level: &str, code: &str, detail: impl Into<String>) -> IdentityFinding {
+    IdentityFinding {
+        level: level.to_string(),
+        code: code.to_string(),
+        detail: detail.into(),
+    }
+}
+
+pub fn identity_audit_from_entries(entries: &[runstate::MaintainerEntry]) -> IdentityAudit {
+    let mut findings = Vec::new();
+    if entries.is_empty() {
+        findings.push(finding(
+            "warn",
+            "no_maintainers",
+            "no OpenFab maintainers are registered",
+        ));
+    }
+    let mut seen: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for m in entries {
+        match m.mxid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(mxid) => {
+                if !(mxid.starts_with('@') && mxid.contains(':')) {
+                    findings.push(finding(
+                        "error",
+                        "invalid_mxid",
+                        format!("maintainer '{}' has invalid Matrix id '{}'", m.name, mxid),
+                    ));
+                }
+                seen.entry(mxid.to_string())
+                    .or_default()
+                    .push(m.name.clone());
+            }
+            None => findings.push(finding(
+                "warn",
+                "missing_mxid",
+                format!("maintainer '{}' has no Matrix mxid mapping", m.name),
+            )),
+        }
+    }
+    for (mxid, names) in seen.iter().filter(|(_, names)| names.len() > 1) {
+        findings.push(finding(
+            "error",
+            "duplicate_mxid",
+            format!(
+                "Matrix id '{}' maps to multiple maintainers: {}",
+                mxid,
+                names.join(", ")
+            ),
+        ));
+    }
+    if !entries.is_empty() && findings.is_empty() {
+        findings.push(finding(
+            "ok",
+            "identity_mappings_ok",
+            "all maintainers have unique Matrix mxid mappings",
+        ));
+    }
+    let ok = !findings
+        .iter()
+        .any(|f| f.level == "error" || f.level == "warn");
+    IdentityAudit {
+        ok,
+        maintainers: entries.len(),
+        mapped_mxids: entries.iter().filter(|m| m.mxid.is_some()).count(),
+        findings,
+    }
+}
+
+pub fn identity_audit(repo: &Path) -> Result<IdentityAudit> {
+    Ok(identity_audit_from_entries(&runstate::load_maintainers(
+        repo,
+    )?))
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DoctorReport {
+    pub ok: bool,
+    pub checks: Vec<DoctorCheck>,
+}
+
+fn doctor_check(name: &str, status: &str, detail: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        name: name.to_string(),
+        status: status.to_string(),
+        detail: detail.into(),
+    }
+}
+
+/// Local workflow diagnostics for the Robrix/agent-chat/OpenFab bridge path. It is intentionally
+/// read-only and avoids network calls; it checks the durable local state and required env wiring.
+pub fn doctor(repo: &Path, projects_dir: &Path) -> Result<DoctorReport> {
+    let mut checks = Vec::new();
+    checks.push(if repo.join(".git").exists() {
+        doctor_check("repo_git", "ok", format!("git repo: {}", repo.display()))
+    } else {
+        doctor_check(
+            "repo_git",
+            "warn",
+            format!("no .git directory at {}", repo.display()),
+        )
+    });
+
+    let runs = runstate::list_runs(repo).unwrap_or_default();
+    checks.push(doctor_check(
+        "run_store",
+        "ok",
+        format!("{} run record(s) visible", runs.len()),
+    ));
+
+    let identity = identity_audit(repo)?;
+    checks.push(doctor_check(
+        "identity_map",
+        if identity.ok { "ok" } else { "warn" },
+        format!(
+            "{} maintainer(s), {} Matrix mapping(s), {} finding(s)",
+            identity.maintainers,
+            identity.mapped_mxids,
+            identity.findings.len()
+        ),
+    ));
+
+    let bindings = runstate::load_room_bindings(projects_dir).unwrap_or_default();
+    checks.push(doctor_check(
+        "room_bindings",
+        if bindings.is_empty() { "warn" } else { "ok" },
+        format!("{} room→project binding(s)", bindings.len()),
+    ));
+
+    let bridge_url = std::env::var("OPENFAB_AGENTCHAT_URL").unwrap_or_default();
+    checks.push(if bridge_url.trim().is_empty() {
+        doctor_check(
+            "agentchat_bridge",
+            "warn",
+            "OPENFAB_AGENTCHAT_URL is not set",
+        )
+    } else {
+        doctor_check(
+            "agentchat_bridge",
+            "ok",
+            format!("OPENFAB_AGENTCHAT_URL={bridge_url}"),
+        )
+    });
+
+    let state_file = std::env::var("OPENFAB_BRIDGE_STATE_FILE").unwrap_or_default();
+    checks.push(if state_file.trim().is_empty() {
+        doctor_check(
+            "bridge_command_state",
+            "warn",
+            "OPENFAB_BRIDGE_STATE_FILE is not set; bridge will default next to messages.json",
+        )
+    } else if Path::new(&state_file).exists() {
+        doctor_check(
+            "bridge_command_state",
+            "ok",
+            format!("state file exists: {state_file}"),
+        )
+    } else {
+        doctor_check(
+            "bridge_command_state",
+            "warn",
+            format!("state file not found yet: {state_file}"),
+        )
+    });
+
+    let ok = !checks.iter().any(|c| c.status == "error");
+    Ok(DoctorReport { ok, checks })
 }
 
 /// A run document for the dashboard (Phase 2 A3 document engineering).
@@ -1323,6 +1576,66 @@ mod tests {
         // blocked = work done, only the human release sign-off remains.
         assert_eq!(board_lane("blocked", false, false), "sign-off");
         assert_eq!(board_lane("merged", true, true), "merged");
+    }
+
+    #[test]
+    fn test_gate_badge_distinguishes_machine_from_human_gate() {
+        let machine = gate_badge("none", "accepted", true, false);
+        assert_eq!(machine.label, "accepted·machine");
+        assert!(!machine.human_gate);
+
+        let team = gate_badge("team", "merged", true, true);
+        assert_eq!(team.label, "accepted·2-of-2");
+        assert!(team.human_gate);
+
+        let waiting = gate_badge("crowd", "blocked", false, false);
+        assert_eq!(waiting.label, "awaiting·2-of-3");
+    }
+
+    #[test]
+    fn test_identity_audit_flags_missing_invalid_and_duplicate_mxids() {
+        let entries = vec![
+            runstate::MaintainerEntry {
+                name: "alice".into(),
+                did: "did:key:z1".into(),
+                mxid: Some("@alice:palpo".into()),
+            },
+            runstate::MaintainerEntry {
+                name: "bob".into(),
+                did: "did:key:z2".into(),
+                mxid: None,
+            },
+            runstate::MaintainerEntry {
+                name: "carol".into(),
+                did: "did:key:z3".into(),
+                mxid: Some("carol".into()),
+            },
+            runstate::MaintainerEntry {
+                name: "dave".into(),
+                did: "did:key:z4".into(),
+                mxid: Some("@alice:palpo".into()),
+            },
+        ];
+        let audit = identity_audit_from_entries(&entries);
+        assert!(!audit.ok);
+        assert!(audit.findings.iter().any(|f| f.code == "missing_mxid"));
+        assert!(audit.findings.iter().any(|f| f.code == "invalid_mxid"));
+        assert!(audit.findings.iter().any(|f| f.code == "duplicate_mxid"));
+    }
+
+    #[test]
+    fn test_doctor_reports_core_local_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let report = doctor(&repo, tmp.path()).unwrap();
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"repo_git"));
+        assert!(names.contains(&"run_store"));
+        assert!(names.contains(&"identity_map"));
+        assert!(names.contains(&"room_bindings"));
+        assert!(names.contains(&"agentchat_bridge"));
+        assert!(names.contains(&"bridge_command_state"));
     }
 
     #[test]

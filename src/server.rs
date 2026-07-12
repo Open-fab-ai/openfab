@@ -249,9 +249,10 @@ fn route(
             ))
         }
 
-        // Import a build produced elsewhere (Robrix/agent-chat team) and run it through the gate.
+        // Import a build produced elsewhere (Robrix/agent-chat team) for OpenFab verification.
         // POST {id, files:{path:content}, model?, builder?, gate?, project?|room?} → {run_id}.
-        // Every build path converges here on OpenFab's verify → sign → conformance → N-of-M gate.
+        // `gate` defaults to `none`: OpenFab records provenance/conformance without forcing
+        // human sign-off. Pass `solo`/`team`/`crowd` to opt into the release gate.
         (Method::Post, ["api", "import-build"]) => {
             let body = body_json(req)?;
             let id = match safe_id(body["id"].as_str().unwrap_or("")) {
@@ -289,7 +290,7 @@ fn route(
             }
             let builder = body["builder"].as_str().unwrap_or("agent-chat").to_string();
             let model = body["model"].as_str().unwrap_or("unknown").to_string();
-            let gate = body["gate"].as_str().unwrap_or("team").to_string();
+            let gate = body["gate"].as_str().unwrap_or("none").to_string();
             let run_id = ops::reserve_intent_run_id(&format!("import {id}"));
             seed_status(&target_repo, &run_id, "importing build…", "importing");
             let st = state.clone();
@@ -411,7 +412,10 @@ fn route(
 
         // --- runs ---
         (Method::Post, ["api", "run"]) => start_run(req, state, &repo),
-        (Method::Get, ["api", "runs"]) => Ok(json_resp(200, &json!(runstate::list_runs(&repo)?))),
+        (Method::Get, ["api", "runs"]) => Ok(json_resp(
+            200,
+            &json!(run_values(runstate::list_runs(&repo)?)?),
+        )),
         // Cross-project run history: every project's runs, each tagged with its project, newest
         // first. Lets the dashboard show a complete history regardless of the selected project.
         (Method::Get, ["api", "history"]) => {
@@ -419,7 +423,7 @@ fn route(
             let mut push_runs = |project: &str, repo: &Path| {
                 if let Ok(runs) = runstate::list_runs(repo) {
                     for r in runs {
-                        if let Ok(mut v) = serde_json::to_value(&r) {
+                        if let Ok(mut v) = run_value(&r) {
                             v["project"] = json!(project);
                             all.push(v);
                         }
@@ -509,6 +513,13 @@ fn route(
             Ok(json_resp(200, &json!(ops::stages(&repo, id)?)))
         }
         (Method::Get, ["api", "board"]) => Ok(json_resp(200, &json!(ops::board(&repo)?))),
+        (Method::Get, ["api", "identity-audit"]) => {
+            Ok(json_resp(200, &json!(ops::identity_audit(&repo)?)))
+        }
+        (Method::Get, ["api", "doctor"]) => Ok(json_resp(
+            200,
+            &json!(ops::doctor(&repo, &state.projects_dir)?),
+        )),
         (Method::Get, ["api", "graph"]) => {
             let spec_dir = std::env::var("OPENFAB_SPEC_DIR")
                 .map(PathBuf::from)
@@ -1044,12 +1055,22 @@ fn seed_status(repo: &Path, run_id: &str, spec_ref: &str, status: &str) {
 /// A merged run view: the full record once persisted, else the live status file.
 fn run_view(id: &str, repo: &Path) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     if let Ok(rec) = runstate::load_run(repo, id) {
-        return Ok(json_resp(200, &json!(rec)));
+        return Ok(json_resp(200, &run_value(&rec)?));
     }
     match runstate::read_status(repo, id) {
         Some(st) => Ok(json_resp(200, &json!(st))),
         None => Ok(json_resp(404, &json!({ "error": "no such run" }))),
     }
+}
+
+fn run_value(rec: &runstate::RunRecord) -> Result<Value> {
+    let mut v = serde_json::to_value(rec)?;
+    v["gate_badge"] = json!(ops::gate_badge_for_run(rec));
+    Ok(v)
+}
+
+fn run_values(runs: Vec<runstate::RunRecord>) -> Result<Vec<Value>> {
+    runs.iter().map(run_value).collect()
 }
 
 fn reputation_view(repo: &Path) -> Result<Response<std::io::Cursor<Vec<u8>>>> {

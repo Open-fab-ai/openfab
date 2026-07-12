@@ -10,7 +10,7 @@
 //! the cycle — see `cli::cmd_feedback`. Core drives this entirely through the ports, so
 //! it never names a concrete base or forge.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -20,7 +20,7 @@ use crate::core::sbom::Sbom;
 use crate::core::spec::Spec;
 use crate::core::trust::{self, Policy, TrustInput};
 use crate::core::{sha256_hex, timeutil};
-use crate::ports::base::BasePort;
+use crate::ports::base::{BasePort, ChangedFile};
 use crate::ports::forge::{ForgePort, Trailers};
 use crate::runstate::{self, AcceptanceOutcome, RunRecord};
 
@@ -90,8 +90,9 @@ impl Timeline {
     }
 }
 
-/// Run one full spec cycle and persist the result. Returns the resulting RunRecord
-/// (in "open / awaiting sign-off" state — `accepted` is false until N-of-M sign-off).
+/// Run one full spec cycle and persist the result. Returns the resulting RunRecord.
+/// Gate modes that require human sign-off return blocked until N-of-M is satisfied; `none`
+/// can be accepted immediately after machine verification and signing.
 pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     let spec = cfg.spec;
     let base = cfg.base;
@@ -412,7 +413,8 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     let acceptance_passed = acceptance_passed && qa_passed;
 
     // 5. Build + sign provenance (in-toto/SLSA + openfab/generation predicate).
-    let generated: Vec<GeneratedRange> = changed_files
+    let attributed_files = git_worktree_changed_file_records(&repo, &real_changed)?;
+    let generated: Vec<GeneratedRange> = attributed_files
         .iter()
         .map(|f| GeneratedRange {
             path: f.path.clone(),
@@ -421,7 +423,7 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
             author: "ai".to_string(), // sign-off adds the human author tag later
         })
         .collect();
-    let mut bundle = changed_files
+    let mut bundle = attributed_files
         .iter()
         .map(|f| format!("{}:{}", f.path, f.sha256))
         .collect::<Vec<_>>();
@@ -471,7 +473,7 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     // 6. SBOM.
     let sbom = Sbom::build(
         &format!("{}-v{}", spec.id, spec.version),
-        &changed_files
+        &attributed_files
             .iter()
             .map(|f| (f.path.clone(), f.sha256.clone()))
             .collect::<Vec<_>>(),
@@ -488,7 +490,7 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
         &format!("wrote portable provenance: provenance/{att_name} + SBOM"),
     );
 
-    let mut commit_paths: Vec<PathBuf> = changed_files.iter().map(|f| repo.join(&f.path)).collect();
+    let mut commit_paths: Vec<PathBuf> = real_changed.iter().map(|p| repo.join(p)).collect();
     commit_paths.push(att_path.clone());
     commit_paths.push(sbom_path.clone());
 
@@ -727,6 +729,51 @@ fn git_worktree_changes(repo: &Path) -> Vec<String> {
     }
 }
 
+/// File records for attestation/SBOM, derived from git's real changed paths and the bytes
+/// currently on disk. Deleted paths stay in the commit path list, but are not valid
+/// `generated` entries because there is no file content to hash.
+fn git_worktree_changed_file_records(repo: &Path, paths: &[String]) -> Result<Vec<ChangedFile>> {
+    let mut records = Vec::new();
+    for rel in paths {
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+        {
+            anyhow::bail!("git reported unsafe changed path: {rel}");
+        }
+        let abs = repo.join(rel_path);
+        match std::fs::read(&abs) {
+            Ok(bytes) => records.push(ChangedFile {
+                path: rel.clone(),
+                lines: line_count(&bytes),
+                sha256: sha256_hex(&bytes),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Deletions are real implementation changes and must be committed, but there is
+                // no generated file range to sign for a path that no longer exists.
+            }
+            Err(e) => return Err(e).with_context(|| format!("reading changed file {rel}")),
+        }
+    }
+    records.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(records)
+}
+
+fn line_count(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        0
+    } else {
+        let newlines = bytes.iter().filter(|b| **b == b'\n').count();
+        if bytes.ends_with(b"\n") {
+            newlines
+        } else {
+            newlines + 1
+        }
+    }
+}
+
 fn short(did: &str) -> String {
     if did.len() > 20 {
         format!("{}…{}", &did[..14], &did[did.len() - 4..])
@@ -741,5 +788,152 @@ fn first_nonempty(a: &str, b: &str) -> String {
         a.to_string()
     } else {
         b.trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::process::Command;
+
+    use super::*;
+    use crate::adapters::forge_local_git::LocalGitForge;
+    use crate::core::provenance::Attestation;
+    use crate::core::spec::Acceptance;
+    use crate::ports::base::{Capabilities, ChangedFile, ExecResult, RunHandle, RunResult};
+
+    struct MismatchedBase {
+        result: RefCell<Option<RunResult>>,
+    }
+
+    impl MismatchedBase {
+        fn new() -> Self {
+            Self {
+                result: RefCell::new(None),
+            }
+        }
+    }
+
+    impl BasePort for MismatchedBase {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                orchestrate: true,
+                comms: true,
+                memory: true,
+                sandbox: false,
+            }
+        }
+
+        fn dispatch(&self, task: &crate::core::spec::TaskCard) -> Result<RunHandle> {
+            let real = task.workdir.join("app/real.txt");
+            std::fs::create_dir_all(real.parent().unwrap())?;
+            std::fs::write(&real, "real bytes\n")?;
+            *self.result.borrow_mut() = Some(RunResult {
+                task_id: task.id.clone(),
+                changed_files: vec![ChangedFile {
+                    path: "app/claimed.txt".into(),
+                    lines: 1,
+                    sha256: crate::core::sha256_hex(b"claimed bytes\n"),
+                }],
+                model: "fake-model".into(),
+                prompt: "write real.txt".into(),
+                log: "wrote real.txt but claimed another path".into(),
+                success: true,
+            });
+            Ok(RunHandle {
+                id: task.id.clone(),
+            })
+        }
+
+        fn result(&self, _h: &RunHandle) -> Result<RunResult> {
+            self.result
+                .borrow_mut()
+                .take()
+                .context("missing fake run result")
+        }
+
+        fn post(&self, _channel: &str, _msg: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn memory_get(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn memory_put(&self, _key: &str, _val: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn run_sandboxed(&self, cmd: &[String], workdir: &Path) -> Result<ExecResult> {
+            let out = Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .current_dir(workdir)
+                .output()?;
+            Ok(ExecResult {
+                exit_code: out.status.code().unwrap_or(1),
+                stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn provenance_uses_git_truth_not_base_reported_changed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let forge = LocalGitForge::new("local-test", repo.clone());
+        forge.clone_repo(&repo).unwrap();
+
+        let fab = Identity::generate("fab").unwrap();
+        runstate::ensure_fab_allowlisted(&repo, &fab.did()).unwrap();
+
+        let spec = Spec {
+            id: "git-truth".into(),
+            version: 1,
+            intent: "write the real file".into(),
+            context: vec![],
+            acceptance: vec![Acceptance {
+                id: "real-file-exists".into(),
+                check: "test -f app/real.txt".into(),
+                must_pass: true,
+            }],
+            assumptions: vec![],
+            open_questions: vec![],
+            human_signoff_required: false,
+            target_dir: "app".into(),
+            language: None,
+        };
+        let base = MismatchedBase::new();
+        let policy = Policy::default().for_gate_mode("none");
+
+        let rec = run_cycle(CycleConfig {
+            spec: &spec,
+            base: &base,
+            forge: &forge,
+            fab: &fab,
+            policy: &policy,
+            parent_run: None,
+            run_id: Some("git-truth-run".into()),
+            gate_mode: "none".into(),
+            authored_by: None,
+        })
+        .unwrap();
+
+        let att_text = std::fs::read_to_string(rec.attestation_path(&repo)).unwrap();
+        let att: Attestation = serde_json::from_str(&att_text).unwrap();
+        let generated = &att.statement.predicate.generated;
+
+        assert_eq!(generated.len(), 1);
+        assert_eq!(generated[0].path, "app/real.txt");
+        assert_eq!(generated[0].lines, "1-1");
+        assert_eq!(
+            generated[0].sha256,
+            crate::core::sha256_hex(b"real bytes\n")
+        );
+        assert!(!repo.join("app/claimed.txt").exists());
     }
 }

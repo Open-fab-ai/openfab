@@ -5,6 +5,11 @@ const $ = (s) => document.querySelector(s);
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
 // Escape untrusted values before interpolating into innerHTML (element + attribute contexts).
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"'`]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
+function gateBadgeHtml(run) {
+  const badge = run && run.gate_badge;
+  if (!badge) return "";
+  return `<span class="badge gate ${esc(badge.class_name)}">${esc(badge.label)}</span>`;
+}
 // selected project (workspace); scopes all run/maintainer calls. Persisted so a page refresh
 // keeps the project you were on (otherwise it reset to "default" and hid that project's data).
 let PROJECT = (() => { try { return localStorage.getItem("openfab_project") || "default"; } catch { return "default"; } })();
@@ -139,7 +144,7 @@ async function loadIncoming() {
   runs.forEach((r) => {
     const [id, ver] = (r.spec_ref || "").split("#");
     const v = parseInt((ver || "v0").replace(/^v/, ""), 10) || 0;
-    if (!latest[id] || v >= latest[id].v) latest[id] = { v, status: r.status, run_id: r.run_id };
+    if (!latest[id] || v >= latest[id].v) latest[id] = { v, status: r.status, run_id: r.run_id, gate_badge: r.gate_badge };
   });
   const card = $("#incomingcard"), box = $("#incoming");
   if (!docs.length) { card.style.display = "none"; return; }
@@ -215,7 +220,7 @@ async function loadRecentRuns() {
       `<span style="display:flex;flex-direction:column;min-width:0;flex:1">` +
       `<span class="mono" style="font-size:12px;overflow-wrap:anywhere">${esc(r.spec_ref || r.run_id)}</span>` +
       `<span class="muted" style="font-size:10.5px">${esc(proj)} · ${esc((r.created || "").replace("T", " ").replace("Z", ""))}</span></span>` +
-      `<span class="pill ${esc(r.status)}">${esc(r.status)}</span>`;
+      `${gateBadgeHtml(r)}<span class="pill ${esc(r.status)}">${esc(r.status)}</span>`;
     row.onclick = () => openHistoryRun(proj, r.run_id);
     box.appendChild(row);
   });

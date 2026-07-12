@@ -7,11 +7,11 @@
 
 Integrate the **robrix2 + agent-chat workflow demo** into OpenFab so that:
 
-- **OpenFab is the trustworthy backend and drives the workflow** (single source of truth).
+- **OpenFab is an optional trustworthy backend/certification layer** for room-built work.
 - **agent-spec** authors the spec (a `.spec.md` Task Contract) and provides verification +
   a contract gate (`spec + verify + gate`).
-- The **agent-chat** multi-agent team (over Matrix, via robrix2) only does the *implement*
-  segment.
+- The **agent-chat** multi-agent team (over Matrix, via robrix2) can complete and submit code
+  directly; OpenFab import/signoff is opt-in.
 - **robrix2** becomes the human cockpit.
 
 ## 2. Key insight — same pipeline, two layers
@@ -19,8 +19,10 @@ Integrate the **robrix2 + agent-chat workflow demo** into OpenFab so that:
 robrix2's demo (`issue → spec → plan → implement → review → final_review`) and OpenFab's
 spec-cycle (`intent → spec → dispatch → verify → sign → gate → signoff`) are the **same
 pipeline at different layers**. robrix2 provides multi-agent collaboration UX but no
-signing/provenance/SLSA/reproduce; OpenFab provides exactly that trust backbone. They are
-complementary. agent-spec is the formalized, CLI-verified version of OpenFab's spec.
+signing/provenance/SLSA/reproduce; OpenFab provides that trust backbone when a project asks
+for certification. They are complementary, but OpenFab sign-off is not a mandatory barrier
+for ordinary Robrix/agent-chat completion. agent-spec is the formalized, CLI-verified version
+of OpenFab's spec.
 
 ## 3. Ownership boundary (no double state machine)
 
@@ -29,10 +31,10 @@ complementary. agent-spec is the formalized, CLI-verified version of OpenFab's s
 | author spec | **agent-spec** (LLM-draft + human-accept) | `ops::author_spec` → `agent_spec::author_via_agent_spec` (draft `.spec.md` → `agent-spec lint` gate → `parse` → map to `Spec`) |
 | implement | **agent-chat** room agent | `BasePort::dispatch` (agent-chat native) → Bridge → Matrix room |
 | verify | **agent-spec** | `spec_cycle` verify delegates to `agent-spec lifecycle`; `--ai-mode caller` routes design-intent scenarios to the reviewer |
-| sign | **OpenFab** | in-toto/SLSA + `openfab/generation` predicate (+ spec-contract hash + verdicts) |
-| gate | **OpenFab + agent-spec** | conformance C1–C12 (C12 = all agent-spec scenarios pass) + N-of-M sign-off |
-| commit/PR | **OpenFab forge** | trailers + `.spec.md` + provenance committed into the repo |
-| reproduce | **OpenFab** | re-run `agent-spec lifecycle` + verify signature + source hash |
+| sign | **OpenFab, optional** | in-toto/SLSA + `openfab/generation` predicate (+ spec-contract hash + verdicts) when imported |
+| gate | **OpenFab + agent-spec, optional** | conformance C1–C12; human N-of-M only when `gate=solo/team/crowd` |
+| commit/PR | **agent-chat/room workflow by default; OpenFab forge when opted in** | room-built work may commit directly; imported OpenFab runs add trailers + `.spec.md` + provenance |
+| reproduce | **OpenFab, optional** | re-run `agent-spec lifecycle` + verify signature + source hash |
 
 ## 4. Target topology
 
@@ -40,14 +42,14 @@ complementary. agent-spec is the formalized, CLI-verified version of OpenFab's s
  robrix2 GUI (human cockpit)
    │  /create-issue · approve · /status        (Matrix plain text)
    ▼
- Palpo Matrix room  ◄─────────── OpenFab post() gate/provenance summary
+ Palpo Matrix room  ◄─────────── optional OpenFab verification/provenance summary
    ▲                                   │
    │ implementer agent reads task,     │
    │ posts task_result (files+prompt)  │
  ┌─┴───────────────────┐               │
- │ Bridge sidecar      │◄── blocking HTTP ── OpenFab spec_cycle (drives)
+ │ Bridge sidecar      │◄── blocking HTTP ── OpenFab spec_cycle (optional)
  │ bridge/*.mjs        │   POST /tasks         author → dispatch → verify
- │ wraps agent-chat    │   GET  /tasks/:id     → SIGN → GATE → commit → reproduce
+ │ wraps agent-chat    │   GET  /tasks/:id     → SIGN → optional GATE → reproduce
  │ backend :8090       │   POST /post
  └─────────────────────┘
 ```
@@ -117,12 +119,12 @@ agent must follow the result contract in `bridge/README.md` (posts `task_result`
 ## 9. robrix2 cockpit (Phase 2 — minimal, additive)
 
 robrix2 changes are minimal and additive (the GUI just sends slash commands as plain text;
-all logic is OpenFab/Bridge/skill-side):
+OpenFab/Bridge/skill-side logic is used only when the room opts into certification):
 
-- `/create-issue` already triggers the agent flow; with the Bridge, the implementer task is
-  driven by OpenFab.
-- `approve` → maps to OpenFab `ops::signoff` (N-of-M).
-- OpenFab posts the gate/provenance/`agent-spec explain` summary back into the room via
+- `/create-issue` already triggers the agent flow; with the Bridge, the room can optionally
+  ask OpenFab to drive or certify a build.
+- `approve` → maps to OpenFab `ops::signoff` (N-of-M) only for runs created with a human gate.
+- OpenFab posts the verification/provenance/`agent-spec explain` summary back into the room via
   `BasePort::post` → Bridge `/post`, so it renders in robrix2's existing timeline.
 - Optional: add `/verify`, `/provenance`, `/explain` to `WORKFLOW_SLASH_COMMANDS`
   (`robrix2/src/shared/mentionable_text_input.rs`, the `#[cfg(feature = "agent_chat")]`
@@ -143,9 +145,9 @@ Items that need manual/live verification (could not be run in the dev sandbox):
 - [ ] **Start the Bridge**: `node bridge/openfab-agentchat-bridge.mjs`, then
       `OPENFAB_AGENTCHAT_URL=http://127.0.0.1:8077 OPENFAB_AGENTCHAT_ROOM=<room> openfab build … --base agent-chat`.
 - [ ] **Phase 1 end-to-end**: confirm the implementer's files come back, integrity passes,
-      OpenFab signs + gates.
-- [ ] **Phase 2 robrix2**: add the optional slash commands; confirm `approve` → signoff and
-      the gate/provenance summary appears in the room.
+      OpenFab signs + records conformance; human sign-off only when gate mode requests it.
+- [ ] **Phase 2 robrix2**: add the optional slash commands; confirm gated runs can still
+      use `approve` → signoff and that verification/provenance summaries appear in the room.
 - [ ] **Phase 3 reviewer caller**: run `agent-spec lifecycle --ai-mode caller`; route
       `pending-ai-requests.json` to `wf_reviewer`; merge with `agent-spec resolve-ai`.
 

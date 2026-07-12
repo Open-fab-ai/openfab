@@ -17,12 +17,15 @@ demo scaffolding area (`robrix2/roadmap/agentchat-demo`).
 - Deployment profile: one compose profile `palpo-local` for the local case and
   the same file parameterized by env for the team-server case.
 - Appservice registration: template file `appservice-agentchat.yaml` rendered by
-  the bootstrap script; token values come from env, never committed.
-- Account bootstrap: script `bootstrap-accounts` creates the admin user and bot
-  accounts; it is idempotent across repeated runs.
+  the deterministic configuration tool; token values come from env, never
+  committed, and the sender account is separate from password-login bots.
+- Account bootstrap: token-gated `bootstrap-accounts` creates the admin and bot
+  accounts, performs one bounded local database promotion for the initial
+  server admin, and is idempotent across repeated runs. Open registration is
+  forbidden for both local and team-server profiles.
 - Health/reset: `demo-doctor` checks homeserver reachability, appservice
-  registration match, and bot account existence; `demo-reset` returns the
-  deployment to a clean state.
+  registration match, admin role, and bot account existence; `demo-reset`
+  returns the deployment to a clean state.
 
 ## Boundaries
 
@@ -31,6 +34,7 @@ demo scaffolding area (`robrix2/roadmap/agentchat-demo`).
 
 ### Forbidden
 - Do not commit real tokens, passwords, or signing keys.
+- Do not enable unrestricted Matrix registration.
 - Do not modify Robrix application source in this task.
 
 ## Out of Scope

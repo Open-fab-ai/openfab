@@ -15,11 +15,11 @@ row has exact evidence and the accountable human signs this record.
 
 | System | Inspected revision | Branch | Worktree state | Acceptance meaning |
 | --- | --- | --- | --- | --- |
-| OpenFab | `f6b31d0` | `feat/phase1-2-agentchat-agentspec-console` | 17 changed/untracked entries | Not a clean release revision |
+| OpenFab | `88eadb2` | `feat/phase1-2-agentchat-agentspec-console` | 17 changed/untracked entries | Governance baseline committed; not a clean release revision |
 | agent-chat | `bf85365` | `feat/matrix-agent-capabilities` | 8 changed/untracked entries | Not a clean release revision |
-| Robrix2 | `3d273cbc` | `main` | 5 changed/untracked entries | Not a clean release revision |
-| Palpo | not located in inspected project roots | not recorded | unavailable | Mandatory evidence missing |
-| agentd candidate | `3c27424` | `agentd/tr_01KWWTVEK1AC6C836SXSP7Y3Q3` | generated evidence remains unclassified | Candidate only; not part of FSF-0 runtime |
+| Robrix2 | `3d273cbc` | `main` | 9 changed/untracked entries | FSF-0A candidate passed; not a clean release revision |
+| Palpo | `b5aaa17` | `main` | clean nested checkout | Exact Palpo source revision recorded for FSF-0A candidate |
+| agentd candidate | `12e1b66` | `agentd/tr_01KWWTVEK1AC6C836SXSP7Y3Q3` | generated evidence remains unclassified | AD-E0 HOLD review committed; not part of FSF-0 runtime |
 
 The accepted record must replace dirty-worktree counts with immutable repository
 revisions or signed artifact digests for the exact deployed bytes.
@@ -33,7 +33,7 @@ revisions or signed artifact digests for the exact deployed bytes.
 | Optional certification failure does not block direct delivery | `gate=none` run plus injected certification failure and delivered subject digest | no recorded failure-injection run | MISSING |
 | Doctor exposes every missing dependency | doctor command output for each absent service/credential/configuration | checklist invokes doctor but has no captured matrix | MISSING |
 | Supervised services recover deterministically | service definitions, startup order, restart results, health outputs | manual tmux startup only | MISSING |
-| Palpo local/team profile and recovery runbook | immutable configuration, backup/restore drill, RPO/RTO result | Palpo checkout/revision not located | MISSING |
+| Palpo local/team profile and recovery runbook | immutable configuration, backup/restore drill, RPO/RTO result | five isolated real E2E selectors passed; candidate evidence records Palpo revision and tested-byte digest, but no human sign-off or committed Robrix2 revision | PARTIAL |
 | Trusted inviter and ignored sender enforcement | positive and negative Matrix event ids and results | checklist items are unchecked | MISSING |
 | Durable processed-event ids | restart/replay event corpus and zero duplicate effects | no artifact digest recorded | MISSING |
 | Human-confirmed requirements-to-ARC flow | requirement/spec/traceability digests and human confirmation event | no completed acceptance artifact | MISSING |
@@ -42,12 +42,13 @@ revisions or signed artifact digests for the exact deployed bytes.
 ## 3. Required Commands and Artifacts
 
 All six FSF-0 task contracts under `specs/phase1/` parse and lint at 100%.
-However, searches of the inspected OpenFab, agent-chat, and Robrix2 worktrees
-found none of the critical E2E test filters outside those spec files, including
+FSF-0A now implements and passes its five opt-in real selectors; see
+[`evidence/2026-07-12-fsf0-a-palpo-real-e2e.md`](evidence/2026-07-12-fsf0-a-palpo-real-e2e.md).
+The other critical E2E filters remain absent outside their spec files, including
 `test_runbook_e2e_walkthrough`, `test_drill_restart_zero_replay`,
 `test_drill_cert_failure_nonblocking`, `test_drill_doctor_explains_faults`, and
-`test_acceptance_record_fields_present`. Contract quality is therefore proven;
-implementation and acceptance are not.
+`test_acceptance_record_fields_present`. FSF-0A implementation evidence is
+partial; cross-system implementation and acceptance are not complete.
 
 The accountable acceptance run must record exact commands and exit codes for:
 

@@ -164,10 +164,13 @@ const OpsBrowser = (() => {
     // brownfield refine (evolve, don't regenerate); replaced by the previous cycle's
     // files+failures on retry so a retry revises, not regenerates blind.
     let prior = seedFiles ? { files: seedFiles, failed: [] } : null;
+    // Raised after a truncation failure: retrying with the SAME output budget would just
+    // truncate again — the model already proved it can emit the default, so ask for more.
+    let raisedTokens = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         rec.files = null; rec.acceptance = []; rec.acceptance_passed = false; rec.attestation = null; rec.status = "running";
-        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m), mkThink(rec), prior);
+        const gen = await FabEngine.generate(rec.spec, intent, (i, m) => ev(rec, i, m), mkThink(rec), prior, raisedTokens || undefined);
         rec.files = gen.files;
         ev(rec, "🧪", `running ${(rec.spec.acceptance || []).length} js: acceptance check(s) in the opaque-origin sandbox`);
         rec.acceptance = await FabEngine.runChecks(rec.spec, rec.files);
@@ -191,6 +194,7 @@ const OpsBrowser = (() => {
         ev(rec, "⛔", `acceptance still failing after ${maxAttempts} attempt(s) — honest failure, not a vacuous pass`);
         hintIfCustomGuidance(rec);
       } catch (e) {
+        if (/truncated/.test(e.message)) { raisedTokens = 24000; if (attempt < maxAttempts) ev(rec, "📏", "output hit the token limit — retrying with a doubled output budget (24k)"); }
         if (attempt < maxAttempts) { ev(rec, "🔁", `attempt failed (${e.message}) — auto-retrying (${attempt}/${maxAttempts - 1})`); await putRun(rec); continue; }
         rec.status = "failed"; ev(rec, "✖", `run failed after ${maxAttempts} attempt(s): ${e.message}`);
         hintIfCustomGuidance(rec);

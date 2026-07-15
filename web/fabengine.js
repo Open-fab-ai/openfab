@@ -256,44 +256,72 @@ const FabEngine = (() => {
   name), never a whole tag with attributes; never over-constrain the design.
 - Each open_question is an object with 2 to 4 concrete "options", a "suggested" one (matching an option
   exactly), and a one-line "why" — so the human can pick or override, never just an open-ended question.`;
-  async function authorSpec(intent, onThink) {
-    await loadShippedSlices();
-    // System prompt = shared slice + spec slice, read live from openfab-agent.md /
-    // Settings (see slice()). The BROWSER-ONLY target + JSON shape are call plumbing.
-    const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
-    const usr = `Respond with ONLY a JSON object (no prose):
-${SPEC_SHAPE}
+  // Fallback shape: the original flat schema — far easier for small models to emit.
+  // Used only when the rich shape fails to parse; the run degrades to a plainer spec
+  // (no summary/desc/options) instead of dying. The CONTRACT (id + js: checks) is identical.
+  const SPEC_SHAPE_MIN = `{"id":"<kebab-slug>","language":"html/js","target_dir":"app",
+ "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
+ "assumptions":["..."],"open_questions":["..."]}`;
+  const SPEC_RULES_MIN = `Rules:
+- Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
+- Each check is a JavaScript EXPRESSION prefixed "js:", evaluated with a variable \`files\`
+  (a map of path -> contents), returning true when satisfied.
+- 2 to 4 checks that GENUINELY verify the request; assert the smallest stable token.`;
 
-${SPEC_RULES}
-USER REQUEST:
-${intent}`;
-    const out = await chat(sys, usr, roleModel("spec"), onThink);
-    const a = parseJson(out.text);
+  // Lenient normalization: only the contract (>=1 js: acceptance check) is load-bearing —
+  // everything else (summary, desc, option-style questions) is UX enrichment and must
+  // never fail a run. Coerces whatever shape the model returned into what the UI expects.
+  function normalizeSpec(a) {
+    if (!a || typeof a !== "object") throw new Error("spec is not an object");
+    a.acceptance = (Array.isArray(a.acceptance) ? a.acceptance : [])
+      .map((c, i) => {
+        if (typeof c === "string") c = { check: c };
+        if (!c || typeof c.check !== "string" || !c.check.trim()) return null;
+        const check = c.check.trim().startsWith("js:") ? c.check.trim() : "js:" + c.check.trim();
+        return { id: c.id || `a${i + 1}`, desc: typeof c.desc === "string" ? c.desc : "", check };
+      }).filter(Boolean);
+    if (!a.acceptance.length) throw new Error("spec has no usable acceptance checks");
+    if (typeof a.summary !== "string") a.summary = "";
+    a.assumptions = (Array.isArray(a.assumptions) ? a.assumptions : []).map(String);
+    a.open_questions = (Array.isArray(a.open_questions) ? a.open_questions : [])
+      .map((q) => (typeof q === "string" || (q && typeof q.q === "string")) ? q : null).filter(Boolean);
+    return a;
+  }
+
+  // One spec call with graceful degradation: rich shape first; if the reply doesn't
+  // parse, retry ONCE with the minimal legacy shape (never fabricate — a second parse
+  // failure still throws, R14). Returns a normalized spec either way.
+  async function askSpec(preamble, context, onThink) {
+    await loadShippedSlices();
+    const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
+    const rich = `${preamble}\n${SPEC_SHAPE}\n\n${SPEC_RULES}\n${context}`;
+    let out;
+    let a;
+    try {
+      out = await chat(sys, rich, roleModel("spec"), onThink);
+      a = parseJson(out.text);
+    } catch (_) {
+      // rich shape failed (usually JSON errors from smaller models) — degrade to the flat shape
+      out = await chat(sys, `${preamble}\n${SPEC_SHAPE_MIN}\n\n${SPEC_RULES_MIN}\n${context}`, roleModel("spec"), onThink);
+      a = parseJson(out.text);
+      a.degraded = true; // surfaced in the timeline so degradation is visible, not silent
+    }
+    a = normalizeSpec(a);
     a.model = out.model;
     return a;
   }
 
-  // Re-author a spec from human feedback (used by the spec-review pause). Same
+  async function authorSpec(intent, onThink) {
+    return askSpec("Respond with ONLY a JSON object (no prose):", `USER REQUEST:\n${intent}`, onThink);
+  }
+
+  // Re-author a spec from human feedback (spec-review pause + brownfield refine). Same
   // output shape as authorSpec; the model sees the prior spec + the human's ask.
   async function reauthorSpec(intent, prevSpec, feedback, onThink) {
-    await loadShippedSlices();
-    const sys = `${slice("shared")}\n\n${slice("spec")}\n\nTarget: a BROWSER-ONLY web app (pure client-side HTML/CSS/JS, no servers, no build).`;
-    const usr = `Revise the spec below per the human's feedback. Respond with ONLY the updated JSON object, same shape:
-${SPEC_SHAPE}
-
-${SPEC_RULES}
-ORIGINAL USER REQUEST:
-${intent}
-
-CURRENT SPEC:
-${JSON.stringify(prevSpec, null, 2)}
-
-HUMAN FEEDBACK (apply this):
-${feedback || "(no free-text feedback — tighten/clarify the spec while preserving intent)"}`;
-    const out = await chat(sys, usr, roleModel("spec"), onThink);
-    const a = parseJson(out.text);
-    a.model = out.model;
-    return a;
+    return askSpec(
+      "Revise the spec below per the human's feedback. Keep criteria that still apply unchanged; add or modify only what the feedback requires. Respond with ONLY the updated JSON object, same shape:",
+      `ORIGINAL USER REQUEST:\n${intent}\n\nCURRENT SPEC:\n${JSON.stringify(prevSpec, null, 2)}\n\nHUMAN FEEDBACK (apply this):\n${feedback || "(no free-text feedback — tighten/clarify the spec while preserving intent)"}`,
+      onThink);
   }
 
   // ---- the browser swarm: coder → reviewer (both real LLM calls in this tab) ----
@@ -340,6 +368,15 @@ ${feedback || "(no free-text feedback — tighten/clarify the spec while preserv
     if (prior && prior.files && (prior.failed || []).length) {
       onEvent("🔧", `coder: revising the previous attempt — feeding back ${prior.failed.length} failed check(s)`);
       const rev = await chatJson(sys, revisePrompt(tb, prior.files, prior.failed), roleModel("coder"), onThink);
+      files = normalizeFiles(rev.obj.files && Object.keys(rev.obj.files).length ? rev.obj.files : prior.files);
+      model = rev.model;
+    } else if (prior && prior.files) {
+      // Brownfield refine: no failing checks yet — evolve the EXISTING app to meet the
+      // revised spec, instead of regenerating from scratch and losing what already works.
+      onEvent("🔧", "coder: modifying the existing app to meet the revised spec");
+      const rev = await chatJson(sys,
+        `${tb}\n\nEXISTING FILES (the current working app — evolve these, do not start over):\n${dumpFiles(prior.files)}\n\nMake the SMALLEST change to the existing files that satisfies EVERY acceptance check above; keep working behavior intact. Return the COMPLETE updated file set. ${FILES_SHAPE}`,
+        roleModel("coder"), onThink);
       files = normalizeFiles(rev.obj.files && Object.keys(rev.obj.files).length ? rev.obj.files : prior.files);
       model = rev.model;
     } else {

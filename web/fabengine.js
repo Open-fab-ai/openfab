@@ -67,6 +67,11 @@ const FabEngine = (() => {
     const o = JSON.parse(json); // throws on bad input — surfaced to the caller (Settings)
     for (const k of Object.keys(SLICE_KEY)) if (typeof o[k] === "string") setSlice(k, o[k]);
   }
+  // True when any slice has a user override — used to hint, on failure, that custom
+  // agent guidance is in play and Reset-to-default is the one-click experiment.
+  function hasSliceOverrides() {
+    return Object.values(SLICE_KEY).some((k) => { const v = localStorage.getItem(k); return v != null && v.trim(); });
+  }
   // Ask the LLM to improve one guidance slice. Returns the improved text (the
   // human reviews + saves it — it is never applied silently). `role` labels what
   // the slice governs so the model keeps it scoped and concise.
@@ -76,7 +81,7 @@ const FabEngine = (() => {
     coder: "the coder's guidance (engineering standards for generating a client-side web app: KISS, DRY, SRP, readability, robustness)",
   };
   async function improveSlice(name, current) {
-    const sys = "You are a prompt engineer improving one section of a system prompt. Return ONLY the improved section text — no preamble, no markdown fences, no commentary. Keep it concise and high-signal; preserve the original intent and scope; do not add rules the section wasn't about.";
+    const sys = "You are a prompt engineer improving one section of a system prompt. Return ONLY the improved section text — no preamble, no markdown fences, no commentary. Keep it concise and high-signal; preserve the original intent and scope; do not add rules the section wasn't about. In particular, do NOT add rules about output format, JSON shape, file layout, or acceptance-check syntax — those live in fixed plumbing outside this section, and adding them here can contradict it.";
     const usr = `This section is ${SLICE_ROLE[name] || name}.\n\nImprove it (clarity, specificity, concision). Return only the replacement text.\n\nCURRENT:\n${current}`;
     const out = await chat(sys, usr, roleModel("spec"));
     return (out.text || "").trim();
@@ -168,12 +173,16 @@ const FabEngine = (() => {
     const streaming = !!onThink && (streamThink() || looksReasoning(modelOverride || cfg.model));
     const r = await fetch(url, {
       method: "POST", headers,
-      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: streaming, max_tokens: 6000,
+      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: streaming, max_tokens: 12000,
         messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
     });
     if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text().catch(() => "")).slice(0, 180)}`);
     if (streaming) return readStream(r, modelOverride || cfg.model, onThink);
     const j = await r.json();
+    // Truncated output must FAIL, not be repaired: "fixing" amputated JSON fabricates
+    // closing braces around missing code, and token checks could then pass on a broken
+    // app — the vacuous pass R14 forbids.
+    if (j?.choices?.[0]?.finish_reason === "length") throw new Error("model output was truncated (hit the token limit) — retrying may work; a model with longer output is more reliable");
     const msg = j?.choices?.[0]?.message || {};
     // Reasoning models (e.g. qwen3) sometimes return an empty `content` with the real
     // output in a reasoning/thinking field — fall back before failing.
@@ -188,7 +197,7 @@ const FabEngine = (() => {
   async function readStream(r, fallbackModel, onThink) {
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    let buf = "", content = "", reasoning = "", model = null;
+    let buf = "", content = "", reasoning = "", model = null, finish = null;
     const handleLine = (line) => {
       line = line.trim();
       if (!line.startsWith("data:")) return;
@@ -196,6 +205,7 @@ const FabEngine = (() => {
       if (!data || data === "[DONE]") return;
       let j; try { j = JSON.parse(data); } catch (_) { return; }
       model = model || j.model;
+      if (j.choices && j.choices[0] && j.choices[0].finish_reason) finish = j.choices[0].finish_reason;
       const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
       const rc = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
       if (rc) { reasoning += rc; try { onThink("reasoning", rc); } catch (_) { /* UI hook must not break the run */ } }
@@ -209,6 +219,7 @@ const FabEngine = (() => {
       while ((nl = buf.indexOf("\n")) >= 0) { handleLine(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
     }
     if (buf) handleLine(buf); // flush a final line that arrived without a trailing newline
+    if (finish === "length") throw new Error("model output was truncated (hit the token limit) — retrying may work; a model with longer output is more reliable");
     const text = content || reasoning;
     if (!text) throw new Error("LLM stream produced no content");
     return { text, model: model || fallbackModel };
@@ -248,15 +259,18 @@ const FabEngine = (() => {
  "assumptions":["..."],
  "open_questions":[{"q":"<the decision to make>","options":["<answer choice>","<another choice>"],"suggested":"<the recommended choice — must exactly match one option>","why":"<one-line reason>"}]}`;
   const SPEC_RULES = `Rules:
-- Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
+- Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools, and NO
+  network calls (no fetch/XHR/CDN) — data must be bundled in the files or supplied by the user.
 - Each "desc" is plain English a non-technical user understands. Each "check" is a JavaScript EXPRESSION
-  prefixed "js:", returning true when satisfied. Two variables are available: \`all\` (every file's contents
-  concatenated) and \`files\` (a map of path -> contents).
+  prefixed "js:", returning true when satisfied. Checks see ONLY the static file text — the app is never
+  executed: no DOM (no document/window), no calling the app's functions. Two variables exist: \`all\`
+  (every file's contents concatenated) and \`files\` (a map of path -> contents).
   Use \`all\` for content tokens — WHERE code lives is the coder's choice, never the contract:
-  "js:all.includes('id=\\"add-btn\\"')" · "js:/localStorage/.test(all)". Use \`files\` ONLY when the
+  "js:all.includes('add-btn')" · "js:/localstorage/i.test(all)". Use \`files\` ONLY when the
   path itself matters: "js:!!files['app/index.html']" (the entry file must exist).
-- 2 to 4 criteria that GENUINELY verify the request. Assert the smallest stable token (an id= or function
-  name), never a whole tag with attributes; never over-constrain the design or the file layout.
+- 2 to 4 criteria that GENUINELY verify the request. Assert the smallest stable token (a bare id or
+  function name — never a whole tag, attribute syntax, or quoting style; prefer case-insensitive
+  regex for API names); never over-constrain the design or the file layout.
 - Each open_question is an object with 2 to 4 concrete "options", a "suggested" one (matching an option
   exactly), and a one-line "why" — so the human can pick or override, never just an open-ended question.`;
   // Fallback shape: the original flat schema — far easier for small models to emit.
@@ -266,9 +280,10 @@ const FabEngine = (() => {
  "acceptance":[{"id":"a1-<slug>","check":"js:<expression>"}, ...],
  "assumptions":["..."],"open_questions":["..."]}`;
   const SPEC_RULES_MIN = `Rules:
-- Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
-- Each check is a JavaScript EXPRESSION prefixed "js:", returning true when satisfied. Prefer the
-  variable \`all\` (every file's contents concatenated): "js:all.includes('localStorage')". A map
+- Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools, no network calls.
+- Each check is a JavaScript EXPRESSION prefixed "js:", returning true when satisfied. Checks see ONLY
+  static file text — the app never runs (no document/window, no calling its functions). Prefer the
+  variable \`all\` (every file's contents concatenated): "js:/localstorage/i.test(all)". A map
   \`files\` (path -> contents) also exists — use it only when the path matters: "js:!!files['app/index.html']".
 - 2 to 4 checks that GENUINELY verify the request; assert the smallest stable token.`;
 
@@ -323,7 +338,7 @@ const FabEngine = (() => {
   // output shape as authorSpec; the model sees the prior spec + the human's ask.
   async function reauthorSpec(intent, prevSpec, feedback, onThink) {
     return askSpec(
-      "Revise the spec below per the human's feedback. Keep criteria that still apply unchanged; add or modify only what the feedback requires. Respond with ONLY the updated JSON object, same shape:",
+      "Revise the spec below per the human's feedback. Keep the MEANING of criteria that still apply, but bring every check up to the rules below (e.g. rewrite checks pinned to a specific file path to use `all`); DROP checks for anything the feedback removed. Respond with ONLY the updated JSON object, same shape:",
       `ORIGINAL USER REQUEST:\n${intent}\n\nCURRENT SPEC:\n${JSON.stringify(prevSpec, null, 2)}\n\nHUMAN FEEDBACK (apply this):\n${feedback || "(no free-text feedback — tighten/clarify the spec while preserving intent)"}`,
       onThink);
   }
@@ -334,7 +349,7 @@ const FabEngine = (() => {
 
   function taskBlock(spec, intent) {
     const checks = (spec.acceptance || []).map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}`).join("\n");
-    return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions; \`all\` = every file concatenated, \`files\` = path->contents map — your files MUST make each return true):\n${checks}`;
+    return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions; \`all\` = every file concatenated, \`files\` = path->contents map — your files MUST make each return true):\n${checks}\nUse the EXACT ids/tokens the checks assert — matching is case-sensitive unless the check itself is a case-insensitive regex.`;
   }
 
   // Coder system prompt = shared slice + coder slice, read LIVE per call (see slice()).
@@ -345,7 +360,9 @@ const FabEngine = (() => {
     return norm;
   }
   function dumpFiles(files) {
-    return Object.entries(files).map(([p, c]) => `--- ${p} ---\n${c}`).join("\n\n").slice(0, 24000);
+    const dump = Object.entries(files).map(([p, c]) => `--- ${p} ---\n${c}`).join("\n\n");
+    // Never truncate silently: the coder must know it can't see everything it must preserve.
+    return dump.length <= 24000 ? dump : dump.slice(0, 24000) + "\n\n[TRUNCATED — the dump exceeds the size limit; files or content not shown above STILL EXIST and must be preserved unchanged in your output]";
   }
 
   // The revision prompt: current files + the checks that FAILED, asking for a complete
@@ -386,7 +403,7 @@ const FabEngine = (() => {
     } else {
       onEvent("🤖", "coder: generating the app (in-tab LLM call)");
       const coder = await chatJson(sys,
-        `${tb}\n\nEvery path starts with "app/". Include every file the app references. Use the EXACT ids/tokens the checks assert.\n${FILES_SHAPE}`, roleModel("coder"), onThink);
+        `${tb}\n\nEvery path starts with "app/". Include every file the app references.\n${FILES_SHAPE}`, roleModel("coder"), onThink);
       files = normalizeFiles(coder.obj.files);
       model = coder.model;
     }
@@ -453,5 +470,5 @@ const FabEngine = (() => {
   }
 
   return { PROVIDERS, suggestedModels, loadOpenRouterModels, llmConfig, saveLlmConfig, probe, chat, authorSpec, reauthorSpec, generate, runChecks,
-    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices, improveSlice, willStream };
+    loadShippedSlices, slice, sliceDefault, setSlice, exportSlices, importSlices, improveSlice, hasSliceOverrides, willStream };
 })();

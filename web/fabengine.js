@@ -250,10 +250,13 @@ const FabEngine = (() => {
   const SPEC_RULES = `Rules:
 - Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
 - Each "desc" is plain English a non-technical user understands. Each "check" is a JavaScript EXPRESSION
-  prefixed "js:", evaluated with a variable \`files\` (a map of path -> contents), returning true when satisfied.
-  Examples: "js:!!files['app/index.html']" · "js:files['app/index.html'].includes('id=\\"add-btn\\"')"
+  prefixed "js:", returning true when satisfied. Two variables are available: \`all\` (every file's contents
+  concatenated) and \`files\` (a map of path -> contents).
+  Use \`all\` for content tokens — WHERE code lives is the coder's choice, never the contract:
+  "js:all.includes('id=\\"add-btn\\"')" · "js:/localStorage/.test(all)". Use \`files\` ONLY when the
+  path itself matters: "js:!!files['app/index.html']" (the entry file must exist).
 - 2 to 4 criteria that GENUINELY verify the request. Assert the smallest stable token (an id= or function
-  name), never a whole tag with attributes; never over-constrain the design.
+  name), never a whole tag with attributes; never over-constrain the design or the file layout.
 - Each open_question is an object with 2 to 4 concrete "options", a "suggested" one (matching an option
   exactly), and a one-line "why" — so the human can pick or override, never just an open-ended question.`;
   // Fallback shape: the original flat schema — far easier for small models to emit.
@@ -264,8 +267,9 @@ const FabEngine = (() => {
  "assumptions":["..."],"open_questions":["..."]}`;
   const SPEC_RULES_MIN = `Rules:
 - Pure client-side HTML/CSS/JS under app/ (entry app/index.html). No servers, no build tools.
-- Each check is a JavaScript EXPRESSION prefixed "js:", evaluated with a variable \`files\`
-  (a map of path -> contents), returning true when satisfied.
+- Each check is a JavaScript EXPRESSION prefixed "js:", returning true when satisfied. Prefer the
+  variable \`all\` (every file's contents concatenated): "js:all.includes('localStorage')". A map
+  \`files\` (path -> contents) also exists — use it only when the path matters: "js:!!files['app/index.html']".
 - 2 to 4 checks that GENUINELY verify the request; assert the smallest stable token.`;
 
   // Lenient normalization: only the contract (>=1 js: acceptance check) is load-bearing —
@@ -330,7 +334,7 @@ const FabEngine = (() => {
 
   function taskBlock(spec, intent) {
     const checks = (spec.acceptance || []).map((c, i) => `  ${i + 1}. [${c.id}] ${c.check}`).join("\n");
-    return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions over a files map — your files MUST make each return true):\n${checks}`;
+    return `TASK: ${intent}\nTARGET: pure client-side web app under app/ (entry app/index.html; inline or local js/css only).\nACCEPTANCE (js: expressions; \`all\` = every file concatenated, \`files\` = path->contents map — your files MUST make each return true):\n${checks}`;
   }
 
   // Coder system prompt = shared slice + coder slice, read LIVE per call (see slice()).
@@ -407,7 +411,11 @@ const FabEngine = (() => {
     window.onmessage = function (e) {
       var d = e.data || {};
       var passed = false, detail = "";
-      try { passed = !!Function("files", '"use strict"; return (' + d.expr + ');')(d.files); }
+      // \`all\` = every file's contents concatenated — lets checks assert WHAT the app
+      // contains without over-constraining WHERE the coder put it (file layout is the
+      // coder's choice; only assert a specific path when location genuinely matters).
+      var all = Object.keys(d.files || {}).map(function (k) { return d.files[k]; }).join("\\n");
+      try { passed = !!Function("files", "all", '"use strict"; return (' + d.expr + ');')(d.files, all); }
       catch (err) { detail = String((err && err.message) || err); }
       e.source.postMessage({ __fabcheck: d.id, passed: passed, detail: detail }, "*");
     };

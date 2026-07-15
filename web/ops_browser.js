@@ -93,7 +93,11 @@ const OpsBrowser = (() => {
   }
 
   // ---- the run pipeline (async; UI polls events + status) ----
-  async function startRun({ intent, gate, mode, parent }) {
+  // `revise` (optional, from /feedback): {spec, files, note} of the parent run — the
+  // brownfield path. The spec is REVISED (not re-authored) and the coder EVOLVES the
+  // existing files (not regenerate). Only the parent's LATEST state is carried, never
+  // the version history, so context stays bounded no matter how many refine cycles.
+  async function startRun({ intent, gate, mode, parent, revise }) {
     if (!(await FabCrypto.ed25519Supported())) throw new Error("this browser lacks WebCrypto Ed25519 — signing would be fake, refusing (use a current Chrome/Safari/Firefox)");
     const slug = intent.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "app";
     const version = parent ? parent.version + 1 : 1;
@@ -104,14 +108,22 @@ const OpsBrowser = (() => {
       forge_name: "browser", status: "running", events: [], files: null, attestation: null,
       acceptance: [], acceptance_passed: false, accepted: false, merged: false,
       spec: null, created: new Date().toISOString(), parent_run: parent ? parent.run_id : null,
+      revision_note: revise ? revise.note : null,
     };
     LIVE.set(run_id, rec);
     (async () => {
       try {
-        ev(rec, "📥", `NL intent received → "${intent.slice(0, 90)}"`);
-        rec.spec = await FabEngine.authorSpec(intent, mkThink(rec));
+        if (revise && revise.spec) {
+          ev(rec, "📥", `revision requested → "${(revise.note || "").slice(0, 90)}"`);
+          rec.spec = await FabEngine.reauthorSpec(intent, revise.spec, revise.note || "", mkThink(rec));
+          ev(rec, "🧾", `spec revised from v${parent.version} (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria`);
+        } else {
+          ev(rec, "📥", `NL intent received → "${intent.slice(0, 90)}"`);
+          rec.spec = await FabEngine.authorSpec(intent, mkThink(rec));
+          ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
+        }
         rec.spec_ref = `${rec.spec.id || slug}#v${version}`;
-        ev(rec, "🧾", `spec authored in-browser (${rec.spec.model}) → ${(rec.spec.acceptance || []).length} acceptance criteria (js: checks)`);
+        if (rec.spec.degraded) ev(rec, "⚠️", "model struggled with the rich spec format — fell back to the simple format (contract unchanged; summary/descriptions omitted)");
         if ((rec.spec.open_questions || []).length) ev(rec, "  ", `open questions surfaced to human: ${rec.spec.open_questions.map((q) => typeof q === "string" ? q : q.q).join("; ")}`);
         if (specPause()) {
           // Human-in-the-loop: stop here so the human can edit the spec/criteria or
@@ -121,7 +133,7 @@ const OpsBrowser = (() => {
           await putRun(rec); LIVE.set(run_id, rec);
           return;
         }
-        await buildFromSpec(rec, intent);
+        await buildFromSpec(rec, buildIntent(rec), revise && revise.files);
       } catch (e) {
         rec.status = "failed"; ev(rec, "✖", `spec authoring failed: ${e.message}`);
         await putRun(rec); LIVE.delete(run_id); LIVE.set(run_id, rec);
@@ -129,14 +141,22 @@ const OpsBrowser = (() => {
     })();
     return { run_id };
   }
+  // The coder's task text: the CLEAN intent plus only the CURRENT revision note (notes
+  // are never accumulated across versions — rec.intent stays the original ask).
+  function buildIntent(rec) {
+    return rec.revision_note ? `${rec.intent}\n\nRevision requested by the human: ${rec.revision_note}` : rec.intent;
+  }
 
   // Build phase: generate → run the acceptance contract → sign/gate, with auto-retry.
   // Retries RE-GENERATE code against the SAME (possibly human-edited) spec — the honest
   // self-correction is fixing the code to meet a fixed contract, not moving the goalposts.
-  async function buildFromSpec(rec, intent) {
+  async function buildFromSpec(rec, intent, seedFiles) {
     const run_id = rec.run_id;
     const maxAttempts = 1 + retries(); // e.g. retries()=2 → up to 3 attempts
-    let prior = null; // {files, failed} from the previous cycle — fed forward so a retry revises, not regenerates blind
+    // {files, failed} fed into each generate: seeded with the parent version's files on a
+    // brownfield refine (evolve, don't regenerate); replaced by the previous cycle's
+    // files+failures on retry so a retry revises, not regenerates blind.
+    let prior = seedFiles ? { files: seedFiles, failed: [] } : null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         rec.files = null; rec.acceptance = []; rec.acceptance_passed = false; rec.attestation = null; rec.status = "running";
@@ -202,8 +222,10 @@ const OpsBrowser = (() => {
     rec.status = "running";
     await putRun(rec); LIVE.set(id, rec);
     // Pass the decisions to the coder by augmenting the build task (not stored in intent).
-    const buildIntent = decBlock ? `${rec.intent}\n\n${decBlock}` : rec.intent;
-    buildFromSpec(rec, buildIntent); // fire-and-forget; UI resumes polling
+    const task = decBlock ? `${buildIntent(rec)}\n\n${decBlock}` : buildIntent(rec);
+    // A refine run that paused here still evolves its parent's files (brownfield).
+    const parentRec = rec.parent_run ? await loadRec(rec.parent_run) : null;
+    buildFromSpec(rec, task, parentRec && parentRec.files); // fire-and-forget; UI resumes polling
     return { run_id: id, status: "running" };
   }
   // How many auto-retries on failure (Settings; default 2).
@@ -322,7 +344,14 @@ const OpsBrowser = (() => {
     if (seg[1] === "runs" && seg[3] === "verify") { const rep = await reproduce(seg[2]); const r = await loadRec(seg[2]); return { conformant: rep.reproducible, accepted: r.accepted, checks: rep.checks.map((c, i) => ({ id: `c${i + 1}`, passed: c.passed, detail: c.check })) }; }
     if (seg[1] === "runs" && seg[3] === "launch") { const r = await loadRec(seg[2]); return { kind: "web-sandbox", html: buildAppHtml(r) }; }
     if (seg[1] === "runs" && seg[3] === "stop") return { stopped: true }; // blob apps have no process
-    if (seg[1] === "runs" && seg[3] === "feedback") { const prior = await loadRec(seg[2]); return startRun({ intent: `${prior.intent}\n\nRevision requested by the human: ${body.note}`, gate: prior.gate, mode: body.mode || prior.mode, parent: prior }); }
+    if (seg[1] === "runs" && seg[3] === "feedback") {
+      const prior = await loadRec(seg[2]);
+      // Brownfield refine: carry the parent's spec + files so the revision EVOLVES the
+      // existing app. If the parent died before producing them, fall back to a fresh
+      // run with the note folded into the intent (the only state that exists).
+      if (prior.spec && prior.files) return startRun({ intent: prior.intent, gate: prior.gate, mode: body.mode || prior.mode, parent: prior, revise: { spec: prior.spec, files: prior.files, note: body.note } });
+      return startRun({ intent: `${prior.intent}\n\nRevision requested by the human: ${body.note}`, gate: prior.gate, mode: body.mode || prior.mode, parent: prior });
+    }
     if (seg[1] === "runs" && seg[3] === "promote") { const d = await loadRec(seg[2]); if (!d.acceptance_passed) throw new Error("draft failed acceptance — no vacuous promotion"); return startRun({ intent: d.intent, gate: d.gate, mode: "release", parent: { run_id: d.run_id, version: d.version - 1 } }); }
     if (seg[1] === "runs" && seg[3] === "exec") CAP("running sandbox commands");
     if (seg[1] === "runs" && seg[3] === "audit") CAP("the git audit trail");

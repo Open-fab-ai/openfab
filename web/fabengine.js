@@ -163,7 +163,11 @@ const FabEngine = (() => {
     return [c.model, c.specModel, c.coderModel].some(looksReasoning);
   }
 
-  async function chat(system, user, modelOverride, onThink) {
+  // Default output budget. Large apps can exceed it — callers may pass a higher
+  // maxTokens on retry AFTER a truncation (the model already proved it can emit the
+  // default, so asking for more is safe; asking blindly could exceed a small model's cap).
+  const MAX_TOKENS_DEFAULT = 12000;
+  async function chat(system, user, modelOverride, onThink, maxTokens) {
     const cfg = llmConfig();
     if (!cfg || !cfg.baseUrl || !cfg.model) throw new Error("no LLM configured — open ⚙ Settings and set a provider, key and model");
     const url = cfg.baseUrl.replace(/\/+$/, "") + "/chat/completions";
@@ -173,7 +177,7 @@ const FabEngine = (() => {
     const streaming = !!onThink && (streamThink() || looksReasoning(modelOverride || cfg.model));
     const r = await fetch(url, {
       method: "POST", headers,
-      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: streaming, max_tokens: 12000,
+      body: JSON.stringify({ model: modelOverride || cfg.model, temperature: 0, stream: streaming, max_tokens: maxTokens || MAX_TOKENS_DEFAULT,
         messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
     });
     if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text().catch(() => "")).slice(0, 180)}`);
@@ -239,12 +243,12 @@ const FabEngine = (() => {
 
   // Parse, or ask the model once to re-emit as strict JSON (models occasionally wrap or
   // truncate). A second failure throws — we never fabricate a result (R14).
-  async function chatJson(system, user, modelOverride, onThink) {
-    const first = await chat(system, user, modelOverride, onThink);
+  async function chatJson(system, user, modelOverride, onThink, maxTokens) {
+    const first = await chat(system, user, modelOverride, onThink, maxTokens);
     try { return { obj: parseJson(first.text), model: first.model }; }
     catch (_) {
       const retry = await chat("Return ONLY the corrected JSON object — no prose, no code fences, no <think> blocks.",
-        `The following was supposed to be a single JSON object but did not parse. Re-emit it as strict, complete JSON:\n\n${first.text.slice(0, 12000)}`, modelOverride);
+        `The following was supposed to be a single JSON object but did not parse. Re-emit it as strict, complete JSON:\n\n${first.text.slice(0, 12000)}`, modelOverride, null, maxTokens);
       return { obj: parseJson(retry.text), model: first.model };
     }
   }
@@ -381,14 +385,16 @@ const FabEngine = (() => {
   // the revise is grounded in the actual failing checks, not a model's opinion).
   // `prior` (optional) carries the PREVIOUS retry cycle's {files, failed} so a retry revises
   // that attempt instead of regenerating blind — the failures are fed forward across cycles.
-  async function generate(spec, intent, onEvent, onThink, prior) {
+  // `maxTokens` (optional): a raised output budget — used by the retry loop after a
+  // truncation failure, since repeating with the same cap would just truncate again.
+  async function generate(spec, intent, onEvent, onThink, prior, maxTokens) {
     await loadShippedSlices();
     const sys = coderSys(); // live slice; frozen for both passes of this one run
     const tb = taskBlock(spec, intent);
     let files, model;
     if (prior && prior.files && (prior.failed || []).length) {
       onEvent("🔧", `coder: revising the previous attempt — feeding back ${prior.failed.length} failed check(s)`);
-      const rev = await chatJson(sys, revisePrompt(tb, prior.files, prior.failed), roleModel("coder"), onThink);
+      const rev = await chatJson(sys, revisePrompt(tb, prior.files, prior.failed), roleModel("coder"), onThink, maxTokens);
       files = normalizeFiles(rev.obj.files && Object.keys(rev.obj.files).length ? rev.obj.files : prior.files);
       model = rev.model;
     } else if (prior && prior.files) {
@@ -397,13 +403,13 @@ const FabEngine = (() => {
       onEvent("🔧", "coder: modifying the existing app to meet the revised spec");
       const rev = await chatJson(sys,
         `${tb}\n\nEXISTING FILES (the current working app — evolve these, do not start over):\n${dumpFiles(prior.files)}\n\nMake the SMALLEST change to the existing files that satisfies EVERY acceptance check above; keep working behavior intact. Return the COMPLETE updated file set. ${FILES_SHAPE}`,
-        roleModel("coder"), onThink);
+        roleModel("coder"), onThink, maxTokens);
       files = normalizeFiles(rev.obj.files && Object.keys(rev.obj.files).length ? rev.obj.files : prior.files);
       model = rev.model;
     } else {
       onEvent("🤖", "coder: generating the app (in-tab LLM call)");
       const coder = await chatJson(sys,
-        `${tb}\n\nEvery path starts with "app/". Include every file the app references.\n${FILES_SHAPE}`, roleModel("coder"), onThink);
+        `${tb}\n\nEvery path starts with "app/". Include every file the app references.\n${FILES_SHAPE}`, roleModel("coder"), onThink, maxTokens);
       files = normalizeFiles(coder.obj.files);
       model = coder.model;
     }
@@ -412,7 +418,7 @@ const FabEngine = (() => {
     const failed = (await runChecks(spec, files)).filter((c) => !c.passed);
     if (failed.length) {
       onEvent("🔧", `coder: ${failed.length} acceptance check(s) failed — one revision pass`);
-      const rev = await chatJson(sys, revisePrompt(tb, files, failed), roleModel("coder"), onThink);
+      const rev = await chatJson(sys, revisePrompt(tb, files, failed), roleModel("coder"), onThink, maxTokens);
       if (rev.obj.files && Object.keys(rev.obj.files).length) files = normalizeFiles(rev.obj.files);
     }
     return { files, model, prompt: tb };

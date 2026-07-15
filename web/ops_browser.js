@@ -38,6 +38,12 @@ const OpsBrowser = (() => {
     rec.events.push({ seq: rec.events.length + 1, icon, msg, t: new Date().toISOString().slice(11, 19) });
   }
 
+  // On failure, remind the user when CUSTOM agent guidance is active: an edited slice can
+  // introduce contradictions the shipped defaults don't have, and Reset is the one-click test.
+  function hintIfCustomGuidance(rec) {
+    if (FabEngine.hasSliceOverrides()) ev(rec, "  ", "custom agent guidance is active — if failures persist, Reset to default in Settings → Agent guidance to rule it out");
+  }
+
   // "Show model thinking": returns an onThink(kind, piece) that accumulates the model's
   // REASONING deltas into rec.thinking (live, capped) for the UI to poll. Content deltas
   // (the JSON answer) are skipped — only the reasoning trace is human-useful here. Resets
@@ -136,6 +142,7 @@ const OpsBrowser = (() => {
         await buildFromSpec(rec, buildIntent(rec), revise && revise.files);
       } catch (e) {
         rec.status = "failed"; ev(rec, "✖", `spec authoring failed: ${e.message}`);
+        hintIfCustomGuidance(rec);
         await putRun(rec); LIVE.delete(run_id); LIVE.set(run_id, rec);
       }
     })();
@@ -182,9 +189,11 @@ const OpsBrowser = (() => {
         prior = { files: rec.files, failed: rec.acceptance.filter((c) => !c.passed) };
         if (attempt < maxAttempts) { ev(rec, "🔁", `acceptance did not pass — auto-retrying with the failures fed back (${attempt}/${maxAttempts - 1})`); continue; }
         ev(rec, "⛔", `acceptance still failing after ${maxAttempts} attempt(s) — honest failure, not a vacuous pass`);
+        hintIfCustomGuidance(rec);
       } catch (e) {
         if (attempt < maxAttempts) { ev(rec, "🔁", `attempt failed (${e.message}) — auto-retrying (${attempt}/${maxAttempts - 1})`); await putRun(rec); continue; }
         rec.status = "failed"; ev(rec, "✖", `run failed after ${maxAttempts} attempt(s): ${e.message}`);
+        hintIfCustomGuidance(rec);
       }
       break;
     }
@@ -193,7 +202,7 @@ const OpsBrowser = (() => {
 
   // Resume a run paused at awaiting-spec: accept the human's edited spec ("continue"),
   // or ask the model to re-author it from feedback ("regenerate", re-pauses for review).
-  async function reviseSpec(id, { action, spec, feedback, decisions }) {
+  async function reviseSpec(id, { action, spec, feedback, decisions, overridden }) {
     const rec = await loadRec(id);
     if (!rec) { const e = new Error("run not found"); e.status = 404; throw e; }
     if (rec.status !== "awaiting-spec") throw new Error("run is not awaiting spec review");
@@ -218,6 +227,16 @@ const OpsBrowser = (() => {
     }
     if (!rec.spec.acceptance || !rec.spec.acceptance.length) throw new Error("a spec needs at least one acceptance criterion");
     if (decLines.length) rec.spec.decisions = decLines; // record the human's choices in the signed spec
+    if (overridden && decLines.length) {
+      // The checks were authored assuming the model's SUGGESTED answers. The human chose
+      // differently, so the frozen checks may now contradict the decisions (e.g. a check
+      // demanding the localStorage token after the human picked IndexedDB) — re-author
+      // the checks to match before building, or the run is unwinnable.
+      ev(rec, "✏️", "a decision differs from the model's suggestion — re-authoring the checks to match");
+      rec.spec = await FabEngine.reauthorSpec(rec.intent, rec.spec, decBlock, mkThink(rec));
+      rec.spec.decisions = decLines; rec.spec.open_questions = []; rec.spec.assumptions = [];
+      ev(rec, "🧾", `checks updated for the chosen decisions → ${(rec.spec.acceptance || []).length} acceptance criteria`);
+    }
     ev(rec, "👤", `human approved the spec${decLines.length ? ` with ${decLines.length} decision(s)` : ""} — proceeding to code generation`);
     rec.status = "running";
     await putRun(rec); LIVE.set(id, rec);

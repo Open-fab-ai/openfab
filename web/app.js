@@ -416,7 +416,7 @@ function specOqItem(q, i) {
     const sug = o === q.suggested;
     return `<label class="oqopt"><input type="radio" name="oq${i}" value="${escapeHtml(o)}"${sug ? " checked" : ""}/> ${escapeHtml(o)}${sug ? ' <span class="muted">(suggested)</span>' : ""}</label>`;
   }).join("");
-  return `<div class="oqitem" data-q="${escapeHtml(q.q || "")}">
+  return `<div class="oqitem" data-q="${escapeHtml(q.q || "")}" data-suggested="${escapeHtml(q.suggested || "")}">
     <div class="oqq">${escapeHtml(q.q || "")}</div>
     <div class="oqopts">${radios}
       <label class="oqopt"><input type="radio" name="oq${i}" value="__other"/> other: <input class="oqother" type="text" placeholder="your answer" /></label>
@@ -433,6 +433,15 @@ function collectDecisions() {
     const ans = picked.value === "__other" ? (it.querySelector(".oqother")?.value.trim() || "") : picked.value;
     return ans ? `${q} → ${ans}` : null;
   }).filter(Boolean);
+}
+// True when the human picked something OTHER than the model's suggestion for any
+// question. The checks were authored assuming the suggestions, so an override means
+// they may no longer match the decision — the backend re-authors them on continue.
+function decisionsOverridden() {
+  return [...document.querySelectorAll("#specoq .oqitem")].some((it) => {
+    const picked = it.querySelector("input[type=radio]:checked");
+    return picked && picked.value !== (it.dataset.suggested || "");
+  });
 }
 // One editable criterion: plain-English description up front; the js: machine
 // check (what actually runs + gets signed) tucked into an advanced disclosure.
@@ -458,14 +467,25 @@ async function submitSpecReview(action) {
       return;
     }
     // continue: collect the edited summary + criteria rows (desc + machine check)
-    const acceptance = [...document.querySelectorAll("#speccrit .critrow")].map((r, i) => {
+    const rows = [...document.querySelectorAll("#speccrit .critrow")].map((r, i) => {
       const desc = r.querySelector(".critdesc").value.trim();
       let check = r.querySelector(".critcheck").value.trim();
       if (check && !check.startsWith("js:")) check = "js:" + check;
       return { id: `a${i + 1}`, desc, check };
-    }).filter((c) => c.check); // a criterion needs a machine check to be enforceable
+    });
+    // Never silently drop a criterion the human described but gave no machine check —
+    // that would sign a contract missing something they asked for.
+    const orphan = rows.find((c) => c.desc && !c.check);
+    if (orphan) { st.textContent = `“${orphan.desc.slice(0, 60)}” has no machine check — open its “machine check” row and add one, or clear the description.`; btns.forEach((b) => b && (b.disabled = false)); return; }
+    const acceptance = rows.filter((c) => c.check);
     if (!acceptance.length) { st.textContent = "each criterion needs a machine check (open “machine check”). Add one or Regenerate."; btns.forEach((b) => b && (b.disabled = false)); return; }
-    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { summary: $("#specsummary").value.trim(), acceptance }, decisions });
+    // Syntax dry-run (compile only, never executed): a typo'd check would be unwinnable
+    // for the coder — catch it here while the human can still fix it.
+    for (const c of acceptance) {
+      try { new Function("files", "all", `"use strict"; return (${c.check.slice(3)});`); }
+      catch (err) { st.textContent = `check for “${(c.desc || c.id).slice(0, 50)}” isn't valid JavaScript: ${err.message}`; btns.forEach((b) => b && (b.disabled = false)); return; }
+    }
+    await api("POST", `/api/runs/${STATE.runId}/spec`, { action: "continue", spec: { summary: $("#specsummary").value.trim(), acceptance }, decisions, overridden: decisionsOverridden() });
     // clear the review editor — the workflow resumes; the user watches it live.
     const pd = $("#phasedetail");
     pd.innerHTML = `<div class="ph-h">⚙️ Generating from the approved spec <span class="muted" style="font-weight:400">· elapsed <span id="genelapsed" class="mono">0s</span></span></div><div class="muted">Your decisions were passed to the coder. Watch the live workflow above; click any step to inspect what it produced.</div>`;

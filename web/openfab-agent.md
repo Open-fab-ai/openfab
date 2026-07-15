@@ -15,13 +15,18 @@
 >
 > **Where the live copy lives.** In **server/CLI mode** the program reads this
 > file directly. In **browser mode** the browser sandbox cannot read local
-> files, so the slices are seeded into **Settings → Agent guidance**
-> (localStorage) on first run; your edits there override the defaults for your
-> runs only. *Reset to default* re-pulls the shipped slices; export/import moves
-> them between browsers.
+> files, so the app fetches the deployed copy of this file and shows its slices
+> in **Settings → Agent guidance**; edits you save there (localStorage) override
+> the defaults for your runs only. *Reset to default* restores the shipped
+> slices; export/import moves them between browsers.
 >
-> **Keep it living.** When a decision is made or an assumption discovered,
-> update the relevant slice so it stays the ground truth.
+> **Keep it living — but keep it consistent.** When a decision is made or an
+> assumption discovered, update the relevant slice so it stays the ground truth.
+> The one invariant when editing: **the acceptance contract specifies WHAT the
+> app does; each agent chooses HOW.** Never let one slice (or a check) constrain
+> another agent's implementation choices — file layout, naming, structure —
+> or the agents can end up with jointly unsatisfiable instructions and runs
+> that fail every retry.
 
 ---
 
@@ -78,7 +83,8 @@ stating them to the LLM would waste tokens without changing its output.
 
 **How the fab enforces the draft into something trustworthy.**
 - Acceptance criteria are **executed** in an opaque-origin sandbox iframe — not
-  eyeballed — so a vacuous "it passed" is impossible.
+  eyeballed. A pass means those checks genuinely ran and returned true against
+  the exact files; it does not prove more than the checks themselves assert.
 - The result is bound into a signed **`openfab/generation` attestation**
   (AI-BOM): model, prompt fingerprint, acceptance contract, artifact digests.
 - An **N-of-M human sign-off** gate stands between "checks passed" and "merged"

@@ -2,6 +2,9 @@
 
 **An open-source software fab: natural language in, trustworthy software out.**
 
+> ### 🚀 [**Try it live — app.open-fab.ai**](https://app.open-fab.ai) &nbsp;·&nbsp; 🌐 [**Website — open-fab.ai**](https://open-fab.ai)
+> The live demo runs the whole fab **in your browser** — spec → code → executed acceptance checks → signed in-toto attestation → N-of-M sign-off. No install; bring any OpenAI-compatible API key (e.g. OpenRouter).
+
 OpenFab takes a natural-language spec and produces a working software product where
 **every artifact carries a reproducible build + signed provenance + AI/Human
 attribution** — running on a **swappable agent base** and a **swappable forge**, under
@@ -32,6 +35,8 @@ presentations:** [Open-fab-ai/community](https://github.com/Open-fab-ai/communit
 ---
 
 ## The OpenFab WebUI 
+
+**No-install version: [app.open-fab.ai](https://app.open-fab.ai)** — the same UI in browser mode (generation, real acceptance checks, signing, and verification all happen in your tab). To run it locally against the Rust server instead:
 
 ![OpenFab web UI — natural language in, trustworthy software out](docs/img/openfab-ui.png)
 

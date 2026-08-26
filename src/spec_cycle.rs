@@ -486,11 +486,16 @@ pub fn run_cycle(cfg: CycleConfig) -> Result<RunRecord> {
     let mut commit_paths: Vec<PathBuf> = changed_files.iter().map(|f| repo.join(&f.path)).collect();
     commit_paths.push(att_path.clone());
     commit_paths.push(sbom_path.clone());
+    // `Assisted-by` (kernel convention, adopted by OpenSSF TIs) rather than
+    // `Co-Authored-By`: AI assistance is disclosed without implying authorship —
+    // copyright requires human creative activity. The identifier matches the
+    // attestation's `agent.id`, so the trailer (declaration) and the signed
+    // predicate (evidence) can be cross-checked.
     let trailers = Trailers::new()
         .with("Spec", &spec.spec_ref())
         .with(
-            "Co-Authored-By",
-            &format!("openfab-agent ({}) <agent@open-fab.ai>", cfg.fab.did()),
+            "Assisted-by",
+            &crate::core::provenance::assisted_by_id(base.name(), &model),
         )
         .with("OpenFab-Base", base.name())
         .with("OpenFab-Attestation", &att.payload_sha256)

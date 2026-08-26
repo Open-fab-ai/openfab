@@ -86,8 +86,12 @@ const ForgePush = (() => {
       tree.push({ path: e.name, mode: "100644", type: "blob", sha: blob.sha });
     }
     const newTree = await gh(token, `${base}/git/trees`, "POST", { base_tree: baseCommit.tree.sha, tree });
+    // Assisted-by trailer (kernel convention): the human-readable declaration whose
+    // identifier matches the signed attestation's agent.id — declaration + evidence.
+    const agent = artifacts.attestation && artifacts.attestation.statement.predicate.agent;
+    const trailer = agent ? `\n\nAssisted-by: ${agent.id || `${agent.base}:${agent.model}`}\nOpenFab-Attestation: ${artifacts.attestation.payload_sha256}` : "";
     const commit = await gh(token, `${base}/git/commits`, "POST", {
-      message: message || `openfab: ${artifacts.run.spec_ref} — code + signed attestation (one commit)`,
+      message: (message || `openfab: ${artifacts.run.spec_ref} — code + signed attestation (one commit)`) + trailer,
       tree: newTree.sha, parents: [baseSha],
     });
     await gh(token, `${base}/git/refs/heads/${branch}`, "PATCH", { sha: commit.sha, force: false });

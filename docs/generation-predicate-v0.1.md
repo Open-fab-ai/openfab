@@ -1,4 +1,4 @@
-# OpenFab Generation Predicate — v0.1
+# OpenFab Generation Predicate — v0.1 (rev 0.1.1)
 
 **Predicate type URI:** `https://open-fab.ai/attestation/generation/v0.1`
 
@@ -8,6 +8,12 @@ human-readable + machine-readable definition of the predicate. This is that defi
 
 > **Status:** draft open standard. Intended to be proposed as a neutral in-toto/SLSA
 > predicate type under neutral, community governance — see `VALUE_PROPOSITION.md`.
+>
+> **rev 0.1.1 (additive, non-breaking):** aligns with the Linux-kernel / OpenSSF
+> `Assisted-by:` disclosure convention — adds optional `agent.id` + `agent.tools`,
+> a normative section on commit-trailer pairing, and a clarification that
+> `generated[].author` records generation origin, not legal authorship. Fields are
+> optional and omitted when absent, so v0.1 attestations verify unchanged.
 
 ---
 
@@ -47,10 +53,10 @@ envelope:
 |---|---|---|
 | `spec_ref` | string | the spec id + version this artifact fulfils, e.g. `my-app#v2` |
 | `builder` | `{id, base}` | the OpenFab build identity + base name |
-| `agent` | `{did, base, model}` | the agent identity (`did:key`), base, and **model** that generated the code |
+| `agent` | `{did, base, model, id?, tools?}` | the agent identity (`did:key`), base, and **model** that generated the code. `id` (rev 0.1.1, RECOMMENDED) is the canonical **`AGENT_NAME:MODEL_VERSION`** identifier per the Linux-kernel `Assisted-by:` convention adopted by OpenSSF TIs; `tools` (optional) lists tools the agent used |
 | `prompt_sha256` | hex | **sha256 fingerprint** of the generation prompt (the prompt *text* is deliberately NOT included — see below) |
 | `params` | object | generation parameters (base, model, …) |
-| `generated` | `[{path, lines, sha256, author}]` | per-file / per-range **human-vs-AI attribution** (`author` ∈ `"ai" \| "human"`) + content digest |
+| `generated` | `[{path, lines, sha256, author}]` | per-file / per-range **human-vs-AI attribution** (`author` ∈ `"ai" \| "human"`) + content digest. **Note:** `author` records *generation origin* — which process produced these bytes — not a claim of legal authorship or copyright (which requires human creative activity) |
 | `materials` | `[{uri, sha256?}]` | context/material inputs that fed generation |
 | `acceptance_passed` | bool | did the machine acceptance contract pass |
 | `acceptance` | `[{id, check, must_pass, passed}]` | the **frozen acceptance contract** — the exact shell checks, embedded so anyone can re-run them from a bare clone (forge-agnostic verify) |
@@ -63,7 +69,7 @@ envelope:
 {
   "spec_ref": "fee-round#v1",
   "builder": { "id": "openfab/0.1", "base": "codex-cli" },
-  "agent":   { "did": "did:key:z6MkuX…", "base": "codex-cli", "model": "gpt-5.5" },
+  "agent":   { "did": "did:key:z6MkuX…", "base": "codex-cli", "model": "gpt-5.5", "id": "codex-cli:gpt-5.5" },
   "prompt_sha256": "ab39…c1",
   "params": { "base": "codex-cli", "model": "gpt-5.5" },
   "generated": [
@@ -79,6 +85,30 @@ envelope:
   "signoffs": [ { "did": "did:key:z6Mkja…", "name": "alice", "timestamp": "2026-06-30T12:05:00Z" } ]
 }
 ```
+
+## Relationship to disclosure trailers (`Assisted-by:`)
+
+Commit-message trailers and this predicate are **complementary layers, not
+alternatives** — the same pairing as `Signed-off-by:` (the DCO declaration) and
+cryptographic commit signing (the proof):
+
+- The **trailer is the declaration**: human-readable, greppable, deployable by policy
+  alone — but self-attested. Nothing prevents it being wrong, absent, or lost in a
+  rebase/squash.
+- The **predicate is the evidence**: the same facts (and more — prompt fingerprint,
+  executed acceptance contract, per-range attribution, human sign-offs) as a signed
+  attestation bound to the artifact digests, verifiable offline by anyone.
+
+Normative guidance:
+
+- Implementations **SHOULD** emit an `Assisted-by: <agent.id>` trailer (Linux-kernel
+  convention: `AGENT_NAME:MODEL_VERSION`, optionally followed by `[tool1] [tool2]`)
+  in any commit containing AI-generated content covered by this predicate, with the
+  identifier **byte-identical** to the predicate's `agent.id`.
+- Implementations **SHOULD NOT** use `Co-authored-by:` for AI involvement — it implies
+  authorship, which copyright law reserves for human creative activity.
+- Verifiers **MAY** cross-check trailer vs. attestation: a mismatch, or a trailer with
+  no corresponding attestation where policy expects one, is itself a review signal.
 
 ## What is deliberately NOT in the predicate
 

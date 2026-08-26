@@ -79,7 +79,9 @@ const OpsBrowser = (() => {
       predicate: {
         spec_ref: rec.spec_ref,
         builder: { id: "openfab-web/0.1", base: "browser-swarm" },
-        agent: { did: fab.did, base: "browser-swarm", model },
+        // agent.id = the kernel-convention `Assisted-by` identifier (AGENT_NAME:MODEL_VERSION),
+        // so the commit trailer and this predicate share one vocabulary (spec v0.1.1).
+        agent: { did: fab.did, base: "browser-swarm", model, id: `browser-swarm:${model}` },
         prompt_sha256: await FabCrypto.sha256Hex(prompt),
         params: { base: "browser-swarm", mode: "browser" },
         generated, materials: [],

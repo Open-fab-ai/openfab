@@ -47,6 +47,20 @@ pub struct Agent {
     pub did: String,
     pub base: String,
     pub model: String,
+    /// Canonical `AGENT_NAME:MODEL_VERSION` identifier — the Linux-kernel `Assisted-by:`
+    /// convention (adopted by OpenSSF TIs), so the commit trailer and this predicate share
+    /// one vocabulary and can be cross-checked. Optional + omitted when absent so v0.1
+    /// attestations round-trip byte-identically (canonical-JSON signatures stay valid).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub id: Option<String>,
+    /// Tools the agent used during generation (the kernel convention's `[tool1] [tool2]`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tools: Option<Vec<String>>,
+}
+
+/// The kernel-convention `Assisted-by:` identifier for an agent base + model.
+pub fn assisted_by_id(base: &str, model: &str) -> String {
+    format!("{base}:{model}")
 }
 
 /// One file (or line range) and who authored it — the attribution unit.
@@ -168,8 +182,10 @@ impl Attestation {
             },
             agent: Agent {
                 did: input.agent_did,
+                id: Some(assisted_by_id(&input.base_name, &input.model)),
                 base: input.base_name,
                 model: input.model,
+                tools: None,
             },
             prompt_sha256: sha256_hex(input.prompt.as_bytes()),
             params: input.params,

@@ -102,9 +102,14 @@ cryptographic commit signing (the proof):
 Normative guidance:
 
 - Implementations **SHOULD** emit an `Assisted-by: <agent.id>` trailer (Linux-kernel
-  convention: `AGENT_NAME:MODEL_VERSION`, optionally followed by `[tool1] [tool2]`)
-  in any commit containing AI-generated content covered by this predicate, with the
-  identifier **byte-identical** to the predicate's `agent.id`.
+  convention: `AGENT_NAME:MODEL_VERSION`, optionally followed by a space-separated
+  list of specialized analysis tools the agent used — the predicate's `agent.tools`,
+  e.g. `Assisted-by: Claude:claude-3-opus coccinelle sparse`) in any commit containing
+  AI-generated content covered by this predicate, with the identifier **byte-identical**
+  to the predicate's `agent.id`.
+- When **multiple models** contributed to one change (e.g. one model authored the spec
+  and another generated the code), emit **one `Assisted-by:` line per distinct model**
+  — the kernel's multi-model rule.
 - Implementations **SHOULD NOT** use `Co-authored-by:` for AI involvement — it implies
   authorship, which copyright law reserves for human creative activity.
 - Verifiers **MAY** cross-check trailer vs. attestation: a mismatch, or a trailer with

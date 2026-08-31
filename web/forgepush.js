@@ -86,10 +86,21 @@ const ForgePush = (() => {
       tree.push({ path: e.name, mode: "100644", type: "blob", sha: blob.sha });
     }
     const newTree = await gh(token, `${base}/git/trees`, "POST", { base_tree: baseCommit.tree.sha, tree });
-    // Assisted-by trailer (kernel convention): the human-readable declaration whose
+    // Assisted-by trailers (kernel convention): the human-readable declaration whose
     // identifier matches the signed attestation's agent.id — declaration + evidence.
+    // One line PER DISTINCT MODEL (kernel rule): OpenFab's spec-author and coder can
+    // be different models, so both are disclosed. `agent.tools`, when present, becomes
+    // the kernel's optional space-separated tool list after the identifier.
     const agent = artifacts.attestation && artifacts.attestation.statement.predicate.agent;
-    const trailer = agent ? `\n\nAssisted-by: ${agent.id || `${agent.base}:${agent.model}`}\nOpenFab-Attestation: ${artifacts.attestation.payload_sha256}` : "";
+    let trailer = "";
+    if (agent) {
+      const lines = new Set();
+      const toolSuffix = Array.isArray(agent.tools) && agent.tools.length ? " " + agent.tools.join(" ") : "";
+      lines.add(`Assisted-by: ${agent.id || `${agent.base}:${agent.model}`}${toolSuffix}`);
+      const specModel = artifacts.spec && artifacts.spec.model;
+      if (specModel && specModel !== agent.model) lines.add(`Assisted-by: ${agent.base}:${specModel}`);
+      trailer = `\n\n${[...lines].join("\n")}\nOpenFab-Attestation: ${artifacts.attestation.payload_sha256}`;
+    }
     const commit = await gh(token, `${base}/git/commits`, "POST", {
       message: (message || `openfab: ${artifacts.run.spec_ref} — code + signed attestation (one commit)`) + trailer,
       tree: newTree.sha, parents: [baseSha],

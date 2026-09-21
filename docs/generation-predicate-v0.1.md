@@ -1,4 +1,4 @@
-# OpenFab Generation Predicate — v0.1 (rev 0.1.1)
+# OpenFab Generation Predicate — v0.1 (rev 0.1.2)
 
 **Predicate type URI:** `https://open-fab.ai/attestation/generation/v0.1`
 
@@ -14,6 +14,11 @@ human-readable + machine-readable definition of the predicate. This is that defi
 > a normative section on commit-trailer pairing, and a clarification that
 > `generated[].author` records generation origin, not legal authorship. Fields are
 > optional and omitted when absent, so v0.1 attestations verify unchanged.
+>
+> **rev 0.1.2 (additive, non-breaking):** hardens Verification — default verification
+> stops at signatures + digests + attribution; re-executing the embedded acceptance
+> contract is an explicit opt-in with normative isolation expectations; and a stated
+> non-guarantee: a valid signature over a check does not make it safe to run.
 
 ---
 
@@ -126,9 +131,29 @@ Normative guidance:
 
 ## Verification
 
-A verifier needs only the committed artifact (source + this attestation):
-1. recompute each `subject`/`generated` file `sha256` → integrity;
-2. verify the ed25519 `signatures` against their `keyid` (did:key) → authenticity;
-3. re-run the embedded `acceptance` checks → conformance.
+A verifier needs only the committed artifact (source + this attestation).
 
-Reference implementation: `openfab verify-file --att <path>` (no server, no forge API).
+**Default mode (attest-only) — steps 1–2, no execution:**
+1. recompute each `subject`/`generated` file `sha256` → integrity;
+2. verify the ed25519 `signatures` against their `keyid` (did:key) → authenticity, and
+   read authorship/attribution from the predicate. In this mode `acceptance_passed`
+   MUST be treated as the **producer's self-report**, not a verified property.
+
+**Opt-in mode (conformance) — step 3, explicit consent required:**
+3. re-run the embedded `acceptance` checks → conformance. Because the checks are
+   **producer-supplied executable content**, a conforming verifier:
+   - MUST NOT execute them without an explicit operator opt-in (a flag, not a default);
+   - SHOULD execute them in an isolated environment — no network unless the contract
+     declares it, a filesystem view limited to the artifact under verification, and
+     the least privilege available (container/VM/jail rather than the verifier's own
+     user where possible);
+   - MUST record which mode produced its verdict, and MUST NOT report an artifact as
+     "reproducible"/conformant unless the checks actually executed and passed.
+
+**Stated non-guarantee:** a valid signature over a check establishes that it is the
+check that was signed — it does **not** establish that the check is safe to run.
+Signature validity and digest integrity never imply execution safety.
+
+Reference implementation: `openfab verify-file --att <path>` verifies signatures +
+digests by default and reports the self-report; `--run-checks` opts in to executing
+the contract (rev 0.1.2).

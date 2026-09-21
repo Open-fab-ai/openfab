@@ -147,6 +147,13 @@ enum Cmd {
         att: PathBuf,
         #[arg(long)]
         policy: Option<PathBuf>,
+        /// Also EXECUTE the embedded acceptance checks (they run as your user via
+        /// `bash -c`). A valid signature proves a check is the one that was signed,
+        /// NOT that it is safe to run — opt in only for artifacts whose producer you
+        /// trust, ideally inside a container/VM. Default: verify signatures + digests
+        /// only and report the producer's acceptance_passed as a self-report.
+        #[arg(long)]
+        run_checks: bool,
     },
     /// Attest EXISTING files (no generation): sign + gate code your own AI factory already
     /// produced. Reads the files under the spec's target_dir, runs the acceptance contract,
@@ -258,7 +265,12 @@ pub fn run() -> Result<()> {
             policy,
         } => cmd_signoff(&repo, &run, &as_name, policy.as_deref()),
         Cmd::Verify { repo, run } => cmd_verify(&repo, &run),
-        Cmd::VerifyFile { repo, att, policy } => cmd_verify_file(&repo, &att, policy.as_deref()),
+        Cmd::VerifyFile {
+            repo,
+            att,
+            policy,
+            run_checks,
+        } => cmd_verify_file(&repo, &att, policy.as_deref(), run_checks),
         Cmd::Attest {
             spec,
             repo,
@@ -500,10 +512,15 @@ fn cmd_signoff(repo: &Path, run: &str, as_name: &str, policy_path: Option<&Path>
     Ok(())
 }
 
-fn cmd_verify_file(repo: &Path, att: &Path, policy_path: Option<&Path>) -> Result<()> {
+fn cmd_verify_file(
+    repo: &Path,
+    att: &Path,
+    policy_path: Option<&Path>,
+    run_checks: bool,
+) -> Result<()> {
     let repo = abs(repo)?;
     let policy = load_policy(policy_path)?;
-    let out = ops::reproduce_from_file(&repo, att, &policy)?;
+    let out = ops::reproduce_from_file(&repo, att, &policy, run_checks)?;
     println!("== openfab verify-file: {} ==", out.run_id);
     println!(
         "  signatures valid: {}    source bit-identical: {} ({} files)",
@@ -518,6 +535,20 @@ fn cmd_verify_file(repo: &Path, att: &Path, policy_path: Option<&Path>) -> Resul
             c.id,
             c.check
         );
+    }
+    if !out.checks_executed {
+        if !out.signature_valid || !out.source_identical {
+            bail!("verification FAILED (signature or digest mismatch)");
+        }
+        println!(
+            "  producer self-report: acceptance_passed = {} (NOT re-executed here)",
+            out.producer_acceptance_passed
+        );
+        println!("✅ attest-only verification passed: signatures valid, source bit-identical.");
+        println!("   To also re-execute the embedded acceptance contract in YOUR environment,");
+        println!("   re-run with --run-checks (checks run as your user; a valid signature does");
+        println!("   NOT make a check safe to run — prefer a container/VM for foreign artifacts).");
+        return Ok(());
     }
     if out.checks.is_empty() {
         println!(

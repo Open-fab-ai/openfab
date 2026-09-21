@@ -591,6 +591,12 @@ pub struct ReproduceOutcome {
     pub run_id: String,
     pub signature_valid: bool,
     pub source_identical: bool,
+    /// Whether the embedded acceptance contract was EXECUTED in this verification.
+    /// False = attest-only mode: signatures + digests were verified, and
+    /// `producer_acceptance_passed` is the producer's self-report, not our result.
+    pub checks_executed: bool,
+    /// The `acceptance_passed` claim inside the signed predicate (producer self-report).
+    pub producer_acceptance_passed: bool,
     pub all_acceptance_passed: bool,
     pub reproducible: bool,
     pub checks: Vec<ReproduceCheck>,
@@ -623,10 +629,11 @@ pub fn reproduce_from_file(
     repo: &Path,
     att_path: &Path,
     policy: &Policy,
+    execute_checks: bool,
 ) -> Result<ReproduceOutcome> {
     let att = Attestation::from_json(&std::fs::read_to_string(att_path)?)
         .with_context(|| format!("reading attestation {}", att_path.display()))?;
-    reproduce_from_attestation(repo, &att, policy)
+    reproduce_with_mode(repo, &att, policy, execute_checks)
 }
 
 /// The self-contained verification core. Everything it needs is inside `att`:
@@ -638,6 +645,23 @@ pub fn reproduce_from_attestation(
     repo: &Path,
     att: &Attestation,
     policy: &Policy,
+) -> Result<ReproduceOutcome> {
+    // Local-run path: the user is re-verifying an artifact THEIR fab produced and
+    // approved, in their own repo — executing the contract here is the point.
+    reproduce_with_mode(repo, att, policy, true)
+}
+
+/// Verification core with EXPLICIT execution consent. A signed check is producer
+/// input: the signature proves it is the check that was signed, NOT that it is safe
+/// to run. Default verification of a foreign artifact (`verify-file`) therefore stops
+/// at signatures + digests and reports the producer's `acceptance_passed` as a
+/// self-report; re-executing the contract is an explicit opt-in (`--run-checks`),
+/// ideally inside a container/VM. (Predicate spec rev 0.1.2, "Verification".)
+pub fn reproduce_with_mode(
+    repo: &Path,
+    att: &Attestation,
+    policy: &Policy,
+    execute_checks: bool,
 ) -> Result<ReproduceOutcome> {
     let signature_valid = att.verify_signatures().is_ok();
 
@@ -652,10 +676,16 @@ pub fn reproduce_from_attestation(
         }
     }
 
-    // Re-run the frozen contract embedded in the attestation.
+    // Re-run the frozen contract embedded in the attestation — only with consent.
     let mut checks = vec![];
     let mut all_passed = true;
-    for a in &att.statement.predicate.acceptance {
+    for a in att
+        .statement
+        .predicate
+        .acceptance
+        .iter()
+        .filter(|_| execute_checks)
+    {
         let cmd = vec!["bash".to_string(), "-c".to_string(), a.check.clone()];
         let exec = sandbox::exec_gated(policy, &cmd, repo)?;
         if a.must_pass && !exec.passed() {
@@ -673,8 +703,12 @@ pub fn reproduce_from_attestation(
         run_id: att.statement.predicate.spec_ref.clone(),
         signature_valid,
         source_identical,
-        all_acceptance_passed: all_passed,
-        reproducible: signature_valid && source_identical && all_passed,
+        checks_executed: execute_checks,
+        producer_acceptance_passed: att.statement.predicate.acceptance_passed,
+        all_acceptance_passed: execute_checks && all_passed,
+        // "reproducible" is only claimable when the contract actually ran here (R14:
+        // no vacuous pass) — attest-only verification reports signatures + digests.
+        reproducible: signature_valid && source_identical && execute_checks && all_passed,
         checks,
         files_checked,
     })
@@ -1135,9 +1169,26 @@ mod tests {
         let att = repo.join(&rec.attestation_repo_path);
         assert!(att.exists(), "attestation file should be written");
 
-        // The signed proof verifies offline against the working tree (forge-agnostic).
-        let r = reproduce_from_file(&repo, &att, &Policy::default()).unwrap();
-        assert!(r.signature_valid && r.source_identical && r.all_acceptance_passed);
+        // Default (attest-only) verification: signatures + digests, NO execution of the
+        // producer-supplied contract — a signed check is not thereby safe to run.
+        let r = reproduce_from_file(&repo, &att, &Policy::default(), false).unwrap();
+        assert!(r.signature_valid && r.source_identical);
+        assert!(
+            !r.checks_executed && r.checks.is_empty(),
+            "attest-only must not execute"
+        );
+        assert!(r.producer_acceptance_passed, "self-report surfaced");
+        assert!(
+            !r.reproducible,
+            "reproducible is only claimable after execution (R14)"
+        );
+
+        // Opt-in execution: the frozen contract actually runs and the claim upgrades.
+        let r = reproduce_from_file(&repo, &att, &Policy::default(), true).unwrap();
+        assert!(
+            r.checks_executed && r.signature_valid && r.source_identical && r.all_acceptance_passed
+        );
+        assert!(r.reproducible);
     }
 
     #[test]

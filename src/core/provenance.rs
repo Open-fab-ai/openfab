@@ -410,4 +410,38 @@ mod tests {
         let v = serde_json::json!({"b": 1, "a": {"d": 2, "c": 3}});
         assert_eq!(canonical_json(&v).unwrap(), r#"{"a":{"c":3,"d":2},"b":1}"#);
     }
+
+    /// Golden conformance vector (spec rev 0.1.3, "Envelope encoding"). The pinned
+    /// sha256 was independently produced by the BROWSER implementation's canonicalJson
+    /// over the same statement — this test proves the two implementations emit
+    /// byte-identical canonical form, and pins the encoding against drift. If this
+    /// test ever needs a new hash, that is a BREAKING change to signature
+    /// verification and must be a new predicate version, not a rev.
+    #[test]
+    fn canonical_encoding_golden_vector() {
+        let stmt = serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{ "name": "golden-v1", "digest": { "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } }],
+            "predicateType": "https://open-fab.ai/attestation/generation/v0.1",
+            "predicate": {
+                "spec_ref": "golden#v1",
+                "builder": { "id": "openfab/0.1", "base": "golden" },
+                "agent": { "did": "did:key:z6MkGOLDEN", "base": "golden", "model": "test-model", "id": "golden:test-model" },
+                "prompt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "params": {},
+                "generated": [{ "path": "app/中文 \"quoted\"\npath.js", "lines": "1-1", "sha256": "00", "author": "ai" }],
+                "materials": [],
+                "acceptance_passed": true,
+                "acceptance": [{ "id": "a1", "check": "js:true", "must_pass": true, "passed": true }],
+                "timestamp": "2026-09-22T00:00:00Z"
+            }
+        });
+        let canon = canonical_json(&stmt).unwrap();
+        assert_eq!(canon.len(), 756, "canonical byte length drifted");
+        assert_eq!(
+            sha256_hex(canon.as_bytes()),
+            "7051cb7073a3bee0a038255fd59d4679c95443bd6a81bb92d0ff3e765713bacd",
+            "canonical encoding drifted from the golden vector (browser-computed)"
+        );
+    }
 }

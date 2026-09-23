@@ -1,4 +1,4 @@
-# OpenFab Generation Predicate — v0.1 (rev 0.1.2)
+# OpenFab Generation Predicate — v0.1 (rev 0.1.3)
 
 **Predicate type URI:** `https://open-fab.ai/attestation/generation/v0.1`
 
@@ -19,6 +19,12 @@ human-readable + machine-readable definition of the predicate. This is that defi
 > stops at signatures + digests + attribution; re-executing the embedded acceptance
 > contract is an explicit opt-in with normative isolation expectations; and a stated
 > non-guarantee: a valid signature over a check does not make it safe to run.
+>
+> **rev 0.1.3 (additive, non-breaking):** normatively defines the envelope encoding —
+> the exact canonicalization the signatures cover (RFC 8785-coincident for the
+> predicate's value domain), the producer field-omission rules, an explicit statement
+> that this envelope is NOT DSSE (no PAE), and a pinned golden conformance vector.
+> v0.2 direction: a standard DSSE envelope.
 
 ---
 
@@ -51,6 +57,43 @@ envelope:
   ]
 }
 ```
+
+### Envelope encoding (normative, rev 0.1.3)
+
+The bytes the signatures cover — and that `payload_sha256` digests — are the **UTF-8
+encoding of the canonical form of `statement`**, defined as:
+
+- **Objects:** keys sorted ascending by Unicode code point; no insignificant whitespace
+  (`{"a":1,"b":2}`).
+- **Arrays:** element order preserved.
+- **Strings:** standard JSON escaping, minimal — the two-character escapes (`\"`, `\\`,
+  `\n`, `\r`, `\t`, `\b`, `\f`), `\u00XX` for other control characters, and all other
+  characters (including non-ASCII) emitted as literal UTF-8, not escaped.
+- **Booleans / null:** literal `true` / `false` / `null`.
+- **Numbers:** the predicate's value domain contains **no floating-point numbers**
+  (strings, booleans, objects, arrays only). Producers MUST NOT introduce them.
+
+For statements respecting that value domain, this encoding **coincides with
+[RFC 8785 (JCS)](https://www.rfc-editor.org/rfc/rfc8785)** — a conforming JCS
+implementation reproduces the bytes.
+
+**Producer omission rule:** empty `acceptance` / `signoffs` arrays and absent optional
+fields (`agent.id`, `agent.tools`, `materials[].sha256`) are **omitted entirely** —
+never serialized as empty arrays or `null`. Verifiers canonicalize the statement **as
+parsed**: fields absent from the received statement are absent from the canonical form.
+
+**What this envelope is NOT:** it is DSSE-*style*, not DSSE — the statement travels in
+the clear and signatures cover the canonical statement bytes directly; there is no
+PAE (pre-authentication encoding) and no base64 payload. A future **v0.2** intends to
+adopt a standard DSSE envelope (PAE over a JCS-canonicalized payload) as a breaking
+change with a new predicate version.
+
+**Golden conformance vector:** the reference repository pins a fixed statement whose
+canonical form is 756 bytes with
+`sha256 = 7051cb7073a3bee0a038255fd59d4679c95443bd6a81bb92d0ff3e765713bacd`, produced
+independently and byte-identically by both the Rust and browser implementations
+(`src/core/provenance.rs`, test `canonical_encoding_golden_vector`). Any change to
+this hash is a breaking change requiring a new predicate version.
 
 ## Predicate fields
 

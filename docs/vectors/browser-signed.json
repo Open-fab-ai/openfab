@@ -1,0 +1,58 @@
+{
+  "payload_type": "application/vnd.in-toto+json",
+  "payload_sha256": "1a191ff921d39b67b10139188cbc644bbf65d76bc5a2a007a87386a10561c016",
+  "statement": {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [
+      {
+        "name": "vector-app",
+        "digest": {
+          "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        }
+      }
+    ],
+    "predicateType": "https://open-fab.ai/attestation/generation/v0.1",
+    "predicate": {
+      "spec_ref": "vector#v1",
+      "builder": {
+        "id": "openfab-web/0.1",
+        "base": "browser-swarm"
+      },
+      "agent": {
+        "did": "did:key:z6Mkp6YtDLGStaS6yLj8t4BWn7oRTV5tpiKcqoNBLtrYb7HP",
+        "base": "browser-swarm",
+        "model": "vector-model",
+        "id": "browser-swarm:vector-model"
+      },
+      "prompt_sha256": "fa6d021b7d93140723fff75b99e3266d873c68f5570dd6ab8eaa5564a4d4814a",
+      "params": {},
+      "generated": [
+        {
+          "path": "app/index.html",
+          "lines": "1-1",
+          "sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+          "author": "ai"
+        }
+      ],
+      "materials": [],
+      "acceptance_passed": true,
+      "acceptance": [
+        {
+          "id": "a1",
+          "check": "test -f app/index.html",
+          "must_pass": true,
+          "passed": true
+        }
+      ],
+      "timestamp": "2026-09-26T00:22:20Z"
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "did:key:z6Mkp6YtDLGStaS6yLj8t4BWn7oRTV5tpiKcqoNBLtrYb7HP",
+      "sig": "LaZVOnWzn6X4o/8vHEsO4Jgmi1EkFzPveHepTuxEJPJ6bl0wZTZIBeRy8qfEdGUR2UY/6prXJzPBB+98HI6QDA==",
+      "algo": "ed25519",
+      "role": "fab"
+    }
+  ]
+}

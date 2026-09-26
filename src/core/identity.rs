@@ -35,6 +35,16 @@ impl Identity {
         })
     }
 
+    /// Deterministic identity from a caller-supplied seed. ONLY for PUBLISHED TEST
+    /// KEYS (conformance vectors, docs/vectors/): the seed is committed on purpose so
+    /// anyone can re-sign or extend the vectors. Never use for a real identity.
+    pub fn from_seed(name: &str, seed: [u8; 32]) -> Identity {
+        Identity {
+            name: name.to_string(),
+            signing: SigningKey::from_bytes(&seed),
+        }
+    }
+
     /// Load an identity's seed from disk, or create + persist one if absent.
     /// Seeds live under a gitignored directory so they never reach a commit.
     pub fn load_or_create(dir: &Path, name: &str) -> Result<Identity> {

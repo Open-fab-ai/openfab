@@ -265,12 +265,17 @@ const OpsBrowser = (() => {
     if (!rec || !rec.attestation) throw new Error("no attested run to sign");
     if (!rec.acceptance_passed) throw new Error("acceptance failed — a human cannot sign past a failed contract");
     const signer = await identity(as || "me");
-    // Sign the statement state BEFORE this sign-off is recorded (Rust add_signoff rule).
-    const canonical = canonicalStatement(rec.attestation.statement);
+    // Spec rev 0.1.4 (F2/F3): the sign-off signature covers the statement WITH its
+    // own record included — append first, then sign, so no record is ever outside a
+    // signed preimage. (Pre-0.1.4 the record was appended after signing, leaving the
+    // last record unsigned and the record-count inflatable.)
     rec.attestation.statement.predicate.signoffs.push({ did: signer.did, name: as || "me", timestamp: new Date().toISOString().replace(/\.\d+Z$/, "Z") });
+    const canonical = canonicalStatement(rec.attestation.statement);
     rec.attestation.signatures.push({ keyid: signer.did, sig: await FabCrypto.signB64(signer, canonical), algo: "ed25519", role: "human-signoff" });
     const need = rec.gate === "none" ? 0 : rec.gate === "team" ? 2 : 1;
-    const have = new Set(rec.attestation.statement.predicate.signoffs.map((s) => s.did)).size;
+    // N-of-M counts distinct SIGNING KEYS from the signatures, never the records —
+    // an unsigned appended record must not inflate the count (rev 0.1.4, F3).
+    const have = new Set(rec.attestation.signatures.filter((s) => s.role === "human-signoff").map((s) => s.keyid)).size;
     rec.accepted = have >= need; rec.merged = rec.accepted;
     rec.status = rec.merged ? "merged" : "blocked";
     ev(rec, "✍", `sign-off by ${as || "me"} (${signer.did.slice(0, 24)}…) — ${have}/${need}`);
@@ -283,9 +288,11 @@ const OpsBrowser = (() => {
     const rec = await loadRec(id);
     const att = rec && rec.attestation;
     if (!att) throw new Error("no attestation for this run");
-    // Mirror Rust verify_signatures: the fab signed the statement WITHOUT signoffs (and
-    // payload_sha256 pins that build-time payload); human sign-off #n signed the state
-    // with the signoffs recorded before theirs.
+    // Mirror Rust verify_signatures (rev 0.1.4): the fab signed the statement WITHOUT
+    // signoffs (payload_sha256 pins that build-time payload); human sign-off #n signed
+    // the state with the first n records INCLUDING ITS OWN, each record bound to its
+    // signature's keyid, and every record must have a signature (F2/F3).
+    const signoffs = att.statement.predicate.signoffs || [];
     const buildPayload = canonicalStatement(att.statement, []);
     let signature_valid = (await FabCrypto.sha256Hex(buildPayload)) === att.payload_sha256;
     let nth = 0;
@@ -293,11 +300,14 @@ const OpsBrowser = (() => {
       if (s.role === "fab") {
         if (!(await FabCrypto.verifyB64(s.keyid, s.sig, buildPayload))) signature_valid = false;
       } else {
-        const atSign = canonicalStatement(att.statement, att.statement.predicate.signoffs.slice(0, nth));
+        const rec2 = signoffs[nth];
+        if (!rec2 || rec2.did !== s.keyid) signature_valid = false;
+        const atSign = canonicalStatement(att.statement, signoffs.slice(0, nth + 1));
         if (!(await FabCrypto.verifyB64(s.keyid, s.sig, atSign))) signature_valid = false;
         nth++;
       }
     }
+    if (nth !== signoffs.length) signature_valid = false; // unsigned appended record
     let source_identical = true;
     for (const g of att.statement.predicate.generated) {
       const c = rec.files && rec.files[g.path];

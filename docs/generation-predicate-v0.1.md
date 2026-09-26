@@ -1,4 +1,4 @@
-# OpenFab Generation Predicate — v0.1 (rev 0.1.3)
+# OpenFab Generation Predicate — v0.1 (rev 0.1.4)
 
 **Predicate type URI:** `https://open-fab.ai/attestation/generation/v0.1`
 
@@ -25,6 +25,18 @@ human-readable + machine-readable definition of the predicate. This is that defi
 > predicate's value domain), the producer field-omission rules, an explicit statement
 > that this envelope is NOT DSSE (no PAE), and a pinned golden conformance vector.
 > v0.2 direction: a standard DSSE envelope.
+>
+> **rev 0.1.4 (breaking for sign-off signatures):** adopts the six community findings
+> from the ossf/tac review of this draft (issue 628). Key order is defined by UTF-16
+> code units (matching RFC 8785 exactly, not just coincidentally). The value domain
+> is normative: integers only, within the I-JSON safe range. **Sign-off signature
+> coverage is redefined** — the n-th sign-off signature covers the statement with the
+> first n records *including its own*, so every record is inside a signed preimage;
+> pre-0.1.4 sign-off signatures do NOT verify under this rule (fab signatures and
+> `payload_sha256` are unaffected). Verifiers must treat the received statement bytes
+> as authoritative and refuse duplicate object member names. Signed conformance
+> vectors from both reference implementations, with published test keys, are
+> committed under `docs/vectors/`.
 
 ---
 
@@ -58,22 +70,32 @@ envelope:
 }
 ```
 
-### Envelope encoding (normative, rev 0.1.3)
+### Envelope encoding (normative, rev 0.1.3, amended rev 0.1.4)
 
 The bytes the signatures cover — and that `payload_sha256` digests — are the **UTF-8
 encoding of the canonical form of `statement`**, defined as:
 
-- **Objects:** keys sorted ascending by Unicode code point; no insignificant whitespace
-  (`{"a":1,"b":2}`).
+- **Objects:** keys sorted ascending by **UTF-16 code units** — the RFC 8785 §3.2.3
+  order, which is what JavaScript's default string comparison implements. This
+  differs from Unicode code-point order only for keys mixing supplementary-plane
+  characters (U+10000 and above) with BMP characters above U+D7FF; implementations
+  in languages whose strings are code points (Rust, Go, Python) MUST convert keys to
+  UTF-16 before comparing. No insignificant whitespace (`{"a":1,"b":2}`).
 - **Arrays:** element order preserved.
 - **Strings:** standard JSON escaping, minimal — the two-character escapes (`\"`, `\\`,
   `\n`, `\r`, `\t`, `\b`, `\f`), `\u00XX` for other control characters, and all other
   characters (including non-ASCII) emitted as literal UTF-8, not escaped.
 - **Booleans / null:** literal `true` / `false` / `null`.
-- **Numbers:** the predicate's value domain contains **no floating-point numbers**
-  (strings, booleans, objects, arrays only). Producers MUST NOT introduce them.
+- **Numbers (value domain, rev 0.1.4):** the predicate's value domain contains
+  **integers only** — no floating-point numbers — and every integer MUST lie within
+  the [I-JSON (RFC 7493)](https://www.rfc-editor.org/rfc/rfc7493) safe range
+  (|n| ≤ 2^53 − 1). Outside that range, JavaScript and 64-bit-integer parsers read
+  *different values from the same text*, so the two sides would sign different
+  bytes. Producers MUST NOT emit floats or out-of-range integers; canonicalizers
+  and verifiers MUST refuse them. Integers are emitted without sign on zero,
+  exponent, or leading zeros.
 
-For statements respecting that value domain, this encoding **coincides with
+For statements respecting that value domain, this encoding is **exactly
 [RFC 8785 (JCS)](https://www.rfc-editor.org/rfc/rfc8785)** — a conforming JCS
 implementation reproduces the bytes.
 
@@ -88,12 +110,49 @@ PAE (pre-authentication encoding) and no base64 payload. A future **v0.2** inten
 adopt a standard DSSE envelope (PAE over a JCS-canonicalized payload) as a breaking
 change with a new predicate version.
 
+### Signature coverage (normative, rev 0.1.4)
+
+Which bytes each signature covers, stated exactly:
+
+- **`role: "fab"`** and **`payload_sha256`** cover the canonical form of the
+  statement **with `predicate.signoffs` removed entirely** — the fab-time statement.
+  Sign-offs recorded later therefore never invalidate the fab signature.
+- **`role: "human-signoff"`**, the n-th such signature (1-based, in `signatures`
+  array order), covers the canonical form of the statement with `predicate.signoffs`
+  **truncated to its first n records — its own record included**. Every record is
+  thus inside at least one signed preimage; no record exists that no signature
+  covers. (Pre-0.1.4 implementations signed the statement *before* appending the
+  record, leaving the newest record uncovered — those signatures do not verify
+  under this rule.)
+- **One signature per record, bound by key:** verifiers MUST check that
+  `signoffs[n].did` equals the n-th sign-off signature's `keyid`, and that the
+  number of sign-off records equals the number of valid sign-off signatures. An
+  appended record with no signature, or a record naming a DID that did not sign,
+  MUST fail verification.
+- **N-of-M counting:** any sign-off threshold MUST count **distinct verified
+  signing keys**, never records or signature array entries.
+
+**Verifier input handling (rev 0.1.4):** the **received statement bytes are
+authoritative**. Verifiers MUST build signature preimages from the statement *as
+parsed from the received document* — not from a typed data structure round-trip,
+which can silently drop members it does not model. Verifiers MUST refuse documents
+containing duplicate object member names (I-JSON), and MUST refuse statements
+whose numbers violate the value domain above.
+
 **Golden conformance vector:** the reference repository pins a fixed statement whose
 canonical form is 756 bytes with
 `sha256 = 7051cb7073a3bee0a038255fd59d4679c95443bd6a81bb92d0ff3e765713bacd`, produced
 independently and byte-identically by both the Rust and browser implementations
 (`src/core/provenance.rs`, test `canonical_encoding_golden_vector`). Any change to
 this hash is a breaking change requiring a new predicate version.
+
+**Signed conformance vectors (rev 0.1.4):** `docs/vectors/` in the reference
+repository holds four complete signed attestations — one from each reference
+implementation, with and without sign-offs — plus the **published test keys**
+(`TEST-KEYS.json`; committed on purpose, never for real identities) needed to
+reproduce or extend them. CI cross-verifies all four in Rust
+(test `published_vectors_verify`), so the byte agreement between implementations
+is a permanent, machine-checked property rather than a one-time observation.
 
 ## Predicate fields
 
@@ -178,9 +237,11 @@ A verifier needs only the committed artifact (source + this attestation).
 
 **Default mode (attest-only) — steps 1–2, no execution:**
 1. recompute each `subject`/`generated` file `sha256` → integrity;
-2. verify the ed25519 `signatures` against their `keyid` (did:key) → authenticity, and
-   read authorship/attribution from the predicate. In this mode `acceptance_passed`
-   MUST be treated as the **producer's self-report**, not a verified property.
+2. verify the ed25519 `signatures` against their `keyid` (did:key) over the preimages
+   defined in **Signature coverage** above (raw statement authoritative, duplicates
+   refused) → authenticity, and read authorship/attribution from the predicate. In
+   this mode `acceptance_passed` MUST be treated as the **producer's self-report**,
+   not a verified property.
 
 **Opt-in mode (conformance) — step 3, explicit consent required:**
 3. re-run the embedded `acceptance` checks → conformance. Because the checks are

@@ -12,7 +12,12 @@ const FabCrypto = (() => {
   function canonicalJson(v) {
     if (v === null) return "null";
     if (typeof v === "boolean") return v ? "true" : "false";
-    if (typeof v === "number") return Number.isInteger(v) ? String(v) : JSON.stringify(v);
+    // Spec rev 0.1.4 (F6): integers only, inside the I-JSON safe range — floats and
+    // larger integers hash differently between the reference implementations.
+    if (typeof v === "number") {
+      if (!Number.isInteger(v) || Math.abs(v) > Number.MAX_SAFE_INTEGER) throw new Error(`canonical form: number ${v} outside the integer safe range (spec rev 0.1.4)`);
+      return String(v);
+    }
     if (typeof v === "string") return JSON.stringify(v);
     if (Array.isArray(v)) return "[" + v.map(canonicalJson).join(",") + "]";
     const keys = Object.keys(v).sort();

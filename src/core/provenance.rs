@@ -152,6 +152,13 @@ pub struct Attestation {
     pub payload_sha256: String,
     pub statement: Statement,
     pub signatures: Vec<AttSignature>,
+    /// The statement EXACTLY as parsed from the received JSON (spec rev 0.1.4, F4).
+    /// Verification preimages are built from this, never from the typed round-trip —
+    /// a typed re-serialization silently drops unknown members, so a member added
+    /// AFTER signing would vanish from the hashed bytes and the tampered file would
+    /// still verify. `None` for attestations built in-process (nothing was parsed).
+    #[serde(skip)]
+    pub raw_statement: Option<serde_json::Value>,
 }
 
 /// Inputs to build a generation attestation (neutral data, so `core` stays
@@ -211,6 +218,7 @@ impl Attestation {
         let sig = fab.sign_b64(canonical.as_bytes());
         Ok(Attestation {
             payload_type: "application/vnd.in-toto+json".to_string(),
+            raw_statement: None,
             payload_sha256: sha256_hex(canonical.as_bytes()),
             statement,
             signatures: vec![AttSignature {
@@ -226,14 +234,17 @@ impl Attestation {
     /// bytes are the *same* original statement payload (the sign-off endorses exactly
     /// what the fab produced), then we re-pin the payload digest after recording.
     pub fn add_signoff(&mut self, signer: &Identity) -> Result<()> {
-        // The human signs the original payload digest binding (what they reviewed).
-        let canonical = canonical_json(&self.statement)?;
-        let sig = signer.sign_b64(canonical.as_bytes());
+        // Spec rev 0.1.4 (F2/F3): the n-th sign-off signature covers the statement
+        // with the first n records INCLUDING ITS OWN — so no record is ever outside
+        // a signed preimage. (Before rev 0.1.4 the record was appended after signing,
+        // leaving the last record covered by no signature.)
         self.statement.predicate.signoffs.push(SignoffRecord {
             did: signer.did(),
             name: signer.name().to_string(),
             timestamp: timeutil::iso_now(),
         });
+        let canonical = canonical_json(&self.statement)?;
+        let sig = signer.sign_b64(canonical.as_bytes());
         self.signatures.push(AttSignature {
             keyid: signer.did(),
             sig,
@@ -248,13 +259,23 @@ impl Attestation {
     /// the canonical statement *without* the sign-off records (the state at build);
     /// each human sign-off covers the statement state at the moment they signed.
     pub fn verify_signatures(&self) -> Result<VerifiedSigners> {
-        // Reconstruct the fab-time statement: the predicate had no signoffs yet.
-        let mut at_build = self.statement.clone();
-        at_build.predicate.signoffs.clear();
-        let build_payload = canonical_json(&at_build)?;
-
+        use crate::core::canonical::statement_preimage;
+        // Preimages come from the RAW parsed statement when we have one (F4): the
+        // received bytes are authoritative, and a typed round-trip must never be
+        // able to drop what was — or was not — signed. In-process attestations
+        // (raw_statement = None) fall back to the typed statement we just built.
+        let raw_owned;
+        let raw: &serde_json::Value = match &self.raw_statement {
+            Some(r) => r,
+            None => {
+                raw_owned = serde_json::to_value(&self.statement)
+                    .context("statement to value")?;
+                &raw_owned
+            }
+        };
+        // Fab signature + payload_sha256 cover the statement WITHOUT signoffs (F2).
+        let build_payload = canonical_json(&statement_preimage(raw, None)?)?;
         if sha256_hex(build_payload.as_bytes()) != self.payload_sha256 {
-            // payload_sha256 must match the fab-time payload (tamper check).
             bail!("attestation payload digest does not match the fab-time statement (tampered?)");
         }
 
@@ -268,12 +289,21 @@ impl Attestation {
                     fab.push(s.keyid.clone());
                 }
                 "human-signoff" => {
-                    // Reconstruct the statement state when this signer signed: the
-                    // predicate held the sign-offs recorded *before* this one.
+                    // The n-th sign-off signature covers the statement with the
+                    // first n records, ITS OWN INCLUDED (F2) — so every record is
+                    // inside a signed preimage.
                     let nth = humans.len();
-                    let mut at_sign = self.statement.clone();
-                    at_sign.predicate.signoffs.truncate(nth);
-                    let payload = canonical_json(&at_sign)?;
+                    let rec = self
+                        .statement
+                        .predicate
+                        .signoffs
+                        .get(nth)
+                        .with_context(|| format!("sign-off signature #{i} has no matching record (one signature per record, rev 0.1.4)"))?;
+                    // A record is bound to its signer: record.did == signature.keyid (F3).
+                    if rec.did != s.keyid {
+                        bail!("signoffs[{nth}].did '{}' does not match its signature keyid '{}' (rev 0.1.4)", rec.did, s.keyid);
+                    }
+                    let payload = canonical_json(&statement_preimage(raw, Some(nth + 1))?)?;
                     identity::verify_b64(&s.keyid, payload.as_bytes(), &s.sig)
                         .with_context(|| format!("human sign-off #{i} failed to verify"))?;
                     humans.push(s.keyid.clone());
@@ -284,6 +314,12 @@ impl Attestation {
         if fab.is_empty() {
             bail!("attestation has no valid fab signature");
         }
+        // Exactly one sign-off signature per record (F3): an appended record with no
+        // signature would otherwise inflate any count derived from the records.
+        if humans.len() != self.statement.predicate.signoffs.len() {
+            bail!("{} sign-off record(s) but {} sign-off signature(s) — every record must be signed (rev 0.1.4)",
+                self.statement.predicate.signoffs.len(), humans.len());
+        }
         Ok(VerifiedSigners { fab, humans })
     }
 
@@ -292,7 +328,14 @@ impl Attestation {
     }
 
     pub fn from_json(s: &str) -> Result<Attestation> {
-        serde_json::from_str(s).context("parse attestation")
+        // Duplicate member names are refused outright (rev 0.1.4 / I-JSON): with
+        // last-wins parsing, a signature can cover one reading of a duplicated
+        // member while another parser acts on the other.
+        let raw = crate::core::canonical::parse_json_no_dups(s)?;
+        let mut att: Attestation =
+            serde_json::from_value(raw.clone()).context("parse attestation")?;
+        att.raw_statement = raw.get("statement").cloned();
+        Ok(att)
     }
 }
 
@@ -307,6 +350,9 @@ pub struct VerifiedSigners {
 /// This is what we sign, so signer and verifier always agree on the bytes.
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<String> {
     let v = serde_json::to_value(value).context("to canonical value")?;
+    // Spec rev 0.1.4 (F6): integers only, inside the I-JSON safe range. Floats and
+    // larger integers hash differently across the reference implementations.
+    crate::core::canonical::validate_value_domain(&v)?;
     let mut out = String::new();
     write_canonical(&v, &mut out);
     Ok(out)
@@ -331,7 +377,15 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
         }
         Object(map) => {
             let mut keys: Vec<_> = map.keys().collect();
-            keys.sort();
+            // Spec rev 0.1.4 (F1): member names ordered by UTF-16 CODE UNITS, exactly
+            // as RFC 8785 — NOT Unicode code points. The two differ for names mixing
+            // non-BMP characters with U+E000..U+FFFF, and JS `sort()` is UTF-16 order,
+            // so this keeps Rust and the browser signing identical bytes.
+            keys.sort_by(|a, b| {
+                a.encode_utf16()
+                    .collect::<Vec<u16>>()
+                    .cmp(&b.encode_utf16().collect::<Vec<u16>>())
+            });
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
                 if i > 0 {
@@ -411,6 +465,76 @@ mod tests {
         assert_eq!(canonical_json(&v).unwrap(), r#"{"a":{"c":3,"d":2},"b":1}"#);
     }
 
+    /// F1 (rev 0.1.4): member names order by UTF-16 CODE UNITS (RFC 8785), which
+    /// differs from code-point order for non-BMP vs U+E000..U+FFFF names — and is
+    /// what JavaScript's sort() does, so both implementations sign the same bytes.
+    #[test]
+    fn canonical_key_order_is_utf16_code_units() {
+        let v = serde_json::json!({"\u{1F600}": 1, "\u{FF61}": 2});
+        // UTF-16: U+1F600 starts with surrogate 0xD83D < 0xFF61 → the emoji sorts first.
+        assert_eq!(canonical_json(&v).unwrap(), "{\"\u{1F600}\":1,\"\u{FF61}\":2}");
+    }
+
+    /// F6 (rev 0.1.4): integers only, I-JSON safe range.
+    #[test]
+    fn canonical_value_domain_gate() {
+        assert!(canonical_json(&serde_json::json!({"t": 0.5})).is_err());
+        assert!(canonical_json(&serde_json::json!({"n": 9007199254740993i64})).is_err());
+        assert!(canonical_json(&serde_json::json!({"n": 9007199254740991i64})).is_ok());
+    }
+
+    /// F3 (rev 0.1.4): every sign-off record is inside a signed preimage and bound
+    /// to its signer.
+    #[test]
+    fn signoff_records_are_signed_and_bound() {
+        let fab = Identity::generate("fab").unwrap();
+        let alice = Identity::generate("alice").unwrap();
+        let mut att = Attestation::build_and_sign(sample_input(&fab.did()), &fab).unwrap();
+        att.add_signoff(&alice).unwrap();
+        assert!(att.verify_signatures().is_ok());
+
+        // Tamper the LAST record's name after signing (pre-0.1.4 this verified).
+        let mut t = att.clone();
+        t.statement.predicate.signoffs[0].name = "mallory".to_string();
+        assert!(t.verify_signatures().is_err(), "tampered last record must fail");
+
+        // Append a record with no signature (inflated the browser count pre-0.1.4).
+        let mut t = att.clone();
+        t.statement.predicate.signoffs.push(SignoffRecord {
+            did: alice.did(),
+            name: "alice-again".into(),
+            timestamp: "2026-09-25T00:00:00Z".into(),
+        });
+        assert!(t.verify_signatures().is_err(), "unsigned record must fail");
+
+        // Record naming a key that did not sign.
+        let mut t = att.clone();
+        t.statement.predicate.signoffs[0].did = "did:key:z6MkSomeoneElse".into();
+        assert!(t.verify_signatures().is_err(), "did/keyid mismatch must fail");
+    }
+
+    /// F4 (rev 0.1.4): the RECEIVED statement is authoritative — an unknown member
+    /// added after signing fails (the typed round-trip used to drop it silently),
+    /// and a duplicate member name is refused at parse (I-JSON).
+    #[test]
+    fn raw_statement_is_authoritative() {
+        let fab = Identity::generate("fab").unwrap();
+        let att = Attestation::build_and_sign(sample_input(&fab.did()), &fab).unwrap();
+        let json = att.to_json().unwrap();
+        assert!(Attestation::from_json(&json).unwrap().verify_signatures().is_ok());
+
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["statement"]["predicate"]["injected"] = serde_json::json!("after-signing");
+        let tampered = serde_json::to_string(&v).unwrap();
+        assert!(
+            Attestation::from_json(&tampered).unwrap().verify_signatures().is_err(),
+            "member added after signing must fail (was silently dropped pre-0.1.4)"
+        );
+
+        let dup = json.replacen("\"payload_type\":", "\"payload_type\": \"x\", \"payload_type\":", 1);
+        assert!(Attestation::from_json(&dup).is_err(), "duplicate member must be refused");
+    }
+
     /// Golden conformance vector (spec rev 0.1.3, "Envelope encoding"). The pinned
     /// sha256 was independently produced by the BROWSER implementation's canonicalJson
     /// over the same statement — this test proves the two implementations emit
@@ -443,5 +567,32 @@ mod tests {
             "7051cb7073a3bee0a038255fd59d4679c95443bd6a81bb92d0ff3e765713bacd",
             "canonical encoding drifted from the golden vector (browser-computed)"
         );
+    }
+
+    #[test]
+    fn published_vectors_verify() {
+        // Cross-implementation conformance (F5): the committed vectors from BOTH
+        // reference implementations — with and without sign-offs — must verify
+        // here. The browser vectors were signed by web/fabcrypto.js; verifying
+        // them in Rust proves the two implementations agree on the canonical
+        // bytes and the rev 0.1.4 signature-coverage rules, not just on one
+        // pinned statement. Regenerate with `cargo run --example gen_vectors`
+        // and docs/vectors/TEST-KEYS.json (published test keys).
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/vectors");
+        for (file, signoffs) in [
+            ("rust-signed.json", 0),
+            ("rust-signed-with-signoffs.json", 2),
+            ("browser-signed.json", 0),
+            ("browser-signed-with-signoffs.json", 2),
+        ] {
+            let text = std::fs::read_to_string(format!("{dir}/{file}"))
+                .unwrap_or_else(|e| panic!("{file}: {e}"));
+            let att = Attestation::from_json(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let v = att
+                .verify_signatures()
+                .unwrap_or_else(|e| panic!("{file}: verification failed: {e:#}"));
+            assert_eq!(v.fab.len(), 1, "{file}: expected one fab signature");
+            assert_eq!(v.humans.len(), signoffs, "{file}: sign-off count");
+        }
     }
 }

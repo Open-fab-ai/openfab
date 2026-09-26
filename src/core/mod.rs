@@ -5,6 +5,7 @@
 //! only on `ports` *types* (TaskCard etc. actually live here in `spec`, and ports
 //! depend on core — never the reverse).
 
+pub mod canonical;
 pub mod conformance;
 pub mod identity;
 pub mod provenance;

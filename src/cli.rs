@@ -154,6 +154,11 @@ enum Cmd {
         /// only and report the producer's acceptance_passed as a self-report.
         #[arg(long)]
         run_checks: bool,
+        /// A commit's `Assisted-by:` trailer line to cross-check against the
+        /// attestation's agent.id/agent.tools (repeatable). When given, a
+        /// disagreeing trailer FAILS verification (spec rev 0.1.5).
+        #[arg(long = "trailer")]
+        trailer: Vec<String>,
     },
     /// Attest EXISTING files (no generation): sign + gate code your own AI factory already
     /// produced. Reads the files under the spec's target_dir, runs the acceptance contract,
@@ -270,7 +275,8 @@ pub fn run() -> Result<()> {
             att,
             policy,
             run_checks,
-        } => cmd_verify_file(&repo, &att, policy.as_deref(), run_checks),
+            trailer,
+        } => cmd_verify_file(&repo, &att, policy.as_deref(), run_checks, &trailer),
         Cmd::Attest {
             spec,
             repo,
@@ -517,11 +523,20 @@ fn cmd_verify_file(
     att: &Path,
     policy_path: Option<&Path>,
     run_checks: bool,
+    trailers: &[String],
 ) -> Result<()> {
     let repo = abs(repo)?;
     let policy = load_policy(policy_path)?;
     let out = ops::reproduce_from_file(&repo, att, &policy, run_checks)?;
     println!("== openfab verify-file: {} ==", out.run_id);
+    if !trailers.is_empty() {
+        // A trailer, once given, MUST be compared (F8, spec rev 0.1.5).
+        let text = std::fs::read_to_string(att)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", att.display()))?;
+        let parsed = Attestation::from_json(&text)?;
+        crate::core::provenance::check_assisted_by(&parsed.statement.predicate.agent, trailers)?;
+        println!("  Assisted-by trailer(s): match the attestation ({} line(s))", trailers.len());
+    }
     println!(
         "  signatures valid: {}    source bit-identical: {} ({} files)",
         yn(out.signature_valid),

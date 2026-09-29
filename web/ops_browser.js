@@ -308,6 +308,21 @@ const OpsBrowser = (() => {
       }
     }
     if (nth !== signoffs.length) signature_valid = false; // unsigned appended record
+    // F7 (rev 0.1.5): attribution ranges for one path must not overlap — otherwise a
+    // line is claimed as both ai and human. Malformed ranges can't be proven
+    // non-overlapping, so they fail too. Mirrors Rust validate_generated_ranges.
+    let attribution_valid = true;
+    const rangesByPath = {};
+    for (const g of att.statement.predicate.generated) {
+      const m = /^(\d+)(?:-(\d+))?$/.exec(g.lines);
+      const a = m && +m[1], b = m && +(m[2] || m[1]);
+      if (!m || a < 1 || b < a) { attribution_valid = false; continue; }
+      (rangesByPath[g.path] = rangesByPath[g.path] || []).push([a, b]);
+    }
+    for (const rs of Object.values(rangesByPath)) {
+      rs.sort((x, y) => x[0] - y[0]);
+      for (let i = 1; i < rs.length; i++) if (rs[i][0] <= rs[i - 1][1]) attribution_valid = false;
+    }
     let source_identical = true;
     for (const g of att.statement.predicate.generated) {
       const c = rec.files && rec.files[g.path];
@@ -315,7 +330,7 @@ const OpsBrowser = (() => {
     }
     const checks = await FabEngine.runChecks(rec.spec, rec.files || {});
     const all = checks.every((c) => c.passed);
-    return { run_id: id, signature_valid, source_identical, all_acceptance_passed: all, reproducible: signature_valid && source_identical && all, checks: checks.map((c) => ({ check: c.check, passed: c.passed, exit_code: c.exit_code })), files_checked: att.statement.predicate.generated.length };
+    return { run_id: id, signature_valid, attribution_valid, source_identical, all_acceptance_passed: all, reproducible: signature_valid && attribution_valid && source_identical && all, checks: checks.map((c) => ({ check: c.check, passed: c.passed, exit_code: c.exit_code })), files_checked: att.statement.predicate.generated.length };
   }
 
   function buildAppHtml(rec) {

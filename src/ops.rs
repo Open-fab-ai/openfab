@@ -515,6 +515,8 @@ fn local_merge(repo: &Path, branch: &str) -> Result<()> {
 pub struct VerifyOutcome {
     pub spec_ref: String,
     pub conformant: bool,
+    /// Which mode produced the verdict (rev 0.1.2 MUST; issue 44).
+    pub mode: conformance::VerifyMode,
     pub accepted: bool,
     pub merged: bool,
     pub checks: Vec<conformance::CheckResult>,
@@ -526,7 +528,10 @@ pub fn verify(repo: &Path, run: &str) -> Result<VerifyOutcome> {
     let spec = Spec::from_yaml(&runstate::load_run_spec_yaml(repo, run)?)?;
     let att = Attestation::from_json(&std::fs::read_to_string(rec.attestation_path(repo))?)
         .context("loading committed attestation")?;
-    let report = conformance::check(&att, spec.human_signoff_required);
+    // Attest-only: this path reads the committed attestation and does NOT re-execute
+    // the contract, so C12 stays unreachable and C11 is reported as the producer's
+    // claim (issue 44). Re-execution lives in `reproduce`, with consent.
+    let report = conformance::check(&att, spec.human_signoff_required, None);
     let decision = trust::evaluate(
         &Policy::default().for_gate_mode(&rec.gate_mode),
         &TrustInput {
@@ -540,6 +545,7 @@ pub fn verify(repo: &Path, run: &str) -> Result<VerifyOutcome> {
     Ok(VerifyOutcome {
         spec_ref: rec.spec_ref,
         conformant: report.conformant,
+        mode: report.mode,
         accepted: decision.accepted,
         merged: rec.merged,
         checks: report.checks,

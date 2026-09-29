@@ -11,9 +11,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::provenance::{Attestation, PREDICATE_TYPE, STATEMENT_TYPE};
 
+/// Which verification mode produced a report's verdict. Spec rev 0.1.2: a verifier
+/// MUST record which mode produced its verdict, and MUST NOT report an artifact as
+/// conformant-by-execution unless the checks actually executed and passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerifyMode {
+    /// Signatures + digests + attribution only; `acceptance_passed` is read as the
+    /// producer's self-report, never as a machine result.
+    AttestOnly,
+    /// This verifier re-executed the embedded acceptance contract itself.
+    ChecksExecuted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConformanceReport {
     pub conformant: bool,
+    /// The mode that produced this verdict (rev 0.1.2 MUST).
+    pub mode: VerifyMode,
     pub checks: Vec<CheckResult>,
 }
 
@@ -38,10 +53,21 @@ impl ConformanceReport {
 }
 
 /// Check an attestation against the OpenFab v0.1 profile. `require_signoff` reflects
-/// the spec's `human_signoff_required`.
-pub fn check(att: &Attestation, require_signoff: bool) -> ConformanceReport {
+/// the spec's `human_signoff_required`. `observed_acceptance` is `Some(all_passed)`
+/// ONLY when the caller re-executed the embedded acceptance contract itself; `None`
+/// means attest-only, where the producer's `acceptance_passed` bit is reported as a
+/// claim, never as a machine result (issue 44).
+pub fn check(
+    att: &Attestation,
+    require_signoff: bool,
+    observed_acceptance: Option<bool>,
+) -> ConformanceReport {
     let mut r = ConformanceReport {
         conformant: true,
+        mode: match observed_acceptance {
+            Some(_) => VerifyMode::ChecksExecuted,
+            None => VerifyMode::AttestOnly,
+        },
         checks: vec![],
     };
     let p = &att.statement;
@@ -116,11 +142,26 @@ pub fn check(att: &Attestation, require_signoff: bool) -> ConformanceReport {
         }
     }
 
+    // C11 is a property of the BYTES: the producer signed the claim. It is never a
+    // machine result — from the file alone all it settles is that the producer
+    // signed the word true (issue 44; spec rev 0.1.2 self-report MUST).
     r.push(
-        "C11.machine-acceptance",
+        "C11.acceptance-claimed",
         pred.acceptance_passed,
-        "machine acceptance recorded as passed".to_string(),
+        format!(
+            "producer asserts acceptance_passed = {}, not re-executed by this verifier",
+            pred.acceptance_passed
+        ),
     );
+    // C12 is reachable ONLY when this verifier executed the contract itself —
+    // never from the file alone (spec rev 0.1.2 verdict-mode MUST).
+    if let Some(observed) = observed_acceptance {
+        r.push(
+            "C12.acceptance-observed",
+            observed,
+            format!("this verifier re-executed the embedded contract: all_passed = {observed}"),
+        );
+    }
 
     r
 }
@@ -160,14 +201,14 @@ mod tests {
     #[test]
     fn well_formed_attestation_is_conformant_without_signoff() {
         let fab = Identity::generate("fab").unwrap();
-        let r = check(&att(&fab), false);
+        let r = check(&att(&fab), false, None);
         assert!(r.conformant, "{:?}", r.checks);
     }
 
     #[test]
     fn missing_signoff_fails_when_required() {
         let fab = Identity::generate("fab").unwrap();
-        let r = check(&att(&fab), true);
+        let r = check(&att(&fab), true, None);
         assert!(!r.conformant);
         assert!(r
             .checks
@@ -176,12 +217,34 @@ mod tests {
     }
 
     #[test]
+    fn attest_only_reports_claim_not_machine_fact() {
+        // Issue 44: without execution, C11 is the producer's claim, C12 unreachable,
+        // and the report says which mode produced the verdict.
+        let fab = Identity::generate("fab").unwrap();
+        let r = check(&att(&fab), false, None);
+        assert_eq!(r.mode, VerifyMode::AttestOnly);
+        let c11 = r.checks.iter().find(|c| c.id == "C11.acceptance-claimed").unwrap();
+        assert!(c11.detail.contains("not re-executed by this verifier"));
+        assert!(!r.checks.iter().any(|c| c.id.starts_with("C12")));
+    }
+
+    #[test]
+    fn executed_mode_adds_observed_check() {
+        let fab = Identity::generate("fab").unwrap();
+        let r = check(&att(&fab), false, Some(true));
+        assert_eq!(r.mode, VerifyMode::ChecksExecuted);
+        assert!(r.checks.iter().any(|c| c.id == "C12.acceptance-observed" && c.passed));
+        let failed = check(&att(&fab), false, Some(false));
+        assert!(!failed.conformant, "observed failure must fail conformance");
+    }
+
+    #[test]
     fn signoff_present_is_conformant() {
         let fab = Identity::generate("fab").unwrap();
         let alice = Identity::generate("alice").unwrap();
         let mut a = att(&fab);
         a.add_signoff(&alice).unwrap();
-        let r = check(&a, true);
+        let r = check(&a, true, None);
         assert!(r.conformant, "{:?}", r.checks);
     }
 }

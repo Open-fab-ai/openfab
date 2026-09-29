@@ -590,7 +590,7 @@ fn cmd_verify(repo: &Path, run: &str) -> Result<()> {
         );
     }
     println!(
-        "\nConformance: {}    Trust gate: {}    Merged: {}",
+        "\nConformance: {} (mode: attest-only — acceptance is the producer's self-report)    Trust gate: {}    Merged: {}",
         yn(out.conformant),
         yn(out.accepted),
         yn(out.merged)
@@ -599,8 +599,9 @@ fn cmd_verify(repo: &Path, run: &str) -> Result<()> {
         bail!("artifact is NOT conformant to the OpenFab profile");
     }
     println!(
-        "✅ verify passed: signatures valid, attribution recorded, acceptance + sign-off present."
+        "✅ verify passed: signatures valid, attribution recorded, acceptance claimed + sign-off present."
     );
+    println!("   (to re-execute the acceptance contract, use `openfab reproduce` / `verify-file --run-checks`)");
     Ok(())
 }
 

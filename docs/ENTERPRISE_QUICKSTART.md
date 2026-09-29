@@ -24,8 +24,9 @@ openfab verify-file --repo ./checkout --att provenance/<spec>-v1.att.json
 ```
 
 The output of step 1 — `provenance/<spec>-vN.att.json` — **is** the portable proof.
-Commit it next to the code. Anyone can re-establish integrity, authenticity, and
-conformance from that file alone.
+Commit it next to the code. Anyone can re-establish integrity and authenticity from
+that file alone — and, by explicitly opting in to re-executing the embedded contract
+(`--run-checks`), conformance too.
 
 ---
 
@@ -42,13 +43,15 @@ The attestation is a DSSE-style signed envelope wrapping an
 | `agent` | the base + **model** that produced the code, and its `did:key` |
 | `prompt_sha256` | fingerprint of the generation prompt (text is deliberately *not* stored) |
 | `acceptance[]` | the **frozen acceptance contract** — the exact shell checks, embedded so anyone can re-run them |
-| `acceptance_passed` | did the machine contract pass in the sandbox |
+| `acceptance_passed` | the producer's record of whether the contract passed in the **producer's** sandbox at build time — a self-report until a verifier re-executes the checks |
 | `signoffs[]` | the recorded human sign-offs (the N-of-M gate) |
 | `signatures[]` | ed25519 signatures (the fab key + each human approver) bound to the file digests |
 
 Because the acceptance contract travels *inside* the signed attestation,
-verification is **forge-agnostic and server-less**: `openfab verify-file` re-runs
-the checks and re-verifies the signatures from any clone, with no OpenFab service.
+verification is **forge-agnostic and server-less**: `openfab verify-file` verifies
+the signatures and file digests from any clone with no OpenFab service, and with
+`--run-checks` also re-runs the embedded checks (an explicit opt-in — they are
+producer-supplied commands and execute as your user).
 
 ---
 
@@ -154,8 +157,11 @@ openfab verify-file --repo ./checkout --att provenance/fee-rounding-v1.att.json
 This, from a bare clone with no OpenFab service:
 
 1. recomputes each file `sha256` → **integrity**,
-2. verifies the ed25519 signatures against their `did:key` → **authenticity**,
-3. re-runs the embedded acceptance checks → **conformance**.
+2. verifies the ed25519 signatures against their `did:key` → **authenticity**, and
+   reports the producer's `acceptance_passed` as a **self-report**;
+3. only with `--run-checks`: re-runs the embedded acceptance checks → **conformance**
+   (opt-in — a valid signature proves a check is the one that was signed, not that it
+   is safe to run).
 
 That is the difference between "trust us, the AI did it well" and a signed proof a
 third party can re-check years later — the evidence regimes like the EU CRA

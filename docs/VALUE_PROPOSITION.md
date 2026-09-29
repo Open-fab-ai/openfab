@@ -244,8 +244,12 @@ command proves it from a bare clone:
 
 ```
 openfab verify-file --repo . --att provenance/<spec>-vN.att.json
+  → signatures valid · source bit-identical · acceptance_passed = true (producer self-report)
+  → ✅ attest-only verification passed — verified offline, no .openfab/ run-state
+
+openfab verify-file --repo . --att provenance/<spec>-vN.att.json --run-checks
   → signatures valid · source bit-identical · 4/4 embedded checks re-passed
-  → ✅ reproducible — verified offline, no .openfab/ run-state
+  → ✅ reproducible — contract re-executed by THIS verifier (opt-in)
 ```
 
 ### 7.2 Forge-**swappable** plumbing (the lesser sense)

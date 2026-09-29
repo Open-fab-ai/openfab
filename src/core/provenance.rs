@@ -63,6 +63,73 @@ pub fn assisted_by_id(base: &str, model: &str) -> String {
     format!("{base}:{model}")
 }
 
+// TODO(R4 split): the rev 0.1.5 attribution/trailer guards below belong in a
+// predicate-validation module beside core/canonical.rs; move in a refactor session.
+
+/// Parse a `generated[].lines` range: `"N"` or `"A-B"`, 1-based inclusive, A <= B
+/// (normative as of spec rev 0.1.5).
+fn parse_line_range(lines: &str) -> Result<(u64, u64)> {
+    let (a, b) = match lines.split_once('-') {
+        Some((a, b)) => (a, b),
+        None => (lines, lines),
+    };
+    let (a, b): (u64, u64) = (a.parse()?, b.parse()?);
+    if a == 0 || b < a {
+        bail!("invalid line range '{lines}' (1-based, start <= end)");
+    }
+    Ok((a, b))
+}
+
+/// F7 (spec rev 0.1.5): attribution ranges for one path MUST NOT overlap — otherwise
+/// the attestation claims a line as both ai- and human-authored and each reader picks
+/// one. Enforced at build (producers must not emit) and at verify (verifiers reject).
+pub fn validate_generated_ranges(gen: &[GeneratedRange]) -> Result<()> {
+    let mut by_path: std::collections::BTreeMap<&str, Vec<(u64, u64)>> = Default::default();
+    for g in gen {
+        let r = parse_line_range(&g.lines)
+            .with_context(|| format!("generated range for '{}'", g.path))?;
+        by_path.entry(&g.path).or_default().push(r);
+    }
+    for (path, mut ranges) in by_path {
+        ranges.sort();
+        for w in ranges.windows(2) {
+            if w[1].0 <= w[0].1 {
+                bail!(
+                    "overlapping attribution ranges for '{path}': {}-{} and {}-{} (refused per spec rev 0.1.5)",
+                    w[0].0, w[0].1, w[1].0, w[1].1
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// F8 (spec rev 0.1.5): a verifier GIVEN a commit's `Assisted-by:` trailer lines MUST
+/// compare them against the attestation — a trailer naming a model the attestation
+/// does not, or a tool it does not, is a disagreement and MUST fail verification.
+/// Each line is `AGENT_NAME:MODEL_VERSION [tool ...]` (the `Assisted-by:` prefix may
+/// be included or already stripped).
+pub fn check_assisted_by(agent: &Agent, trailers: &[String]) -> Result<()> {
+    for line in trailers {
+        let line = line.trim();
+        let line = line.strip_prefix("Assisted-by:").unwrap_or(line).trim();
+        let mut toks = line.split_whitespace();
+        let id = toks.next().context("empty Assisted-by trailer")?;
+        match &agent.id {
+            Some(a) if a == id => {}
+            Some(a) => bail!("Assisted-by trailer names '{id}' but the attestation records '{a}' (mismatch, spec rev 0.1.5)"),
+            None => bail!("Assisted-by trailer given but the attestation records no agent.id (mismatch, spec rev 0.1.5)"),
+        }
+        for tool in toks {
+            let known = agent.tools.as_deref().unwrap_or(&[]);
+            if !known.iter().any(|t| t == tool) {
+                bail!("Assisted-by trailer lists tool '{tool}' absent from the attestation's agent.tools (mismatch, spec rev 0.1.5)");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One file (or line range) and who authored it — the attribution unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneratedRange {
@@ -181,6 +248,7 @@ pub struct GenerationInput {
 impl Attestation {
     /// Build and sign a generation attestation with the fab identity.
     pub fn build_and_sign(input: GenerationInput, fab: &Identity) -> Result<Attestation> {
+        validate_generated_ranges(&input.generated).context("refusing to sign (F7)")?;
         let predicate = OpenfabGeneration {
             spec_ref: input.spec_ref,
             builder: Builder {
@@ -260,6 +328,9 @@ impl Attestation {
     /// each human sign-off covers the statement state at the moment they signed.
     pub fn verify_signatures(&self) -> Result<VerifiedSigners> {
         use crate::core::canonical::statement_preimage;
+        // Overlapping attribution ranges make the ai/human claim ambiguous — refuse
+        // before any signature work (F7, spec rev 0.1.5).
+        validate_generated_ranges(&self.statement.predicate.generated)?;
         // Preimages come from the RAW parsed statement when we have one (F4): the
         // received bytes are authoritative, and a typed round-trip must never be
         // able to drop what was — or was not — signed. In-process attestations
@@ -594,5 +665,52 @@ mod tests {
             assert_eq!(v.fab.len(), 1, "{file}: expected one fab signature");
             assert_eq!(v.humans.len(), signoffs, "{file}: sign-off count");
         }
+    }
+
+    #[test]
+    fn overlapping_ranges_refused() {
+        // F7 (rev 0.1.5): one path, one line, two authors — ambiguous, refused.
+        let g = |path: &str, lines: &str, author: &str| GeneratedRange {
+            path: path.into(),
+            lines: lines.into(),
+            sha256: "00".into(),
+            author: author.into(),
+        };
+        // Disjoint (touching but not overlapping) ranges are fine; so are single lines
+        // and the same range on different paths.
+        assert!(validate_generated_ranges(&[
+            g("a.py", "1-10", "human"),
+            g("a.py", "11-20", "ai"),
+            g("a.py", "21", "ai"),
+            g("b.py", "1-10", "ai"),
+        ])
+        .is_ok());
+        // Overlap on one path is refused, whichever order the entries come in.
+        assert!(validate_generated_ranges(&[g("a.py", "10-20", "ai"), g("a.py", "20-30", "human")]).is_err());
+        assert!(validate_generated_ranges(&[g("a.py", "5-9", "ai"), g("a.py", "1-30", "human")]).is_err());
+        // Malformed ranges cannot be proven non-overlapping — refused.
+        assert!(validate_generated_ranges(&[g("a.py", "9-5", "ai")]).is_err());
+        assert!(validate_generated_ranges(&[g("a.py", "all", "ai")]).is_err());
+        assert!(validate_generated_ranges(&[g("a.py", "0-3", "ai")]).is_err());
+    }
+
+    #[test]
+    fn assisted_by_trailer_cross_check() {
+        // F8 (rev 0.1.5): a trailer, once given, must agree with the attestation.
+        let agent = Agent {
+            did: "did:key:zTest".into(),
+            base: "claude-cli".into(),
+            model: "claude-3-opus".into(),
+            id: Some("claude-cli:claude-3-opus".into()),
+            tools: Some(vec!["sparse".into()]),
+        };
+        let ok = |t: &str| check_assisted_by(&agent, &[t.to_string()]);
+        assert!(ok("claude-cli:claude-3-opus").is_ok());
+        assert!(ok("Assisted-by: claude-cli:claude-3-opus sparse").is_ok());
+        assert!(ok("claude-cli:other-model").is_err(), "different model must fail");
+        assert!(ok("claude-cli:claude-3-opus coccinelle").is_err(), "unrecorded tool must fail");
+        let no_id = Agent { id: None, ..agent };
+        assert!(check_assisted_by(&no_id, &["x:y".to_string()]).is_err(), "trailer without agent.id must fail");
+        assert!(check_assisted_by(&no_id, &[]).is_ok(), "no trailer given: nothing to compare");
     }
 }

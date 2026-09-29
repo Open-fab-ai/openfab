@@ -1,4 +1,4 @@
-# OpenFab Generation Predicate — v0.1 (rev 0.1.4)
+# OpenFab Generation Predicate — v0.1 (rev 0.1.5)
 
 **Predicate type URI:** `https://open-fab.ai/attestation/generation/v0.1`
 
@@ -37,6 +37,16 @@ human-readable + machine-readable definition of the predicate. This is that defi
 > as authoritative and refuse duplicate object member names. Signed conformance
 > vectors from both reference implementations, with published test keys, are
 > committed under `docs/vectors/`.
+>
+> **rev 0.1.5 (tightening, non-breaking for conforming attestations):** adopts the
+> two remaining community findings (F7/F8 of the conformance-suite review).
+> `generated[].lines` ranges for one path MUST NOT overlap — an overlap claims a
+> line as both ai- and human-authored — and the range format is normative
+> (`"N"` or `"A-B"`, 1-based inclusive); verifiers refuse overlapping or malformed
+> ranges. The `Assisted-by:` cross-check is raised from MAY to **MUST when a
+> trailer is given**: a verifier presented with a commit's trailer lines must
+> compare them against `agent.id`/`agent.tools`, and a disagreement fails
+> verification. No previously conforming attestation is invalidated.
 
 ---
 
@@ -163,7 +173,7 @@ is a permanent, machine-checked property rather than a one-time observation.
 | `agent` | `{did, base, model, id?, tools?}` | the agent identity (`did:key`), base, and **model** that generated the code. `id` (rev 0.1.1, RECOMMENDED) is the canonical **`AGENT_NAME:MODEL_VERSION`** identifier per the Linux-kernel `Assisted-by:` convention adopted by OpenSSF TIs; `tools` (optional) lists tools the agent used |
 | `prompt_sha256` | hex | **sha256 fingerprint** of the generation prompt (the prompt *text* is deliberately NOT included — see below) |
 | `params` | object | generation parameters (base, model, …) |
-| `generated` | `[{path, lines, sha256, author}]` | per-file / per-range **human-vs-AI attribution** (`author` ∈ `"ai" \| "human"`) + content digest. **Note:** `author` records *generation origin* — which process produced these bytes — not a claim of legal authorship or copyright (which requires human creative activity) |
+| `generated` | `[{path, lines, sha256, author}]` | per-file / per-range **human-vs-AI attribution** (`author` ∈ `"ai" \| "human"`) + content digest. `lines` is `"N"` or `"A-B"` (1-based, inclusive, start ≤ end); ranges for one `path` **MUST NOT overlap** (rev 0.1.5) — an overlap would claim a line as both machine-generated and human-written — and verifiers MUST refuse overlapping or malformed ranges. **Note:** `author` records *generation origin* — which process produced these bytes — not a claim of legal authorship or copyright (which requires human creative activity) |
 | `materials` | `[{uri, sha256?}]` | context/material inputs that fed generation |
 | `acceptance_passed` | bool | did the machine acceptance contract pass |
 | `acceptance` | `[{id, check, must_pass, passed}]` | the **frozen acceptance contract** — the exact shell checks, embedded so anyone can re-run them from a bare clone (forge-agnostic verify) |
@@ -219,8 +229,13 @@ Normative guidance:
   — the kernel's multi-model rule.
 - Implementations **SHOULD NOT** use `Co-authored-by:` for AI involvement — it implies
   authorship, which copyright law reserves for human creative activity.
-- Verifiers **MAY** cross-check trailer vs. attestation: a mismatch, or a trailer with
-  no corresponding attestation where policy expects one, is itself a review signal.
+- A verifier **given** a commit's `Assisted-by:` trailer lines **MUST** compare them
+  against the attestation (rev 0.1.5, previously MAY): each trailer's identifier must
+  equal `agent.id` and its tool list must be recorded in `agent.tools`; a disagreement
+  **fails verification**. A trailer with no corresponding attestation where policy
+  expects one is itself a review signal. (Obtaining the trailer is out of scope — the
+  attestation is forge-agnostic and carries no commit reference; the requirement binds
+  a verifier that has both.)
 
 ## What is deliberately NOT in the predicate
 
@@ -260,4 +275,5 @@ Signature validity and digest integrity never imply execution safety.
 
 Reference implementation: `openfab verify-file --att <path>` verifies signatures +
 digests by default and reports the self-report; `--run-checks` opts in to executing
-the contract (rev 0.1.2).
+the contract (rev 0.1.2); `--trailer "<Assisted-by line>"` (repeatable) supplies
+commit trailers for the mandatory cross-check (rev 0.1.5).

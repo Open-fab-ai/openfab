@@ -197,7 +197,7 @@ code. This is a design task, not an implementation task, yet.
   (R8) before extending it.
 - **`attest` follow-ups (from the R13 review).** (a) registry guard test:
   `assert!(build_base("attest").is_err())`; (b) a failed-acceptance-stays-blocked test.
-  Also, `attest` records `author: ai` (no per-line human/AI mix, no claimed-vs-observed
+  Also, `attest` records `author: ai` (no per-line human/AI mix, no self-reported-vs-re-executed
   distinction) and requires committed files — revisit if enterprises ask.
 - **Native base / live forge — untested against real servers.**
   `base_framework::dispatch_native` and the `forge_rest` PR path are implemented but not

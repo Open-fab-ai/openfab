@@ -53,18 +53,18 @@ impl ConformanceReport {
 }
 
 /// Check an attestation against the OpenFab v0.1 profile. `require_signoff` reflects
-/// the spec's `human_signoff_required`. `observed_acceptance` is `Some(all_passed)`
+/// the spec's `human_signoff_required`. `reexecuted_acceptance` is `Some(all_passed)`
 /// ONLY when the caller re-executed the embedded acceptance contract itself; `None`
 /// means attest-only, where the producer's `acceptance_passed` bit is reported as a
 /// claim, never as a machine result (issue 44).
 pub fn check(
     att: &Attestation,
     require_signoff: bool,
-    observed_acceptance: Option<bool>,
+    reexecuted_acceptance: Option<bool>,
 ) -> ConformanceReport {
     let mut r = ConformanceReport {
         conformant: true,
-        mode: match observed_acceptance {
+        mode: match reexecuted_acceptance {
             Some(_) => VerifyMode::ChecksExecuted,
             None => VerifyMode::AttestOnly,
         },
@@ -155,11 +155,11 @@ pub fn check(
     );
     // C12 is reachable ONLY when this verifier executed the contract itself —
     // never from the file alone (spec rev 0.1.2 verdict-mode MUST).
-    if let Some(observed) = observed_acceptance {
+    if let Some(reexecuted) = reexecuted_acceptance {
         r.push(
-            "C12.acceptance-observed",
-            observed,
-            format!("this verifier re-executed the embedded contract: all_passed = {observed}"),
+            "C12.acceptance-re-executed",
+            reexecuted,
+            format!("this verifier re-executed the embedded contract: all_passed = {reexecuted}"),
         );
     }
 
@@ -229,13 +229,13 @@ mod tests {
     }
 
     #[test]
-    fn executed_mode_adds_observed_check() {
+    fn executed_mode_adds_reexecuted_check() {
         let fab = Identity::generate("fab").unwrap();
         let r = check(&att(&fab), false, Some(true));
         assert_eq!(r.mode, VerifyMode::ChecksExecuted);
-        assert!(r.checks.iter().any(|c| c.id == "C12.acceptance-observed" && c.passed));
+        assert!(r.checks.iter().any(|c| c.id == "C12.acceptance-re-executed" && c.passed));
         let failed = check(&att(&fab), false, Some(false));
-        assert!(!failed.conformant, "observed failure must fail conformance");
+        assert!(!failed.conformant, "re-executed failure must fail conformance");
     }
 
     #[test]
